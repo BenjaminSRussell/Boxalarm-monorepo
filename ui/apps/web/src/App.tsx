@@ -14,8 +14,8 @@ const AuthCallbackPage = lazy(() =>
 const LandingPage = lazy(() =>
   import('./pages/LandingPage').then((mod) => ({ default: mod.LandingPage })),
 );
-const PlaceholderPage = lazy(() =>
-  import('./pages/PlaceholderPage').then((mod) => ({ default: mod.PlaceholderPage })),
+const ReportingPage = lazy(() =>
+  import('./features/reporting/ReportingPage').then((mod) => ({ default: mod.ReportingPage })),
 );
 const ApparatusListPage = lazy(() =>
   import('./features/apparatus/ApparatusListPage').then((mod) => ({
@@ -147,10 +147,6 @@ function roleGuarded(element: ReactNode) {
   return <RequireRole>{element}</RequireRole>;
 }
 
-function placeholder(title: string) {
-  return roleGuarded(<PlaceholderPage title={title} />);
-}
-
 export function App() {
   return (
     <ConfigErrorBoundary>
@@ -199,7 +195,7 @@ export function App() {
                   <Route path="inspections/map" element={roleGuarded(<MapPage />)} />
                   <Route path="inspections" element={roleGuarded(<InspectionsPage />)} />
                   <Route path="schedule" element={roleGuarded(<SchedulePage />)} />
-                  <Route path="reporting" element={placeholder('Reporting')} />
+                  <Route path="reporting" element={roleGuarded(<ReportingPage />)} />
                   <Route path="settings" element={roleGuarded(<SettingsPage />)} />
                   <Route path="settings/losap" element={roleGuarded(<LosapSettingsPage />)} />
                   <Route path="audit-log" element={roleGuarded(<AuditLogPage />)} />
