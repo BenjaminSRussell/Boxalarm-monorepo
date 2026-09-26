@@ -25,6 +25,13 @@ describe('routeTable', () => {
     expect(firstGrantedNavPath(['MEMBER'])).toBeNull();
   });
 
+  test('every role can reach its own notification inbox, which stays out of PrimaryNav', () => {
+    for (const role of ['MEMBER', 'OFFICER', 'TRAINING', 'APPARATUS', 'ADMIN', 'CHIEF'] as const) {
+      expect(canAccessPath('/notifications', [role])).toBe(true);
+      expect(routesForRoles([role]).map((r) => r.navPath)).not.toContain('/notifications');
+    }
+  });
+
   test('canAccessPath enforces role grants including param routes', () => {
     expect(canAccessPath('/settings', ['ADMIN'])).toBe(true);
     expect(canAccessPath('/settings', ['CHIEF'])).toBe(false);

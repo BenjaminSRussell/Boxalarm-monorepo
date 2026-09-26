@@ -177,6 +177,15 @@ export const APP_ROUTES: readonly AppRoute[] = [
     showInNav: false,
   },
   {
+    // Every role's own inbox. Reached from the top-bar bell, not PrimaryNav, so MEMBER still
+    // has no domain nav routes.
+    path: '/notifications',
+    navPath: '/notifications',
+    label: 'Notifications',
+    roles: ['MEMBER', 'OFFICER', 'TRAINING', 'APPARATUS', 'ADMIN', 'CHIEF'],
+    showInNav: false,
+  },
+  {
     path: '/audit-log',
     navPath: '/audit-log',
     label: 'Audit log',

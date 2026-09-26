@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
+import { NotificationBell } from '../features/notifications/NotificationBell';
 import { ToastProvider } from './ui/Toast';
 import { DemoBanner } from './DemoBanner';
 import { LiveRegionProvider } from './LiveRegion';
@@ -29,7 +30,7 @@ export function AppShell() {
         <div className={styles.shell}>
           <PrimaryNav />
           <NavDrawer open={navOpen} onOpenChange={setNavOpen} />
-          <TopBar onOpenNav={() => setNavOpen(true)} />
+          <TopBar onOpenNav={() => setNavOpen(true)} notifications={<NotificationBell />} />
           <div className={styles.main}>
             {/* Keyed by path so navigating to a different route also recovers a tripped
                 boundary, not just its own "Try again" button. Each page owns its own <main

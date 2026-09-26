@@ -32,6 +32,7 @@ import type {
   RetentionConfig,
 } from '../features/platform/types';
 import { tryHandleLosapExtras } from '../features/losap/demoFixtures';
+import { tryHandleNotificationExtras } from '../features/notifications/demoFixtures';
 import { tryHandlePersonnelExtras } from '../features/personnel/demoFixtures';
 import { tryHandleScheduleExtras } from '../features/schedule/demoFixtures';
 import type { ApiRequestOptions, ProblemDetails } from './apiClient';
@@ -652,7 +653,8 @@ export async function demoRequest(
   const extras =
     tryHandleScheduleExtras(parts, method, body) ??
     tryHandlePersonnelExtras(parts, method, body) ??
-    tryHandleLosapExtras(parts, method, body);
+    tryHandleLosapExtras(parts, method, body) ??
+    tryHandleNotificationExtras(parts, method, body);
   if (extras) return extras;
 
   return problem(404, 'Not found');

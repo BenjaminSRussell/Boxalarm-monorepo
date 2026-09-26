@@ -112,6 +112,12 @@ const IncidentDetailPage = lazy(() =>
   })),
 );
 
+const NotificationsPage = lazy(() =>
+  import('./features/notifications/NotificationsPage').then((mod) => ({
+    default: mod.NotificationsPage,
+  })),
+);
+
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
 });
@@ -203,6 +209,7 @@ export function App() {
                   <Route path="settings" element={roleGuarded(<SettingsPage />)} />
                   <Route path="settings/losap" element={roleGuarded(<LosapSettingsPage />)} />
                   <Route path="audit-log" element={roleGuarded(<AuditLogPage />)} />
+                  <Route path="notifications" element={roleGuarded(<NotificationsPage />)} />
                 </Route>
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
