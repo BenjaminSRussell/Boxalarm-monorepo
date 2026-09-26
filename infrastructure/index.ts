@@ -514,6 +514,8 @@ export const reporting = new Reporting("reporting", {
   incidentCmkArn: incidentTable.cmkArn,
   deliveryBaselineFunctionName: routesOps.deliveryBaseline.lambda.function.name,
   deliveryBaselineFunctionArn: routesOps.deliveryBaseline.lambda.function.arn,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
   chiefNotificationTopicArn: chiefNotificationTopic.topicArn,
   policyStoreArn: policyStore.policyStoreArn,
   policyStoreId: policyStore.policyStoreId,

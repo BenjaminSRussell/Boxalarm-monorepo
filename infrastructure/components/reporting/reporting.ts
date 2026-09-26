@@ -6,6 +6,7 @@ import { IamPolicyStatement } from "../observability/observability-policy";
 import { HttpApi } from "../api/http-api";
 import { verifiedPermissionsPolicyStatement } from "../authz/policy-store";
 import { auditMutationDenyStatement } from "../data/platform-table";
+import { QueueConsumer } from "../messaging/queue-consumer";
 import { lambdaCode, LAMBDA_HANDLER } from "../shared/lambda-code";
 import { requireEnv } from "../shared/env";
 
@@ -25,6 +26,9 @@ export interface ReportingArgs {
    */
   deliveryBaselineFunctionName: pulumi.Input<string>;
   deliveryBaselineFunctionArn: pulumi.Input<string>;
+  /** LOB bus the rollup projection consumer subscribes to (E7-S2, #248). */
+  platformBusName: pulumi.Input<string>;
+  platformBusArn: pulumi.Input<string>;
   /** Export and cutover-write alarms go to the chief, as platform export's do. */
   chiefNotificationTopicArn: pulumi.Input<string>;
   policyStoreArn: pulumi.Input<string>;
@@ -47,6 +51,26 @@ const REPORTING_METRICS_NAMESPACE = "Boxalarm/ReportingService";
 export const REPORT_TIMEOUT_SECONDS = 25;
 /** The export worker renders a whole report off the request path (invoked async). */
 export const EXPORT_WORKER_TIMEOUT_SECONDS = 300;
+
+/**
+ * Every detail-type projections/events.ts's PROJECTION_EVENT_TYPES folds into the
+ * REPORTING_ROLLUP items the dashboard reads. The outbox drain publishes DetailType =
+ * eventType, so the rule matches on detail-type; the handler unwraps `detail` itself.
+ * (test/reporting/wiring.test.ts asserts this list against the backend source.)
+ */
+export const PROJECTION_EVENT_TYPES = [
+  "personnel.attendance.recorded",
+  "personnel.member.updated",
+  "personnel.member.created",
+  "personnel.availability.changed",
+  "neris.incident.submitted",
+  "neris.submission.failed",
+  "training.expiry.due",
+  "cert.expiry.due",
+  "apparatus.out_of_service",
+  "apparatus.defect.reported",
+  "scheduling.coverage_gap.detected",
+] as const;
 
 /** Query-only, no dynamodb:Scan — every reporting route reads GSIs on the platform table. */
 const QUERY_STATEMENT = (tableArn: pulumi.Input<string>) =>
@@ -96,6 +120,8 @@ export class Reporting extends pulumi.ComponentResource {
   public readonly exportLambda: ServiceLambda;
   public readonly cutoverDecisionGetLambda: ServiceLambda;
   public readonly cutoverDecisionPostLambda: ServiceLambda;
+  public readonly projectionsLambda: ServiceLambda;
+  public readonly projectionsConsumer: QueueConsumer;
   public readonly exportInvokedAlarm: aws.cloudwatch.MetricAlarm;
   public readonly exportFailedAlarm: aws.cloudwatch.MetricAlarm;
   public readonly exportWorkerErrorsAlarm: aws.cloudwatch.MetricAlarm;
@@ -184,6 +210,51 @@ export class Reporting extends pulumi.ComponentResource {
       "membership-trends",
       "GET /api/v1/reporting/membership-trends",
       this.membershipTrendsLambda,
+    );
+
+    // projections/repository.ts: one TransactWriteItems per event — a conditional Put of
+    // the EVENT_DEDUP marker, then Update/Delete of REPORTING_ROLLUP items and the META row.
+    // Each transact item is authorized as its own PutItem/UpdateItem/DeleteItem.
+    this.projectionsLambda = new ServiceLambda(
+      `${name}-projections`,
+      {
+        env,
+        serviceName: "reporting-service",
+        functionName: `boxalarm-${env}-reporting-projections`,
+        handler: LAMBDA_HANDLER,
+        code: lambdaCode("reporting-service", "projections"),
+        logGroup: args.logGroup,
+        timeout: 30,
+        environment: { PLATFORM_SERVICE_TABLE_NAME: args.platformTableName },
+        additionalPolicyStatements: pulumi.output(args.platformTableArn).apply((tableArn) => [
+          {
+            Sid: "RollupProjectionWrite",
+            Effect: "Allow" as const,
+            Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+            Resource: tableArn,
+          },
+          auditMutationDenyStatement(tableArn),
+        ]),
+      },
+      { parent: this },
+    );
+    // Queue/DLQ names from projections/constants.ts; maxReceiveCount within its 3-5 range.
+    // The DLQ-depth alarm is QueueConsumer's; the handler returns batchItemFailures.
+    this.projectionsConsumer = new QueueConsumer(
+      `${name}-projections-consumer`,
+      {
+        env,
+        busName: args.platformBusName,
+        busArn: args.platformBusArn,
+        ruleName: `boxalarm-${env}-reporting-projections`,
+        eventPattern: JSON.stringify({ "detail-type": [...PROJECTION_EVENT_TYPES] }),
+        queueName: `boxalarm-${env}-reporting-projection-queue`,
+        lambda: this.projectionsLambda.function,
+        lambdaRole: this.projectionsLambda.role,
+        maxReceiveCount: 5,
+        reportBatchItemFailures: true,
+      },
+      { parent: this },
     );
 
     // dashboard/repository.ts: one base-table Query on DEPT#{d}#REPORTING_ROLLUP.
@@ -559,6 +630,7 @@ export class Reporting extends pulumi.ComponentResource {
       losapYearEndLambda: this.losapYearEndLambda,
       grantsLambda: this.grantsLambda,
       membershipTrendsLambda: this.membershipTrendsLambda,
+      projectionsLambda: this.projectionsLambda,
       dashboardLambda: this.dashboardLambda,
       responseTimesLambda: this.responseTimesLambda,
       isoLambda: this.isoLambda,
