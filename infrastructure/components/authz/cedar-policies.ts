@@ -29,6 +29,13 @@ export const ADMIN_ONLY_ACTIONS = [
   "UpdateRetentionConfig",
   "UpdateMember",
   "RevokeSession",
+  // reporting-service (P1 #8): CSV/PDF export of a named report (export/handler.ts) and
+  // the N1.9 cutover accept/defer write (cutoverDecision/post.ts). Export sits with
+  // ExportData — CLAUDE.md: "Export and destructive actions are gated by Cedar role check
+  // alone" — and the cutover gate is the chief's life-safety sign-off (#40 AC3), so both
+  // are CHIEF/ADMIN, not the officer tier that may read the reports themselves.
+  "ExportReport",
+  "RecordCutoverDecision",
 ] as const;
 export const ADMIN_ONLY_GROUPS = ["CHIEF", "ADMIN"] as const;
 
@@ -72,6 +79,21 @@ export const OFFICER_TIER_ACTIONS = [
   "ViewExpiringCertifications",
   "ViewIsoTrainingReport",
   "ViewRosterTrainingHours",
+  // reporting-service read routes (P1 #8). Every one is `Cognito(admin)` in the
+  // architecture route table (docs/architecture.md:390-396), and :274 defines that as
+  // "a Verified Permissions check requiring chief/admin/officer role" — the same tier as
+  // training's ViewIsoTrainingReport, which the route table also marks Cognito(admin).
+  "ViewOperationalDashboard",
+  "GetLosapYearEnd",
+  "ViewIsoReport",
+  "ViewGrantsReport",
+  "ViewResponseTimes",
+  "ViewMembershipTrends",
+  "ViewCutoverDecision",
+  // alerting-service delivery-baseline (E1-S15). GET /api/v1/reporting/cutover-decision
+  // forwards the caller's token to this Lambda (cutoverDecision/deliveryBaseline.ts), so
+  // without it the cutover report's delivery figures were an implicit DENY → 503.
+  "ViewDeliveryBaseline",
 ] as const;
 export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as const;
 
@@ -94,6 +116,21 @@ export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as 
 // destructive actions are gated by Cedar role check alone." Department isolation is
 // enforced where CLAUDE.md says it lives — dept-scoped DynamoDB keys built from the
 // verified JWT (buildDeptScopedPk) — not duplicated here.
+// Every reporting action (and the delivery baseline it reads) is department-wide: each
+// handler's resourceId is the caller's verified deptId, sent as Boxalarm::Department.
+export const REPORTING_DEPARTMENT_ACTIONS = [
+  "ViewOperationalDashboard",
+  "GetLosapYearEnd",
+  "ViewIsoReport",
+  "ViewGrantsReport",
+  "ViewResponseTimes",
+  "ViewMembershipTrends",
+  "ViewCutoverDecision",
+  "RecordCutoverDecision",
+  "ExportReport",
+  "ViewDeliveryBaseline",
+] as const;
+
 export const CEDAR_SCHEMA = JSON.stringify({
   Boxalarm: {
     entityTypes: {
@@ -164,6 +201,12 @@ export const CEDAR_SCHEMA = JSON.stringify({
       ListPendingShiftSwaps: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
       },
+      ...Object.fromEntries(
+        REPORTING_DEPARTMENT_ACTIONS.map((action) => [
+          action,
+          { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
+        ]),
+      ),
     },
   },
 });

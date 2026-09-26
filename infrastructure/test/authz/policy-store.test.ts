@@ -307,6 +307,131 @@ describe("PolicyStore", () => {
     });
   });
 
+  // P1 #8: every reporting handler's actionId, evaluated against the real schema and the
+  // policies PolicyStore deploys. Before this, none of them was declared, so even the three
+  // already-deployed reporting routes were an implicit DENY for every caller.
+  describe("reporting-service actions", () => {
+    const dept = { type: "Boxalarm::Department", id: "dept-1" };
+    const READS = [
+      "ViewOperationalDashboard",
+      "GetLosapYearEnd",
+      "ViewIsoReport",
+      "ViewGrantsReport",
+      "ViewResponseTimes",
+      "ViewMembershipTrends",
+      "ViewCutoverDecision",
+      "ViewDeliveryBaseline",
+    ];
+    const ADMIN_WRITES = ["ExportReport", "RecordCutoverDecision"];
+
+    async function decideAll(group: string, action: string): Promise<string> {
+      const {
+        CEDAR_SCHEMA,
+        adminActionsPolicy,
+        viewConfigPolicy,
+        selfServiceActionsPolicy,
+        officerTierActionsPolicy,
+      } = await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const groupId = `pool-1|${group}`;
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "pool-1|user-1" },
+        action: { type: "Boxalarm::Action", id: action },
+        resource: dept,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        // All four deployed policies together, as the store evaluates them.
+        policies: {
+          staticPolicies: [
+            adminActionsPolicy("pool-1"),
+            viewConfigPolicy("pool-1"),
+            selfServiceActionsPolicy("pool-1"),
+            officerTierActionsPolicy("pool-1"),
+          ].join("\n"),
+        },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "pool-1|user-1" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: groupId }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: groupId }, attrs: {}, parents: [] },
+          { uid: dept, attrs: {}, parents: [] },
+        ],
+        validateRequest: true,
+      });
+      expect(result.type).toBe("success");
+      return result.type === "success" ? result.response.decision : "error";
+    }
+
+    it("declares every reporting action in the schema against Boxalarm::Department", async () => {
+      const { CEDAR_SCHEMA } = await import("../../components/authz/cedar-policies");
+      const actions = (
+        JSON.parse(CEDAR_SCHEMA) as {
+          Boxalarm: {
+            actions: Record<string, { appliesTo: { resourceTypes: string[] } }>;
+          };
+        }
+      ).Boxalarm.actions;
+      for (const action of [...READS, ...ADMIN_WRITES]) {
+        expect(actions[action]?.appliesTo.resourceTypes, action).toEqual(["Department"]);
+      }
+    });
+
+    it.each(["OFFICER", "TRAINING", "CHIEF", "ADMIN"])(
+      "ALLOWs %s every reporting read",
+      async (group) => {
+        for (const action of READS) {
+          expect(await decideAll(group, action), action).toBe("allow");
+        }
+      },
+    );
+
+    it.each(["MEMBER", "APPARATUS"])("DENYs %s every reporting read", async (group) => {
+      for (const action of READS) {
+        expect(await decideAll(group, action), action).toBe("deny");
+      }
+    });
+
+    it.each(["CHIEF", "ADMIN"])("ALLOWs %s export and the cutover decision", async (group) => {
+      for (const action of ADMIN_WRITES) {
+        expect(await decideAll(group, action), action).toBe("allow");
+      }
+    });
+
+    it.each(["OFFICER", "TRAINING", "MEMBER", "APPARATUS"])(
+      "DENYs %s export and the cutover decision",
+      async (group) => {
+        for (const action of ADMIN_WRITES) {
+          expect(await decideAll(group, action), action).toBe("deny");
+        }
+      },
+    );
+  });
+
+  it("every action any policy grants is declared in the schema (no silent implicit DENY)", async () => {
+    const {
+      CEDAR_SCHEMA,
+      ADMIN_ONLY_ACTIONS,
+      VIEW_ACTIONS,
+      SELF_SERVICE_ACTIONS,
+      OFFICER_TIER_ACTIONS,
+    } = await import("../../components/authz/cedar-policies");
+    const declared = Object.keys(
+      (JSON.parse(CEDAR_SCHEMA) as { Boxalarm: { actions: Record<string, unknown> } }).Boxalarm
+        .actions,
+    );
+    for (const action of [
+      ...ADMIN_ONLY_ACTIONS,
+      ...VIEW_ACTIONS,
+      ...SELF_SERVICE_ACTIONS,
+      ...OFFICER_TIER_ACTIONS,
+    ]) {
+      expect(declared, action).toContain(action);
+    }
+  });
+
   it("sets principalEntityType so Cognito principals resolve to Boxalarm::User", async () => {
     const store = await build();
     const principalEntityType = await resolve(store.identitySource.principalEntityType);
