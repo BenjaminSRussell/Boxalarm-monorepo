@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import {
   Decision,
   IsAuthorizedWithTokenCommand,
@@ -74,7 +74,7 @@ beforeEach(() => {
 // — the same discipline packages/authz's own guard.test.ts uses for the wrapper itself.
 describe('createHydrantInner (business logic, AC1)', () => {
   it('creates a hydrant and returns 201 with GSI2/GSI3 keys populated', async () => {
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     const result = (await createHydrantInner(buildEvent({ body: validBody }), validPrincipal)) as {
       statusCode: number;
       body: string;
@@ -122,7 +122,7 @@ describe('createHydrantInner (business logic, AC1)', () => {
   });
 
   it('fails closed with 503 when DynamoDB is unavailable (never a defaulted success)', async () => {
-    ddbMock.on(PutCommand).rejects(new Error('simulated outage'));
+    ddbMock.on(TransactWriteCommand).rejects(new Error('simulated outage'));
     const result = (await createHydrantInner(buildEvent({ body: validBody }), validPrincipal)) as {
       statusCode: number;
     };
@@ -170,7 +170,7 @@ describe('handler (Cedar-authorized entrypoint)', () => {
 
   it('creates a hydrant (201) when Cedar allows the caller', async () => {
     vpMock.on(IsAuthorizedWithTokenCommand).resolves({ decision: Decision.ALLOW });
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     const result = (await handler(
       buildEvent({
         body: validBody,

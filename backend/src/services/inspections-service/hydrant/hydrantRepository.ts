@@ -1,8 +1,10 @@
+import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
-  ConditionalCheckFailedException,
-  TransactionCanceledException,
-} from '@aws-sdk/client-dynamodb';
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+  BatchGetCommand,
+  GetCommand,
+  QueryCommand,
+  TransactWriteCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { buildDeptScopedPk } from '@boxalarm/dept-scope';
 import type { VerifiedDeptId } from '@boxalarm/dept-scope';
 import { buildOutboxRecord } from '@boxalarm/outbox';
@@ -51,6 +53,13 @@ export interface UpdateHydrantInput {
   readonly nextFlowTestDue?: string;
 }
 
+// architecture.md §3.3: GSI3's non-geo DEPT#{deptId}#HYDRANT partition is the department
+// hydrant list. The METADATA item's gsi3 pair is its GEO bucket (map retrieval), so the list
+// key rides on this per-hydrant index item instead.
+const HYDRANT_LIST_SK = 'LIST';
+const BATCH_GET_MAX_KEYS = 100;
+const BATCH_GET_MAX_ATTEMPTS = 5;
+
 export class HydrantAlreadyExistsError extends Error {
   constructor(hydrantId: string) {
     super(`hydrant "${hydrantId}" already exists`);
@@ -89,22 +98,98 @@ export async function createHydrant(
     updatedAt: now,
   };
 
+  const listIndexItem = {
+    pk: item.pk,
+    sk: HYDRANT_LIST_SK,
+    entityType: 'HYDRANT_LIST_INDEX',
+    hydrantId: input.hydrantId,
+    gsi3pk: buildDeptScopedPk(deptId, 'HYDRANT'),
+    gsi3sk: input.hydrantId,
+  };
+
   try {
     await getDocumentClient().send(
-      new PutCommand({
-        TableName: tableName,
-        Item: item,
-        ConditionExpression: 'attribute_not_exists(pk)',
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: tableName,
+              Item: item,
+              ConditionExpression: 'attribute_not_exists(pk)',
+            },
+          },
+          { Put: { TableName: tableName, Item: listIndexItem } },
+        ],
       }),
     );
   } catch (error) {
-    if (error instanceof ConditionalCheckFailedException) {
+    if (
+      error instanceof TransactionCanceledException &&
+      error.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed'
+    ) {
       throw new HydrantAlreadyExistsError(input.hydrantId);
     }
     throw error;
   }
 
   return item;
+}
+
+/**
+ * Every hydrant in the caller's department, ordered by hydrantId: a GSI3 Query over the list
+ * partition for the ids, then BatchGetItem on the METADATA rows (never a stale copy).
+ */
+export async function listHydrants(deptId: VerifiedDeptId): Promise<readonly HydrantRecord[]> {
+  const { tableName } = readHydrantTableConfig(process.env);
+  const client = getDocumentClient();
+
+  const hydrantIds: string[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await client.send(
+      new QueryCommand({
+        TableName: tableName,
+        IndexName: 'GSI3',
+        KeyConditionExpression: 'gsi3pk = :gsi3pk',
+        ExpressionAttributeValues: { ':gsi3pk': buildDeptScopedPk(deptId, 'HYDRANT') },
+        ProjectionExpression: 'hydrantId',
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const entry of page.Items ?? []) {
+      if (typeof entry.hydrantId === 'string') {
+        hydrantIds.push(entry.hydrantId);
+      }
+    }
+    exclusiveStartKey = page.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  const byId = new Map<string, HydrantRecord>();
+  for (let start = 0; start < hydrantIds.length; start += BATCH_GET_MAX_KEYS) {
+    let keys: Record<string, unknown>[] = hydrantIds
+      .slice(start, start + BATCH_GET_MAX_KEYS)
+      .map((hydrantId) => ({
+        pk: buildDeptScopedPk(deptId, 'HYDRANT', hydrantId),
+        sk: HYDRANT_SK,
+      }));
+    for (let attempt = 1; keys.length > 0; attempt += 1) {
+      if (attempt > BATCH_GET_MAX_ATTEMPTS) {
+        throw new Error(`BatchGetItem left ${keys.length} hydrant keys unprocessed`);
+      }
+      const output = await client.send(
+        new BatchGetCommand({ RequestItems: { [tableName]: { Keys: keys } } }),
+      );
+      for (const hydrant of (output.Responses?.[tableName] ?? []) as unknown as HydrantRecord[]) {
+        byId.set(hydrant.hydrantId, hydrant);
+      }
+      keys = (output.UnprocessedKeys?.[tableName]?.Keys ?? []) as Record<string, unknown>[];
+    }
+  }
+
+  return hydrantIds.flatMap((hydrantId) => {
+    const hydrant = byId.get(hydrantId);
+    return hydrant ? [hydrant] : [];
+  });
 }
 
 export async function updateHydrant(
