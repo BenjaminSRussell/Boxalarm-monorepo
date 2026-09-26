@@ -45,6 +45,19 @@ function decodeCursor(cursor: string | undefined): Record<string, unknown> | und
   }
 }
 
+// The member-facing shape: never the raw item, whose pk/sk/gsi1 keys and ttl are storage
+// details (and the pk embeds the dept scope).
+function toInboxEntry(item: Record<string, unknown>): Record<string, unknown> {
+  return {
+    notificationId: item.notificationId,
+    category: item.category,
+    summary: item.summary,
+    items: item.items ?? [],
+    createdAt: item.createdAt,
+    readAt: item.readAt ?? null,
+  };
+}
+
 async function listNotifications(
   event: GuardEvent,
   principal: CedarPrincipalContext,
@@ -72,7 +85,7 @@ async function listNotifications(
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        items: result.Items ?? [],
+        items: (result.Items ?? []).map(toInboxEntry),
         nextCursor: encodeCursor(result.LastEvaluatedKey as Record<string, unknown> | undefined),
       }),
     };

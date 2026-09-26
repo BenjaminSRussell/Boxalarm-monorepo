@@ -164,6 +164,49 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     expect(dynamoSend).not.toHaveBeenCalled();
   });
 
+  it('GET /api/v1/notifications returns only the member-facing fields, never storage keys', async () => {
+    send.mockResolvedValue({ decision: Decision.ALLOW });
+    const dynamoSend = vi.fn().mockResolvedValue({
+      Items: [
+        {
+          pk: 'DEPT#NICHOLS#MEMBER#MBR-1',
+          sk: 'NOTIF#MBR-1#1#NOTIF-1',
+          gsi1pk: 'DEPT#NICHOLS#MEMBER#MBR-1',
+          gsi1sk: 'NOTIFICATION#NOTIF-1',
+          ttl: 123,
+          entityType: 'NOTIFICATION',
+          memberId: 'MBR-1',
+          notificationId: 'NOTIF-1',
+          category: 'cert-expiry',
+          summary: '1 item expiring',
+          items: [{ certId: 'CERT-1', expiryDate: '2027-01-10' }],
+          createdAt: 1,
+          readAt: null,
+        },
+      ],
+    });
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const result = (await handler(buildEvent('GET /api/v1/notifications', undefined))) as {
+      statusCode: number;
+      body: string;
+    };
+
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body) as { items: Record<string, unknown>[] };
+    expect(body.items).toEqual([
+      {
+        notificationId: 'NOTIF-1',
+        category: 'cert-expiry',
+        summary: '1 item expiring',
+        items: [{ certId: 'CERT-1', expiryDate: '2027-01-10' }],
+        createdAt: 1,
+        readAt: null,
+      },
+    ]);
+  });
+
   it('the Lambda entry point dispatches POST /api/v1/notifications/{id}/read to mark-read', async () => {
     send.mockResolvedValue({ decision: Decision.ALLOW });
     const dynamoSend = vi
