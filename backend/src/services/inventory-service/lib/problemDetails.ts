@@ -1,5 +1,3 @@
-import type { AuthorizerContext } from '../../platform-service/authorizer/handler.js';
-
 export class ProblemError extends Error {
   readonly status: number;
   readonly title: string;
@@ -19,12 +17,6 @@ export class ValidationError extends ProblemError {
   }
 }
 
-export class ForbiddenError extends ProblemError {
-  constructor(detail: string) {
-    super(403, 'Forbidden', detail);
-  }
-}
-
 export class NotFoundError extends ProblemError {
   constructor(detail: string) {
     super(404, 'Not Found', detail);
@@ -34,16 +26,6 @@ export class NotFoundError extends ProblemError {
 export class DependencyUnavailableError extends ProblemError {
   constructor(detail: string) {
     super(500, 'Dependency Unavailable', detail);
-  }
-}
-
-const ADMIN_GROUPS = new Set(['ADMIN', 'CHIEF', 'OFFICER']);
-
-// TODO: E8-S3 — replace this cognito:groups check with Cedar IsAuthorizedWithToken
-export function requireAdminGroup(context: AuthorizerContext): void {
-  const groups = context['cognito:groups'].split(' ').filter((group) => group.length > 0);
-  if (!groups.some((group) => ADMIN_GROUPS.has(group))) {
-    throw new ForbiddenError('caller lacks an admin-equivalent role (ADMIN, CHIEF, or OFFICER)');
   }
 }
 
