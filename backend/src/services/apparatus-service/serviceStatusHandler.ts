@@ -105,8 +105,8 @@ async function updateServiceStatus(
 }
 
 export const handler = withAuthorization(updateServiceStatus, {
-  actionType: 'Apparatus',
+  actionType: 'Boxalarm::Action',
   actionId: 'UpdateServiceStatus',
-  resourceType: 'Apparatus',
+  resourceType: 'Boxalarm::Apparatus',
   resourceId: (event) => event.pathParameters?.unitId ?? '',
 });

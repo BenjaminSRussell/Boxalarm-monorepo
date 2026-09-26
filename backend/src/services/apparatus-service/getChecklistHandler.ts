@@ -99,8 +99,8 @@ async function getChecklist(
 }
 
 export const handler = withAuthorization(getChecklist, {
-  actionType: 'Apparatus',
+  actionType: 'Boxalarm::Action',
   actionId: 'GetChecklist',
-  resourceType: 'Apparatus',
+  resourceType: 'Boxalarm::Apparatus',
   resourceId: (event) => event.pathParameters?.unitId ?? '',
 });
