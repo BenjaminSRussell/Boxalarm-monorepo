@@ -275,7 +275,21 @@ describe("PolicyStore", () => {
       expect(decide("UpdateMember")).toBe("deny");
     });
 
+    // The riding-board assign route was deployed with an action the schema didn't declare,
+    // so every seat assignment was an implicit DENY.
+    const ridingBoard = { type: "Boxalarm::RidingBoard", id: "dispatch-1" };
+
+    it.each(["OFFICER", "CHIEF", "TRAINING", "ADMIN"])(
+      "ALLOWs %s to assign a riding position",
+      async (group) => {
+        expect(await decideFor(group, "AssignRidingPosition", ridingBoard, "officer")).toBe(
+          "allow",
+        );
+      },
+    );
+
     it.each(["MEMBER", "APPARATUS"])("DENYs %s on officer-tier actions", async (group) => {
+      expect(await decideFor(group, "AssignRidingPosition", ridingBoard, "officer")).toBe("deny");
       expect(await decideFor(group, "UpdateQuals", member, "officer")).toBe("deny");
       expect(await decideFor(group, "RevokeCertification", member, "officer")).toBe("deny");
       expect(await decideFor(group, "ViewRosterTrainingHours", dept, "officer")).toBe("deny");

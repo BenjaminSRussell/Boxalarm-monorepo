@@ -259,8 +259,8 @@ async function postAssignment(
 }
 
 export const assignRidingPositionHandler = withAuthorization(postAssignment, {
-  actionType: 'RidingBoard',
+  actionType: 'Boxalarm::Action',
   actionId: 'AssignRidingPosition',
-  resourceType: 'RidingBoard',
+  resourceType: 'Boxalarm::RidingBoard',
   resourceId: (event) => event.pathParameters?.dispatchId ?? '',
 });

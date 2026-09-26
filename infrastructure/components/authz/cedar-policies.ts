@@ -72,6 +72,9 @@ export const OFFICER_TIER_ACTIONS = [
   "ViewExpiringCertifications",
   "ViewIsoTrainingReport",
   "ViewRosterTrainingHours",
+  // PRD §personas: the officer makes riding assignments. ridingBoard/handler.ts
+  // (assignRidingPositionHandler) sends this against Boxalarm::RidingBoard.
+  "AssignRidingPosition",
 ] as const;
 export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as const;
 
@@ -105,6 +108,7 @@ export const CEDAR_SCHEMA = JSON.stringify({
       ShiftSwapRequest: {},
       TrainingEvent: {},
       TrainingReport: {},
+      RidingBoard: {},
     },
     actions: {
       ViewConfig: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
@@ -163,6 +167,9 @@ export const CEDAR_SCHEMA = JSON.stringify({
       },
       ListPendingShiftSwaps: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
+      },
+      AssignRidingPosition: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["RidingBoard"] },
       },
     },
   },
