@@ -113,6 +113,7 @@ describe("index.ts production wiring", () => {
       "boxalarm-infra:voiceWebhookSecret": "test-voice-secret",
       "boxalarm-infra:pushWebhookSecret": "test-push-secret",
       "boxalarm-infra:canaryMemberId": "test-canary-member",
+      "boxalarm-infra:notificationSesFromAddress": "notifications@boxalarm.example",
     });
   });
 

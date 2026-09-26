@@ -32,6 +32,8 @@ import { Events as TrainingEvents } from "./components/training/events";
 import { Hours as TrainingHours } from "./components/training/hours";
 import { Reports as TrainingReports } from "./components/training/reports";
 import { Transcript as TrainingTranscript } from "./components/training/transcript";
+import { Inbox as NotificationInbox } from "./components/notification/inbox";
+import { Digest as NotificationDigest } from "./components/notification/digest";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -71,6 +73,11 @@ export const deptId = config.require("deptId");
 // #246's own scope note). Required config, set out-of-band per env once
 // that pipeline exists, rather than a guessed literal.
 export const nerisSchemaSourceUrl = config.require("nerisSchemaSourceUrl");
+// Verified SES sender for notification-service's email digests (e.g.
+// notifications@<dept domain>). Required, not defaulted: without it every digest
+// send throws and no reminder ever reaches the inbox. SES identity verification (and
+// production access) is out-of-band per env.
+export const notificationSesFromAddress = config.require("notificationSesFromAddress");
 
 // #180 / #6: base identity + pre-token-generation trigger that puts
 // custom:deptId on the ACCESS token for the shared authorizer.
@@ -340,6 +347,33 @@ export const trainingTranscript = new TrainingTranscript("training-transcript", 
   policyStoreId: policyStore.policyStoreId,
   logGroup: trainingLogGroup,
   httpApi,
+});
+
+// notification-service (architecture.md §1.1 service 10): LOB-plane in-app inbox,
+// preferences, and the cert-expiry -> daily digest chain that fills the inbox. Entities
+// live on the platform table; shares no queue, concurrency reservation, topic or
+// provider with the alerting plane.
+const notificationLogGroup = serviceLogGroupByName["notification-service"];
+
+export const notificationInbox = new NotificationInbox("notification-inbox", {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: notificationLogGroup,
+  httpApi,
+});
+
+export const notificationDigest = new NotificationDigest("notification-digest", {
+  env,
+  deptId,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+  sesFromAddress: notificationSesFromAddress,
+  logGroup: notificationLogGroup,
 });
 
 export const platformConfig = new PlatformConfig("platform-config", {
