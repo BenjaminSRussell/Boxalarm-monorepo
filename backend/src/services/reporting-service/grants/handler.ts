@@ -83,8 +83,8 @@ async function getGrantsReport(
 }
 
 export const handler = withAuthorization(getGrantsReport, {
-  actionType: 'Reporting',
+  actionType: 'Boxalarm::Action',
   actionId: 'ViewGrantsReport',
-  resourceType: 'Reporting',
+  resourceType: 'Boxalarm::Department',
   resourceId: (event) => event.requestContext.authorizer?.lambda?.deptId ?? '',
 });
