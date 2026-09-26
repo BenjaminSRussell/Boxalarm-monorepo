@@ -213,6 +213,8 @@ describe("PolicyStore", () => {
       const [self, officer] = await Promise.all([
         resolve(store.selfServiceActionsPolicy.definition),
         resolve(store.officerTierActionsPolicy.definition),
+        resolve(store.alertingMemberActionsPolicy.definition),
+        resolve(store.alertingOfficerActionsPolicy.definition),
       ]);
       expect(self?.static?.statement).toContain('UserGroup::"pool-1|MEMBER"');
       expect(self?.static?.statement).not.toContain('UserGroup::"MEMBER"');
@@ -439,6 +441,76 @@ describe("PolicyStore", () => {
       expect(write?.static?.statement).not.toContain('"pool-1|MEMBER"');
       expect(write?.static?.statement).not.toContain('UserGroup::"CHIEF"');
     });
+  });
+
+  // Every alerting + push-token action was undeclared, so STRICT validation failed them all.
+  describe("alerting policies (every-role and chief/admin/officer)", () => {
+    async function decide(
+      group: string,
+      action: string,
+      resource: { type: string; id: string },
+    ): Promise<string> {
+      const { CEDAR_SCHEMA, alertingMemberActionsPolicy, alertingOfficerActionsPolicy } =
+        await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const groupId = `pool-1|${group}`;
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "pool-1|user-1" },
+        action: { type: "Boxalarm::Action", id: action },
+        resource,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        policies: {
+          staticPolicies: `${alertingMemberActionsPolicy("pool-1")}\n${alertingOfficerActionsPolicy("pool-1")}`,
+        },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "pool-1|user-1" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: groupId }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: groupId }, attrs: {}, parents: [] },
+          { uid: resource, attrs: {}, parents: [] },
+        ],
+      });
+      expect(result.type).toBe("success");
+      return result.type === "success" ? result.response.decision : "error";
+    }
+
+    const dispatch = { type: "Boxalarm::Dispatch", id: "NICHOLS-1" };
+    const member = { type: "Boxalarm::Member", id: "user-1" };
+    const dept = { type: "Boxalarm::Department", id: "NICHOLS" };
+
+    it.each(["MEMBER", "OFFICER", "TRAINING", "APPARATUS", "CHIEF", "ADMIN"])(
+      "ALLOWs %s to respond, see the roster, self-test and register a push token",
+      async (group) => {
+        expect(await decide(group, "RecordResponse", dispatch)).toBe("allow");
+        expect(await decide(group, "ViewRoster", dispatch)).toBe("allow");
+        expect(await decide(group, "SelfTestAlertPath", member)).toBe("allow");
+        expect(await decide(group, "RegisterPushToken", member)).toBe("allow");
+        expect(await decide(group, "ViewAlertDetail", dept)).toBe("allow");
+      },
+    );
+
+    it.each(["OFFICER", "CHIEF", "ADMIN"])(
+      "ALLOWs %s on manual dispatch, receipts and the audit log",
+      async (group) => {
+        expect(await decide(group, "SubmitManualDispatch", dept)).toBe("allow");
+        expect(await decide(group, "GetDeliveryReceipts", dispatch)).toBe("allow");
+        expect(await decide(group, "ViewAlertingAuditLog", dept)).toBe("allow");
+      },
+    );
+
+    it.each(["MEMBER", "TRAINING", "APPARATUS"])(
+      "DENYs %s manual dispatch, receipts and the audit log",
+      async (group) => {
+        expect(await decide(group, "SubmitManualDispatch", dept)).toBe("deny");
+        expect(await decide(group, "GetDeliveryReceipts", dispatch)).toBe("deny");
+        expect(await decide(group, "ViewAlertingAuditLog", dept)).toBe("deny");
+        expect(await decide(group, "ViewDiagnostics", dispatch)).toBe("deny");
+      },
+    );
   });
 
   it("sets principalEntityType so Cognito principals resolve to Boxalarm::User", async () => {
