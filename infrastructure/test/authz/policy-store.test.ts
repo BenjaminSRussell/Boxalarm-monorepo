@@ -281,6 +281,61 @@ describe("PolicyStore", () => {
       expect(await decideFor(group, "ViewRosterTrainingHours", dept, "officer")).toBe("deny");
     });
 
+    // notification-service inbox + preferences: own-record self-service for every role.
+    const notification = { type: "Boxalarm::Notification", id: "notif-1" };
+    const NOTIFICATION_ACTIONS: [string, { type: string; id: string }][] = [
+      ["ViewOwnNotifications", member],
+      ["MarkNotificationRead", notification],
+      ["ViewOwnNotificationPreferences", member],
+      ["UpdateOwnNotificationPreferences", member],
+    ];
+
+    it.each(["MEMBER", "OFFICER", "TRAINING", "APPARATUS", "ADMIN", "CHIEF"])(
+      "ALLOWs %s every notification inbox/preferences action",
+      async (group) => {
+        for (const [action, resource] of NOTIFICATION_ACTIONS) {
+          expect(await decideFor(group, action, resource, "self"), action).toBe("allow");
+        }
+      },
+    );
+
+    it("DENYs notification actions to a principal in no Boxalarm role group", async () => {
+      for (const [action, resource] of NOTIFICATION_ACTIONS) {
+        expect(await decideFor("SOME_OTHER_GROUP", action, resource, "self"), action).toBe("deny");
+      }
+    });
+
+    it("DENYs notification actions under the officer-tier policy alone (they live only in self-service)", async () => {
+      for (const [action, resource] of NOTIFICATION_ACTIONS) {
+        expect(await decideFor("CHIEF", action, resource, "officer"), action).toBe("deny");
+      }
+    });
+
+    it("DENYs a notification action whose ids use the bare group name (the pre-fix form)", async () => {
+      const { CEDAR_SCHEMA, selfServiceActionsPolicy } =
+        await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "u" },
+        action: { type: "Boxalarm::Action", id: "ViewOwnNotifications" },
+        resource: member,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        policies: { staticPolicies: selfServiceActionsPolicy("pool-1") },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "u" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: "MEMBER" }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: "MEMBER" }, attrs: {}, parents: [] },
+          { uid: member, attrs: {}, parents: [] },
+        ],
+      });
+      expect(result.type === "success" && result.response.decision).toBe("deny");
+    });
+
     it("DENYs a MEMBER whose group id is the bare name (the pre-fix form)", async () => {
       const { CEDAR_SCHEMA, selfServiceActionsPolicy } =
         await import("../../components/authz/cedar-policies");
