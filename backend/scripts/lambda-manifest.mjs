@@ -472,4 +472,69 @@ export const LAMBDA_ENTRIES = [
     function: 'export-worker',
     entry: 'src/services/reporting-service/export/worker.ts',
   },
+  {
+    service: 'inspections-service',
+    function: 'occupancies-list',
+    entry: 'src/services/inspections-service/occupancy/listHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'occupancies-create',
+    entry: 'src/services/inspections-service/occupancy/createHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'occupancies-get',
+    entry: 'src/services/inspections-service/occupancy/getHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'occupancies-update',
+    entry: 'src/services/inspections-service/occupancy/updateHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'pre-plan-get',
+    entry: 'src/services/inspections-service/getPrePlanHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'pre-plan-put',
+    entry: 'src/services/inspections-service/putPrePlanHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'hydrants-list',
+    entry: 'src/services/inspections-service/hydrant/listHydrantsHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'hydrants-create',
+    entry: 'src/services/inspections-service/hydrant/createHydrantHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'hydrants-update',
+    entry: 'src/services/inspections-service/hydrant/updateHydrantHandler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'inspections-list',
+    entry: 'src/services/inspections-service/listInspections/handler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'inspections-record',
+    entry: 'src/services/inspections-service/recordInspection/handler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'map',
+    entry: 'src/services/inspections-service/map/handler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'field-capture',
+    entry: 'src/services/inspections-service/fieldCapture/handler.ts',
+  },
 ];
