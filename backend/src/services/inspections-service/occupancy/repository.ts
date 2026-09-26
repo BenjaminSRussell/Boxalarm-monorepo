@@ -1,5 +1,11 @@
 import { DynamoDBClient, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  BatchGetCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  QueryCommand,
+  TransactWriteCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { captureAWSv3Client } from 'aws-xray-sdk-core';
 import geohash from 'ngeohash';
 import { buildDeptScopedPk, toVerifiedDeptId } from '@boxalarm/dept-scope';
@@ -11,6 +17,12 @@ import type { CreateOccupancyInput, OccupancyContact, UpdateOccupancyInput } fro
 export class OccupancyNotFoundError extends Error {}
 
 const OCCUPANCY_SK = 'METADATA';
+// architecture.md §3.3: GSI3's non-geo DEPT#{deptId}#OCCUPANCY partition serves the
+// department occupancy list. The METADATA item's own gsi3 pair is taken by the GEO bucket,
+// so the list key rides on this per-occupancy index item (same pattern as ADDR#).
+const OCCUPANCY_LIST_SK = 'LIST';
+const BATCH_GET_MAX_KEYS = 100;
+const BATCH_GET_MAX_ATTEMPTS = 5;
 const GEOHASH5_PRECISION = 5;
 const GEOHASH8_PRECISION = 8;
 
@@ -59,6 +71,68 @@ export async function getOccupancyById(
     }),
   );
   return result.Item ? itemToRecord(result.Item) : undefined;
+}
+
+/**
+ * Every occupancy in the caller's department, ordered by normalized address: one GSI3 Query
+ * over the list partition for the ids, then BatchGetItem on the METADATA rows so the list is
+ * never staler than the record itself.
+ */
+export async function listOccupancies(
+  config: OccupancyServiceConfig,
+  principal: VerifiedPrincipal,
+): Promise<OccupancyRecord[]> {
+  const deptId = toVerifiedDeptId(principal);
+  const client = getDocumentClient();
+
+  const occupancyIds: string[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await client.send(
+      new QueryCommand({
+        TableName: config.tableName,
+        IndexName: 'GSI3',
+        KeyConditionExpression: 'gsi3pk = :gsi3pk',
+        ExpressionAttributeValues: { ':gsi3pk': buildDeptScopedPk(deptId, 'OCCUPANCY') },
+        ProjectionExpression: 'occupancyId',
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      if (typeof item.occupancyId === 'string') {
+        occupancyIds.push(item.occupancyId);
+      }
+    }
+    exclusiveStartKey = page.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  const byId = new Map<string, OccupancyRecord>();
+  for (let start = 0; start < occupancyIds.length; start += BATCH_GET_MAX_KEYS) {
+    let keys: Record<string, unknown>[] = occupancyIds
+      .slice(start, start + BATCH_GET_MAX_KEYS)
+      .map((occupancyId) => ({
+        pk: buildDeptScopedPk(deptId, 'OCCUPANCY', occupancyId),
+        sk: OCCUPANCY_SK,
+      }));
+    for (let attempt = 1; keys.length > 0; attempt += 1) {
+      if (attempt > BATCH_GET_MAX_ATTEMPTS) {
+        throw new Error(`BatchGetItem left ${keys.length} occupancy keys unprocessed`);
+      }
+      const output = await client.send(
+        new BatchGetCommand({ RequestItems: { [config.tableName]: { Keys: keys } } }),
+      );
+      for (const item of output.Responses?.[config.tableName] ?? []) {
+        const record = itemToRecord(item);
+        byId.set(record.occupancyId, record);
+      }
+      keys = (output.UnprocessedKeys?.[config.tableName]?.Keys ?? []) as Record<string, unknown>[];
+    }
+  }
+
+  return occupancyIds.flatMap((occupancyId) => {
+    const record = byId.get(occupancyId);
+    return record ? [record] : [];
+  });
 }
 
 function buildAuditItem(
@@ -131,6 +205,15 @@ export async function createOccupancy(
     gsi3sk: occupancyId,
   };
 
+  const listIndexItem = {
+    pk: buildDeptScopedPk(deptId, 'OCCUPANCY', occupancyId),
+    sk: OCCUPANCY_LIST_SK,
+    entityType: 'OCCUPANCY_LIST_INDEX',
+    occupancyId,
+    gsi3pk: buildDeptScopedPk(deptId, 'OCCUPANCY'),
+    gsi3sk: `${input.normalizedAddress}#${occupancyId}`,
+  };
+
   const auditItem = buildAuditItem(deptId, occupancyId, 'CREATE', actorId, {
     address: { old: null, new: input.address },
     occupancyType: { old: null, new: input.occupancyType },
@@ -150,6 +233,7 @@ export async function createOccupancy(
             },
           },
           { Put: { TableName: config.tableName, Item: addressIndexItem } },
+          { Put: { TableName: config.tableName, Item: listIndexItem } },
           {
             Put: {
               TableName: config.tableName,

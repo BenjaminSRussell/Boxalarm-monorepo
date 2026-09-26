@@ -18,6 +18,7 @@ import {
   OccupancyNotFoundError,
   createOccupancy,
   getOccupancyById,
+  listOccupancies,
   updateOccupancy,
 } from './repository.js';
 import type { OccupancyRecord } from './repository.js';
@@ -174,6 +175,34 @@ export const createOccupancyHandler: APIGatewayProxyHandlerV2WithLambdaAuthorize
     });
     emitOccupancyMetric('OccupancyCreated', 'Error');
     return toProblemResponse(500, 'Internal Server Error', 'Unable to create occupancy', traceId);
+  }
+};
+
+// Same authorization as getOccupancyHandler: architecture.md marks the occupancy list
+// `Cognito` (any authenticated member), and department isolation comes from the
+// dept-scoped GSI3 key built from the verified principal, not from Cedar.
+export const listOccupanciesHandler: APIGatewayProxyHandlerV2WithLambdaAuthorizer<
+  AuthorizerContext
+> = async (event) => {
+  const occupancyEvent = event as OccupancyEvent;
+  const traceId = occupancyEvent.requestContext.requestId;
+  const principal = getPrincipal(occupancyEvent);
+  if (!principal) {
+    return unauthorizedResponse(traceId);
+  }
+
+  try {
+    const records = await listOccupancies(readOccupancyServiceConfig(process.env), principal);
+    return {
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: records.map(toOccupancyResponseBody) }),
+    };
+  } catch (error) {
+    logStructuredError('occupancy.list.handler_failed', traceId, {
+      message: error instanceof Error ? error.message : undefined,
+    });
+    return toProblemResponse(503, 'Service Unavailable', 'Unable to list occupancies', traceId);
   }
 };
 

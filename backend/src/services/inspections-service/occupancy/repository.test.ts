@@ -2,7 +2,12 @@ import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { LocalstackContainer, type StartedLocalStackContainer } from '@testcontainers/localstack';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createOccupancy, getOccupancyById, updateOccupancy } from './repository.js';
+import {
+  createOccupancy,
+  getOccupancyById,
+  listOccupancies,
+  updateOccupancy,
+} from './repository.js';
 import type { OccupancyServiceConfig } from './config.js';
 import type { CreateOccupancyInput } from './validation.js';
 
@@ -183,6 +188,48 @@ describe('occupancy repository (real DynamoDB via LocalStack)', () => {
     );
     expect(raw.Item?.gsi3pk).toBeUndefined();
     expect(raw.Item?.gsi3sk).toBeUndefined();
+  });
+
+  it('lists every occupancy in the department by address from the GSI3 list partition, never another department', async () => {
+    const listDept = { deptId: `dept-list-${Date.now()}` };
+    const otherDept = { deptId: `dept-other-${Date.now()}` };
+    await createOccupancy(
+      config,
+      listDept,
+      'OCC-L2',
+      sampleCreateInput({ address: '9 Zeta St', normalizedAddress: '9 ZETA ST' }),
+      'MBR-0001',
+      'trace-l2',
+    );
+    const { latitude, longitude, ...noCoords } = sampleCreateInput({
+      address: '1 Alpha Rd',
+      normalizedAddress: '1 ALPHA RD',
+    });
+    void latitude;
+    void longitude;
+    await createOccupancy(config, listDept, 'OCC-L1', noCoords, 'MBR-0001', 'trace-l1');
+    await createOccupancy(config, otherDept, 'OCC-X', sampleCreateInput(), 'MBR-0001', 'trace-x');
+    await updateOccupancy(
+      config,
+      listDept,
+      'OCC-L2',
+      (await getOccupancyById(config, listDept, 'OCC-L2'))!,
+      { hazards: ['UPDATED'] },
+      'MBR-0001',
+      'trace-l2-update',
+    );
+
+    const listed = await listOccupancies(config, listDept);
+
+    expect(listed.map((record) => record.occupancyId)).toEqual(['OCC-L1', 'OCC-L2']);
+    // Read from METADATA, so an update is reflected immediately — not a stale copy.
+    expect(listed[1]?.hazards).toEqual(['UPDATED']);
+  });
+
+  it('returns an empty list for a department with no occupancies', async () => {
+    await expect(listOccupancies(config, { deptId: `dept-empty-${Date.now()}` })).resolves.toEqual(
+      [],
+    );
   });
 
   it('returns undefined for an occupancy that does not exist', async () => {
