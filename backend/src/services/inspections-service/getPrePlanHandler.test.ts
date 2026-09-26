@@ -63,12 +63,22 @@ describe('getPrePlanHandler', () => {
 
   it('returns 403 on a Cedar deny', async () => {
     const { createGetPrePlanHandler } = await import('./getPrePlanHandler.js');
-    const denyClient = {
-      send: vi.fn().mockResolvedValue({ decision: Decision.DENY }),
-    } as unknown as VerifiedPermissionsClient;
+    const denySend = vi.fn().mockResolvedValue({ decision: Decision.DENY });
+    const denyClient = { send: denySend } as unknown as VerifiedPermissionsClient;
     const wrapped = createGetPrePlanHandler(fakeDoc(vi.fn()), denyClient);
     const result = await wrapped(buildEvent());
     expect(result).toMatchObject({ statusCode: 403 });
+    const command = denySend.mock.calls[0]?.[0] as unknown as {
+      input: { action: unknown; resource: unknown };
+    };
+    expect(command.input.action).toEqual({
+      actionType: 'Boxalarm::Action',
+      actionId: 'GetPrePlan',
+    });
+    expect(command.input.resource).toEqual({
+      entityType: 'Boxalarm::Occupancy',
+      entityId: 'OCC-1',
+    });
   });
 
   it('returns 503 when Verified Permissions is unavailable', async () => {

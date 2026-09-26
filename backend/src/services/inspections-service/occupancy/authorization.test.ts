@@ -41,6 +41,27 @@ describe('assertOccupancyWriteAuthorized', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('asks for the namespace-qualified Boxalarm::Action WriteOccupancy on the occupancy', async () => {
+    const send = vi.fn().mockResolvedValue({ decision: 'ALLOW' });
+    mockVerifiedPermissionsClient(send);
+    const { assertOccupancyWriteAuthorized } = await import('./authorization.js');
+    await assertOccupancyWriteAuthorized(
+      { policyStoreId: POLICY_STORE_ID },
+      'token-abc',
+      'OCC-1',
+      'trace-1',
+    );
+    const command = send.mock.calls[0]?.[0] as { input: { action: unknown; resource: unknown } };
+    expect(command.input.action).toEqual({
+      actionType: 'Boxalarm::Action',
+      actionId: 'WriteOccupancy',
+    });
+    expect(command.input.resource).toEqual({
+      entityType: 'Boxalarm::Occupancy',
+      entityId: 'OCC-1',
+    });
+  });
+
   it('throws ForbiddenError when Verified Permissions returns DENY (AC4, 403)', async () => {
     mockVerifiedPermissionsClient(() => Promise.resolve({ decision: 'DENY' }));
     const { assertOccupancyWriteAuthorized, ForbiddenError } = await import('./authorization.js');

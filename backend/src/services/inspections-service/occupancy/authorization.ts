@@ -10,8 +10,9 @@ import type { OccupancyAuthorizationConfig } from './config.js';
 export class ForbiddenError extends Error {}
 export class ServiceUnavailableError extends Error {}
 
-// TODO: E8-S3 — action/resource-type literals are placeholders until the occupancy Cedar
-// policy schema ships; update to match the real schema once that ticket lands.
+// Namespace-qualified to match the Boxalarm Cedar schema (infrastructure/components/authz/
+// cedar-policies.ts) — an unqualified 'Action' type can never match a policy.
+const OCCUPANCY_ACTION_TYPE = 'Boxalarm::Action';
 const OCCUPANCY_WRITE_ACTION_ID = 'WriteOccupancy';
 const OCCUPANCY_RESOURCE_TYPE = 'Boxalarm::Occupancy';
 
@@ -35,7 +36,7 @@ export async function assertOccupancyWriteAuthorized(
       new IsAuthorizedWithTokenCommand({
         policyStoreId: config.policyStoreId,
         accessToken: bearerToken,
-        action: { actionType: 'Action', actionId: OCCUPANCY_WRITE_ACTION_ID },
+        action: { actionType: OCCUPANCY_ACTION_TYPE, actionId: OCCUPANCY_WRITE_ACTION_ID },
         resource: { entityType: OCCUPANCY_RESOURCE_TYPE, entityId: occupancyId },
       }),
     );

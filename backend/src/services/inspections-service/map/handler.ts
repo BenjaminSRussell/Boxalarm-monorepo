@@ -175,9 +175,9 @@ export function createHandler(
   deps: MapHandlerDeps = {},
 ): (event: GuardEvent) => Promise<APIGatewayProxyResultV2> {
   return withAuthorization((event, principal) => handleMapQuery(event, principal, deps.docClient), {
-    actionType: 'Action',
+    actionType: 'Boxalarm::Action',
     actionId: 'ViewInspectionsMap',
-    resourceType: 'InspectionsMap',
+    resourceType: 'Boxalarm::InspectionsMap',
     resourceId: (event) =>
       toVerifiedDeptId({ deptId: event.requestContext.authorizer.lambda?.deptId ?? '' }),
     ...(deps.authzClient ? { client: deps.authzClient } : {}),

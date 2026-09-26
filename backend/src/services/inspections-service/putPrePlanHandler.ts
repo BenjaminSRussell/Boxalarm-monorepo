@@ -240,9 +240,9 @@ export function createPutPrePlanHandler(
       }
     },
     {
-      actionType: 'Action',
-      actionId: 'inspections:UpdatePrePlan',
-      resourceType: 'Occupancy',
+      actionType: 'Boxalarm::Action',
+      actionId: 'UpdatePrePlan',
+      resourceType: 'Boxalarm::Occupancy',
       resourceId: occupancyIdFromPath,
       ...(authzClient ? { client: authzClient } : {}),
     },

@@ -92,9 +92,9 @@ export function createGetPrePlanHandler(
       }
     },
     {
-      actionType: 'Action',
-      actionId: 'inspections:GetPrePlan',
-      resourceType: 'Occupancy',
+      actionType: 'Boxalarm::Action',
+      actionId: 'GetPrePlan',
+      resourceType: 'Boxalarm::Occupancy',
       resourceId: occupancyIdFromPath,
       ...(authzClient ? { client: authzClient } : {}),
     },
