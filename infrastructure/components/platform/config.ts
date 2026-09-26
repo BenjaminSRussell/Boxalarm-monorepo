@@ -76,12 +76,12 @@ export class Config extends pulumi.ComponentResource {
 
     args.httpApi.route(
       `${name}-get-route`,
-      { routeKey: "GET /api/v1/platform/config", lambda: this.lambda },
+      { routeKey: "GET /api/v1/platform/config/{configType}", lambda: this.lambda },
       { parent: this },
     );
     args.httpApi.route(
       `${name}-put-route`,
-      { routeKey: "PUT /api/v1/platform/config", lambda: this.lambda },
+      { routeKey: "PUT /api/v1/platform/config/{configType}", lambda: this.lambda },
       { parent: this },
     );
 
