@@ -71,6 +71,7 @@ describe('publishDueEvent', () => {
     expect(detail.correlationId).toBe('trace-1');
     expect(detail.schemaVersion).toBe('1.0');
     expect(detail.payload).toEqual({
+      deptId: 'NICHOLS',
       memberId: 'MBR-0034',
       certId: 'CERT-0091',
       expiryDate: '2026-10-14',
