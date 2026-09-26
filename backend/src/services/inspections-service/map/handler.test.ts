@@ -131,6 +131,22 @@ describe('map handler', () => {
     expect(result).toMatchObject({ statusCode: 403 });
   });
 
+  it('asks Verified Permissions with the namespace-qualified Boxalarm action and resource types', async () => {
+    const { createHandler } = await import('./handler.js');
+    const send = vi.fn().mockResolvedValue({ decision: Decision.DENY });
+    const authzClient = { send } as unknown as VerifiedPermissionsClient;
+    await createHandler({ authzClient })(buildEvent(VALID_QUERY));
+
+    const command = send.mock.calls[0]?.[0] as {
+      input: { action: unknown; resource: { entityType: string } };
+    };
+    expect(command.input.action).toEqual({
+      actionType: 'Boxalarm::Action',
+      actionId: 'ViewInspectionsMap',
+    });
+    expect(command.input.resource.entityType).toBe('Boxalarm::InspectionsMap');
+  });
+
   it('returns 503 (fail-closed, never a defaulted allow) when Verified Permissions is unavailable', async () => {
     const { createHandler } = await import('./handler.js');
     const authzClient = {

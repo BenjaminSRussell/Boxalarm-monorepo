@@ -5,7 +5,7 @@ import type {
 } from 'aws-lambda';
 import { toVerifiedDeptId } from '@boxalarm/dept-scope';
 import type { AuthorizerContext } from '../../platform-service/authorizer/handler.js';
-import { queryHydrantsDueWithin } from './hydrantRepository.js';
+import { listHydrants, queryHydrantsDueWithin } from './hydrantRepository.js';
 import { problemResponse } from './httpProblem.js';
 import { logError } from './logger.js';
 
@@ -33,8 +33,10 @@ export const handler: APIGatewayProxyHandlerV2WithLambdaAuthorizer<AuthorizerCon
     return problemResponse(401, 'Unauthorized', 'request is missing a verified principal', traceId);
   }
 
+  // No dueBefore: the department's full hydrant list (the web Hydrants page). With
+  // dueBefore=YYYY-MM: the hydrants whose flow test falls due in that month (GSI2, F6.4).
   const dueBefore = event.queryStringParameters?.dueBefore;
-  if (!dueBefore || !YEAR_MONTH_PATTERN.test(dueBefore)) {
+  if (dueBefore !== undefined && !YEAR_MONTH_PATTERN.test(dueBefore)) {
     logError({
       event: 'hydrant.list.denied',
       correlationId,
@@ -45,7 +47,7 @@ export const handler: APIGatewayProxyHandlerV2WithLambdaAuthorizer<AuthorizerCon
     return problemResponse(
       400,
       'Invalid hydrant list query',
-      'dueBefore query parameter is required and must be YYYY-MM',
+      'dueBefore query parameter must be YYYY-MM when present',
       traceId,
     );
   }
@@ -53,7 +55,10 @@ export const handler: APIGatewayProxyHandlerV2WithLambdaAuthorizer<AuthorizerCon
   const deptId = toVerifiedDeptId(principal);
 
   try {
-    const hydrants = await queryHydrantsDueWithin(deptId, dueBefore);
+    const hydrants =
+      dueBefore === undefined
+        ? await listHydrants(deptId)
+        : await queryHydrantsDueWithin(deptId, dueBefore);
     return {
       statusCode: 200,
       headers: { 'content-type': 'application/json' },

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { withAuthorization, type GuardEvent } from '@boxalarm/authz';
 import { toVerifiedDeptId } from '@boxalarm/dept-scope';
 import { createDynamoClient, readInspectionsTableConfig } from './platformTable.js';
@@ -25,7 +24,6 @@ export function createGetPrePlanHandler(
   doc?: DynamoDBDocumentClient,
   authzClient?: VerifiedPermissionsClient,
   signer?: SignUrlFn,
-  secretsClient?: SecretsManagerClient,
 ): (event: GuardEvent) => Promise<APIGatewayProxyResultV2> {
   return withAuthorization<APIGatewayProxyResultV2>(
     async (event, principal) => {
@@ -42,18 +40,18 @@ export function createGetPrePlanHandler(
         }
         const needsSignedUrls =
           prePlan.siteDiagramS3Key !== null || prePlan.attachmentS3Keys.length > 0;
-        const assetsConfig = needsSignedUrls
-          ? await readAssetsConfig(process.env, secretsClient)
-          : undefined;
+        const assetsConfig = needsSignedUrls ? readAssetsConfig(process.env) : undefined;
         const siteDiagramUrl =
           assetsConfig && prePlan.siteDiagramS3Key
-            ? createSignedAssetUrl(assetsConfig, prePlan.siteDiagramS3Key, signer)
+            ? await createSignedAssetUrl(assetsConfig, prePlan.siteDiagramS3Key, signer)
             : undefined;
         const attachmentUrls = assetsConfig
-          ? prePlan.attachmentS3Keys.map((key) => ({
-              key,
-              url: createSignedAssetUrl(assetsConfig, key, signer),
-            }))
+          ? await Promise.all(
+              prePlan.attachmentS3Keys.map(async (key) => ({
+                key,
+                url: await createSignedAssetUrl(assetsConfig, key, signer),
+              })),
+            )
           : [];
         return {
           statusCode: 200,
@@ -92,9 +90,9 @@ export function createGetPrePlanHandler(
       }
     },
     {
-      actionType: 'Action',
-      actionId: 'inspections:GetPrePlan',
-      resourceType: 'Occupancy',
+      actionType: 'Boxalarm::Action',
+      actionId: 'GetPrePlan',
+      resourceType: 'Boxalarm::Occupancy',
       resourceId: occupancyIdFromPath,
       ...(authzClient ? { client: authzClient } : {}),
     },

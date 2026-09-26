@@ -5,13 +5,17 @@ import { STACK_CONFIG, installMocks, settleStack } from "./mock-harness";
 
 /**
  * Guards the backend manifest ↔ infra seam: a key typo on either side silently deploys the
- * fail-closed 501 placeholder (lambdaCode only logs a warning). Every alerting-service,
- * apparatus-service and inventory-service entry in backend/scripts/lambda-manifest.mjs must be wired by a
- * lambdaCode() call in the full stack, and every such lambdaCode() call must name a manifest
- * entry.
+ * fail-closed 501 placeholder (lambdaCode only logs a warning). Every entry of a guarded
+ * service in backend/scripts/lambda-manifest.mjs must be wired by a lambdaCode() call in the
+ * full stack, and every such lambdaCode() call must name a manifest entry.
  */
 
-const GUARDED_SERVICES = new Set(["alerting-service", "apparatus-service", "inventory-service"]);
+const GUARDED_SERVICES = new Set([
+  "alerting-service",
+  "apparatus-service",
+  "inventory-service",
+  "inspections-service",
+]);
 
 const { lambdaCodeCalls } = vi.hoisted(() => ({ lambdaCodeCalls: new Set<string>() }));
 

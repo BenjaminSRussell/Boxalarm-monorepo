@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Decision } from '@aws-sdk/client-verifiedpermissions';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { GuardEvent } from '@boxalarm/authz';
@@ -35,12 +34,6 @@ function fakeDoc(send: (command: unknown) => Promise<unknown>): DynamoDBDocument
   return { send } as unknown as DynamoDBDocumentClient;
 }
 
-function fakeSecretsClient(): SecretsManagerClient {
-  return {
-    send: vi.fn().mockResolvedValue({ SecretString: 'fake-private-key' }),
-  } as unknown as SecretsManagerClient;
-}
-
 describe('putPrePlanHandler', () => {
   const originalEnv = { ...process.env };
 
@@ -49,9 +42,6 @@ describe('putPrePlanHandler', () => {
     process.env.VERIFIED_PERMISSIONS_POLICY_STORE_ID = 'ps-1';
     process.env.PLATFORM_TABLE_NAME = 'platform-table';
     process.env.PLATFORM_ASSETS_BUCKET_NAME = 'bucket';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_DOMAIN = 'assets.example.com';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_KEY_PAIR_ID = 'kp';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_PRIVATE_KEY_SECRET_ID = 'secret-id';
   });
 
   afterEach(() => {
@@ -66,12 +56,22 @@ describe('putPrePlanHandler', () => {
 
   it('returns 403 on a Cedar deny', async () => {
     const { createPutPrePlanHandler } = await import('./putPrePlanHandler.js');
-    const denyClient = {
-      send: vi.fn().mockResolvedValue({ decision: Decision.DENY }),
-    } as unknown as VerifiedPermissionsClient;
+    const denySend = vi.fn().mockResolvedValue({ decision: Decision.DENY });
+    const denyClient = { send: denySend } as unknown as VerifiedPermissionsClient;
     const wrapped = createPutPrePlanHandler(fakeDoc(vi.fn()), vi.fn(), denyClient);
     const result = await wrapped(buildEvent('{}'));
     expect(result).toMatchObject({ statusCode: 403 });
+    const command = denySend.mock.calls[0]?.[0] as unknown as {
+      input: { action: unknown; resource: unknown };
+    };
+    expect(command.input.action).toEqual({
+      actionType: 'Boxalarm::Action',
+      actionId: 'UpdatePrePlan',
+    });
+    expect(command.input.resource).toEqual({
+      entityType: 'Boxalarm::Occupancy',
+      entityId: 'OCC-1',
+    });
   });
 
   it('returns 503 when Verified Permissions is unavailable', async () => {
@@ -136,13 +136,8 @@ describe('putPrePlanHandler', () => {
   it('writes the pre-plan and returns signed upload URLs on success (AC1/AC2)', async () => {
     const { createPutPrePlanHandler } = await import('./putPrePlanHandler.js');
     const send = vi.fn().mockResolvedValueOnce({ Items: [] }).mockResolvedValueOnce({});
-    const signer = vi.fn().mockReturnValue('https://signed.example.com/x');
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      signer,
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const signer = vi.fn().mockResolvedValue('https://signed.example.com/x');
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), signer, allowClient());
     const result = await wrapped(
       buildEvent(
         JSON.stringify({
@@ -159,25 +154,24 @@ describe('putPrePlanHandler', () => {
     expect(body.attachmentUploadUrls).toEqual([
       { filename: 'photo.jpg', uploadUrl: 'https://signed.example.com/x' },
     ]);
+    const requests = signer.mock.calls.map(([request]) => request as Record<string, unknown>);
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request).toMatchObject({ bucketName: 'bucket', method: 'PUT', expiresInSeconds: 600 });
+      expect(request.key).toMatch(/^NICHOLS\/PRE_PLAN\/[^/]+\/(diagram\.pdf|photo\.jpg)$/);
+    }
   });
 
-  it('fails before writing the pre-plan when the CloudFront signing secret is unavailable (Secrets Manager checked before the DynamoDB transaction)', async () => {
+  it('fails before writing the pre-plan when the assets bucket is not configured (checked before the DynamoDB transaction)', async () => {
+    delete process.env.PLATFORM_ASSETS_BUCKET_NAME;
     const { createPutPrePlanHandler } = await import('./putPrePlanHandler.js');
     const send = vi.fn();
-    const failingSecretsClient = {
-      send: vi.fn().mockRejectedValue(new Error('Secrets Manager throttled')),
-    } as unknown as SecretsManagerClient;
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      failingSecretsClient,
-    );
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), vi.fn(), allowClient());
     await expect(
       wrapped(
         buildEvent(JSON.stringify({ siteDiagramFilename: 'diagram.pdf', attachmentFilenames: [] })),
       ),
-    ).rejects.toThrow('Secrets Manager throttled');
+    ).rejects.toThrow('PLATFORM_ASSETS_BUCKET_NAME is required');
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -193,12 +187,7 @@ describe('putPrePlanHandler', () => {
           CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
         }),
       );
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), vi.fn(), allowClient());
     const result = await wrapped(buildEvent('{}', 'OCC-missing'));
     expect(result).toMatchObject({ statusCode: 404 });
   });
@@ -219,12 +208,7 @@ describe('putPrePlanHandler', () => {
           ],
         }),
       );
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), vi.fn(), allowClient());
     const result = await wrapped(buildEvent('{}', 'OCC-1'));
     expect(result).toMatchObject({ statusCode: 409 });
   });
@@ -235,12 +219,7 @@ describe('putPrePlanHandler', () => {
       .fn()
       .mockResolvedValueOnce({ Items: [] })
       .mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'));
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), vi.fn(), allowClient());
     const result = await wrapped(buildEvent('{}'));
     expect(result).toMatchObject({ statusCode: 503 });
   });
@@ -248,12 +227,7 @@ describe('putPrePlanHandler', () => {
   it('defaults an absent body to empty hazards/utilityShutoffs/files (200)', async () => {
     const { createPutPrePlanHandler } = await import('./putPrePlanHandler.js');
     const send = vi.fn().mockResolvedValueOnce({ Items: [] }).mockResolvedValueOnce({});
-    const wrapped = createPutPrePlanHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const wrapped = createPutPrePlanHandler(fakeDoc(send), vi.fn(), allowClient());
     const result = await wrapped(buildEvent(undefined));
     expect(result).toMatchObject({ statusCode: 200 });
     const body = JSON.parse((result as { body: string }).body) as Record<string, unknown>;

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer } from 'aws-lambda';
 import type { AuthorizerContext } from '../../platform-service/authorizer/handler.js';
 import { handler } from './listHydrantsHandler.js';
@@ -74,9 +74,26 @@ describe('listHydrantsHandler (entrypoint, AC3/AC4)', () => {
     expect(result.statusCode).toBe(401);
   });
 
-  it('rejects a missing dueBefore with 400 RFC7807', async () => {
+  it('returns the full department hydrant list (GSI3) when dueBefore is absent, as the web Hydrants page calls it', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ hydrantId: 'HYD-0231' }] });
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'boxalarm-platform-table': [{ hydrantId: 'HYD-0231', status: 'IN_SERVICE' }] },
+    });
     const result = (await handler(
       buildEvent({ authorizer: validAuthorizer }),
+      {} as never,
+      () => undefined,
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(200);
+    expect((JSON.parse(result.body) as { hydrants: unknown[] }).hydrants).toEqual([
+      { hydrantId: 'HYD-0231', status: 'IN_SERVICE' },
+    ]);
+    expect(ddbMock.commandCalls(QueryCommand)[0]?.args[0].input.IndexName).toBe('GSI3');
+  });
+
+  it('rejects a malformed dueBefore with 400 RFC7807', async () => {
+    const result = (await handler(
+      buildEvent({ queryStringParameters: { dueBefore: '2027-1' }, authorizer: validAuthorizer }),
       {} as never,
       () => undefined,
     )) as { statusCode: number; headers: Record<string, string> };

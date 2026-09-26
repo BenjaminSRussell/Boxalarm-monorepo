@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Decision } from '@aws-sdk/client-verifiedpermissions';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { GuardEvent } from '@boxalarm/authz';
@@ -56,12 +55,6 @@ function docWithExistingItem(transactResult: () => Promise<unknown>): {
   return { doc: fakeDoc(send), send };
 }
 
-function fakeSecretsClient(): SecretsManagerClient {
-  return {
-    send: vi.fn().mockResolvedValue({ SecretString: 'fake-private-key' }),
-  } as unknown as SecretsManagerClient;
-}
-
 const VALID_BODY = JSON.stringify({
   occupancyId: 'OCC-1',
   inspectionId: 'INS-1',
@@ -78,9 +71,6 @@ describe('fieldCapture handler', () => {
     process.env.VERIFIED_PERMISSIONS_POLICY_STORE_ID = 'ps-1';
     process.env.PLATFORM_TABLE_NAME = 'platform-table';
     process.env.PLATFORM_ASSETS_BUCKET_NAME = 'bucket';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_DOMAIN = 'assets.example.com';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_KEY_PAIR_ID = 'kp';
-    process.env.PLATFORM_ASSETS_CLOUDFRONT_PRIVATE_KEY_SECRET_ID = 'secret-id';
   });
 
   afterEach(() => {
@@ -178,11 +168,11 @@ describe('fieldCapture handler', () => {
     expect(result).toMatchObject({ statusCode: 400 });
   });
 
-  it('signs one CloudFront upload URL per photo against the {deptId}/INSPECTION_RECORD/{inspectionId}/ prefix and attaches the S3 keys to the record (AC3)', async () => {
+  it('presigns one S3 PUT per photo against the {deptId}/INSPECTION_RECORD/{inspectionId}/ prefix and attaches the S3 keys to the record (AC3)', async () => {
     const { createFieldCaptureHandler } = await import('./handler.js');
     const { doc, send } = docWithExistingItem(() => Promise.resolve({}));
-    const signer = vi.fn().mockReturnValue('https://signed.example.com/upload');
-    const wrapped = createFieldCaptureHandler(doc, signer, allowClient(), fakeSecretsClient());
+    const signer = vi.fn().mockResolvedValue('https://signed.example.com/upload');
+    const wrapped = createFieldCaptureHandler(doc, signer, allowClient());
 
     const result = await wrapped(buildEvent(VALID_BODY));
 
@@ -195,10 +185,12 @@ describe('fieldCapture handler', () => {
       { filename: 'photo.jpg', uploadUrl: 'https://signed.example.com/upload' },
     ]);
     expect(body.inspection.photoS3Keys).toEqual(['NICHOLS/INSPECTION_RECORD/INS-1/photo.jpg']);
-    const signedCall = signer.mock.calls[0]?.[0] as { url: string };
-    expect(signedCall.url).toBe(
-      'https://assets.example.com/NICHOLS/INSPECTION_RECORD/INS-1/photo.jpg',
-    );
+    expect(signer).toHaveBeenCalledWith({
+      bucketName: 'bucket',
+      key: 'NICHOLS/INSPECTION_RECORD/INS-1/photo.jpg',
+      method: 'PUT',
+      expiresInSeconds: 600,
+    });
 
     const transactCommand = send.mock.calls[1]?.[0] as { input: { TransactItems: unknown[] } };
     const transactItems = transactCommand.input.TransactItems as Array<Record<string, unknown>>;
@@ -232,13 +224,8 @@ describe('fieldCapture handler', () => {
           ],
         }),
       );
-    const signer = vi.fn().mockReturnValue('https://signed.example.com/resume');
-    const wrapped = createFieldCaptureHandler(
-      fakeDoc(send),
-      signer,
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const signer = vi.fn().mockResolvedValue('https://signed.example.com/resume');
+    const wrapped = createFieldCaptureHandler(fakeDoc(send), signer, allowClient());
 
     const result = await wrapped(buildEvent(VALID_BODY));
 
@@ -256,12 +243,7 @@ describe('fieldCapture handler', () => {
   it('returns 404 when no inspection record exists to attach to (ticket depends-on E5-S5)', async () => {
     const { createFieldCaptureHandler } = await import('./handler.js');
     const send = vi.fn().mockResolvedValueOnce({ Item: undefined });
-    const wrapped = createFieldCaptureHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      fakeSecretsClient(),
-    );
+    const wrapped = createFieldCaptureHandler(fakeDoc(send), vi.fn(), allowClient());
     const result = await wrapped(buildEvent(VALID_BODY));
     expect(result).toMatchObject({ statusCode: 404 });
   });
@@ -281,7 +263,7 @@ describe('fieldCapture handler', () => {
         }),
       ),
     );
-    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient(), fakeSecretsClient());
+    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient());
     const result = await wrapped(buildEvent(VALID_BODY));
     expect(result).toMatchObject({ statusCode: 404 });
   });
@@ -292,7 +274,7 @@ describe('fieldCapture handler', () => {
     const { doc } = docWithExistingItem(() =>
       Promise.reject(new Error('ProvisionedThroughputExceededException')),
     );
-    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient(), fakeSecretsClient());
+    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient());
 
     const result = await wrapped(buildEvent(VALID_BODY));
 
@@ -305,18 +287,11 @@ describe('fieldCapture handler', () => {
     writeSpy.mockRestore();
   });
 
-  it('returns 503 without writing to DynamoDB when the CloudFront signing secret is unavailable', async () => {
+  it('returns 503 without writing to DynamoDB when the assets bucket is not configured', async () => {
+    delete process.env.PLATFORM_ASSETS_BUCKET_NAME;
     const { createFieldCaptureHandler } = await import('./handler.js');
     const send = vi.fn();
-    const failingSecretsClient = {
-      send: vi.fn().mockRejectedValue(new Error('Secrets Manager throttled')),
-    } as unknown as SecretsManagerClient;
-    const wrapped = createFieldCaptureHandler(
-      fakeDoc(send),
-      vi.fn(),
-      allowClient(),
-      failingSecretsClient,
-    );
+    const wrapped = createFieldCaptureHandler(fakeDoc(send), vi.fn(), allowClient());
 
     const result = await wrapped(buildEvent(VALID_BODY));
 
@@ -327,7 +302,7 @@ describe('fieldCapture handler', () => {
   it('never reads deptId from the request body — the pk comes only from the verified authorizer principal (tenancy boundary, core-harm)', async () => {
     const { createFieldCaptureHandler } = await import('./handler.js');
     const { doc, send } = docWithExistingItem(() => Promise.resolve({}));
-    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient(), fakeSecretsClient());
+    const wrapped = createFieldCaptureHandler(doc, vi.fn(), allowClient());
 
     await wrapped(
       buildEvent(

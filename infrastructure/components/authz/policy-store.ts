@@ -15,6 +15,8 @@ import {
   inventoryAdminActionsPolicy,
   alertingMemberActionsPolicy,
   alertingOfficerActionsPolicy,
+  inspectionsMemberActionsPolicy,
+  inspectionsOfficerActionsPolicy,
 } from "./cedar-policies";
 
 export interface PolicyStoreArgs {
@@ -64,6 +66,8 @@ export class PolicyStore extends pulumi.ComponentResource {
   public readonly apparatusOfficerActionsPolicy: aws.verifiedpermissions.Policy;
   public readonly inventoryReadActionsPolicy: aws.verifiedpermissions.Policy;
   public readonly inventoryAdminActionsPolicy: aws.verifiedpermissions.Policy;
+  public readonly inspectionsMemberActionsPolicy: aws.verifiedpermissions.Policy;
+  public readonly inspectionsOfficerActionsPolicy: aws.verifiedpermissions.Policy;
 
   constructor(name: string, args: PolicyStoreArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("PolicyStore", args.env);
@@ -120,8 +124,8 @@ export class PolicyStore extends pulumi.ComponentResource {
 
     // AC4: no permit-all/default-allow policy exists — only role-gated statements (admin
     // actions, view config, self-service, officer tier, apparatus, inventory read/admin,
-    // alerting member/officer); department scoping lives in the dept-scoped DynamoDB keys
-    // (see cedar-policies.ts).
+    // alerting member/officer, inspections member/officer); department scoping lives in the
+    // dept-scoped DynamoDB keys (see cedar-policies.ts).
     this.adminActionsPolicy = new aws.verifiedpermissions.Policy(
       `${name}-admin-actions`,
       {
@@ -236,6 +240,33 @@ export class PolicyStore extends pulumi.ComponentResource {
         definition: {
           static: {
             statement: pulumi.output(args.userPoolId).apply(alertingOfficerActionsPolicy),
+          },
+        },
+      },
+      { parent: this, dependsOn: [this.schema] },
+    );
+
+    // inspections-service (F6): every-role reads/field work, officer-tier writes.
+    this.inspectionsMemberActionsPolicy = new aws.verifiedpermissions.Policy(
+      `${name}-inspections-member-actions`,
+      {
+        policyStoreId: this.policyStoreId,
+        definition: {
+          static: {
+            statement: pulumi.output(args.userPoolId).apply(inspectionsMemberActionsPolicy),
+          },
+        },
+      },
+      { parent: this, dependsOn: [this.schema] },
+    );
+
+    this.inspectionsOfficerActionsPolicy = new aws.verifiedpermissions.Policy(
+      `${name}-inspections-officer-actions`,
+      {
+        policyStoreId: this.policyStoreId,
+        definition: {
+          static: {
+            statement: pulumi.output(args.userPoolId).apply(inspectionsOfficerActionsPolicy),
           },
         },
       },

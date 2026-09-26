@@ -25,19 +25,6 @@ const API_PREFIX = "/api/v1/";
  * entry as well as on an unlisted gap, so this list is always the exact current gap.
  */
 const KNOWN_UNDEPLOYED = new Set<string>([
-  // inspections-service: no infra at all.
-  "GET /api/v1/inspections",
-  "GET /api/v1/inspections/hydrants",
-  "GET /api/v1/inspections/map",
-  "GET /api/v1/inspections/occupancies",
-  "GET /api/v1/inspections/occupancies/{}",
-  "GET /api/v1/inspections/occupancies/{}/pre-plan",
-  "POST /api/v1/inspections",
-  "POST /api/v1/inspections/hydrants",
-  "POST /api/v1/inspections/occupancies",
-  "PUT /api/v1/inspections/hydrants/{}",
-  "PUT /api/v1/inspections/occupancies/{}",
-  "PUT /api/v1/inspections/occupancies/{}/pre-plan",
   // notification-service: no infra, and its handlers use a bare /notifications prefix.
   "GET /api/v1/notifications",
   "GET /api/v1/notifications/preferences",

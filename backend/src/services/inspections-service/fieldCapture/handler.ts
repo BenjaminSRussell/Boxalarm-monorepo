@@ -1,7 +1,6 @@
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import {
   badRequestProblem,
   extractTraceId,
@@ -14,8 +13,9 @@ import { toVerifiedDeptId } from '@boxalarm/dept-scope';
 import { getDocumentClient, readInspectionsConfig } from '../dynamoClient.js';
 import {
   buildAssetKey,
-  createSignedAssetUrl,
+  createSignedUploadUrl,
   readAssetsConfig,
+  type AssetsConfig,
   type SignUrlFn,
 } from '../assetsSigner.js';
 import { emitInspectionMetric } from '../metrics.js';
@@ -65,20 +65,21 @@ function jsonResponse(statusCode: number, body: unknown): APIGatewayProxyResultV
 
 function signPhotoUploads(
   keys: readonly string[],
-  assetsConfig: Awaited<ReturnType<typeof readAssetsConfig>>,
+  assetsConfig: AssetsConfig,
   signer: SignUrlFn | undefined,
-): { filename: string; uploadUrl: string }[] {
-  return keys.map((key) => ({
-    filename: key.slice(key.lastIndexOf('/') + 1),
-    uploadUrl: createSignedAssetUrl(assetsConfig, key, signer),
-  }));
+): Promise<{ filename: string; uploadUrl: string }[]> {
+  return Promise.all(
+    keys.map(async (key) => ({
+      filename: key.slice(key.lastIndexOf('/') + 1),
+      uploadUrl: await createSignedUploadUrl(assetsConfig, key, signer),
+    })),
+  );
 }
 
 export function createFieldCaptureHandler(
   doc?: DynamoDBDocumentClient,
   signer?: SignUrlFn,
   authzClient?: VerifiedPermissionsClient,
-  secretsClient?: SecretsManagerClient,
 ): (event: GuardEvent) => Promise<APIGatewayProxyResultV2> {
   return withAuthorization<APIGatewayProxyResultV2>(
     async (event, principal) => {
@@ -100,9 +101,9 @@ export function createFieldCaptureHandler(
       const { occupancyId, inspectionId, idempotencyKey, photoFilenames, violations, conductedAt } =
         payload;
 
-      let assetsConfig;
+      let assetsConfig: AssetsConfig;
       try {
-        assetsConfig = await readAssetsConfig(process.env, secretsClient);
+        assetsConfig = readAssetsConfig(process.env);
       } catch (error) {
         logError({
           event: 'fieldCapture.assetsConfig.failed',
@@ -117,10 +118,9 @@ export function createFieldCaptureHandler(
         return serviceUnavailableProblem(traceId);
       }
 
-      const photoUploads = photoFilenames.map((filename) => {
-        const key = buildAssetKey(deptId, 'INSPECTION_RECORD', inspectionId, filename);
-        return { filename, key, uploadUrl: createSignedAssetUrl(assetsConfig, key, signer) };
-      });
+      const photoKeys = photoFilenames.map((filename) =>
+        buildAssetKey(deptId, 'INSPECTION_RECORD', inspectionId, filename),
+      );
 
       let result;
       try {
@@ -130,7 +130,7 @@ export function createFieldCaptureHandler(
           inspectionId,
           idempotencyKey,
           violations,
-          photoS3Keys: photoUploads.map((upload) => upload.key),
+          photoS3Keys: photoKeys,
           conductedBy: principal.sub,
           submittedAt: new Date().toISOString(),
           ...(conductedAt !== undefined && { conductedAt }),
@@ -191,7 +191,11 @@ export function createFieldCaptureHandler(
         return jsonResponse(200, {
           idempotencyOutcome: 'duplicate',
           inspection: toApiInspection(result.item),
-          photoUploadUrls: signPhotoUploads(result.item.photoS3Keys ?? [], assetsConfig, signer),
+          photoUploadUrls: await signPhotoUploads(
+            result.item.photoS3Keys ?? [],
+            assetsConfig,
+            signer,
+          ),
         });
       }
 
@@ -207,7 +211,7 @@ export function createFieldCaptureHandler(
       return jsonResponse(201, {
         idempotencyOutcome: 'created',
         inspection: toApiInspection(result.item),
-        photoUploadUrls: photoUploads.map(({ filename, uploadUrl }) => ({ filename, uploadUrl })),
+        photoUploadUrls: await signPhotoUploads(photoKeys, assetsConfig, signer),
       });
     },
     {

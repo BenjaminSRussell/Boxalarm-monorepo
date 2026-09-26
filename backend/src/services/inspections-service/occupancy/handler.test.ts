@@ -63,6 +63,7 @@ function mockRepository(overrides: {
   readonly getOccupancyById?: () => Promise<OccupancyRecord | undefined>;
   readonly createOccupancy?: () => Promise<OccupancyRecord>;
   readonly updateOccupancy?: () => Promise<OccupancyRecord>;
+  readonly listOccupancies?: () => Promise<OccupancyRecord[]>;
 }): void {
   vi.doMock('./repository.js', async (importOriginal) => {
     const actual = await importOriginal<typeof import('./repository.js')>();
@@ -71,6 +72,7 @@ function mockRepository(overrides: {
       getOccupancyById: overrides.getOccupancyById ?? (() => Promise.resolve(SAMPLE_RECORD)),
       createOccupancy: overrides.createOccupancy ?? (() => Promise.resolve(SAMPLE_RECORD)),
       updateOccupancy: overrides.updateOccupancy ?? (() => Promise.resolve(SAMPLE_RECORD)),
+      listOccupancies: overrides.listOccupancies ?? (() => Promise.resolve([SAMPLE_RECORD])),
     };
   });
 }
@@ -229,6 +231,76 @@ describe('occupancy handler', () => {
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('occupancy.get.handler_failed'),
       );
+    });
+  });
+
+  describe('listOccupanciesHandler', () => {
+    it('returns 200 with { items } in the shape the web client reads (entrypoint wrapper)', async () => {
+      mockAuthorization({});
+      mockRepository({});
+      const { handler } = await import('./listHandler.js');
+      const result = (await handler(
+        buildEvent({}),
+        {} as never,
+        () => undefined,
+      )) as APIGatewayProxyStructuredResultV2;
+      expect(result.statusCode).toBe(200);
+      const body = JSON.parse(result.body as string) as { items: Record<string, unknown>[] };
+      expect(body.items).toEqual([
+        {
+          occupancyId: SAMPLE_RECORD.occupancyId,
+          address: SAMPLE_RECORD.address,
+          occupancyType: SAMPLE_RECORD.occupancyType,
+          contacts: SAMPLE_RECORD.contacts,
+          hazards: SAMPLE_RECORD.hazards,
+          latitude: SAMPLE_RECORD.latitude,
+          longitude: SAMPLE_RECORD.longitude,
+        },
+      ]);
+    });
+
+    it('returns 401 without a verified principal, before any DynamoDB read', async () => {
+      mockAuthorization({});
+      const listOccupancies = vi.fn(() => Promise.resolve([SAMPLE_RECORD]));
+      mockRepository({ listOccupancies });
+      const { listOccupanciesHandler } = await import('./handler.js');
+      const result = (await listOccupanciesHandler(
+        buildEvent({ withAuth: false }),
+        {} as never,
+        () => undefined,
+      )) as APIGatewayProxyStructuredResultV2;
+      expect(result.statusCode).toBe(401);
+      expect(listOccupancies).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 problem+json and logs when the repository rejects', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockAuthorization({});
+      mockRepository({ listOccupancies: () => Promise.reject(new Error('ddb unavailable')) });
+      const { listOccupanciesHandler } = await import('./handler.js');
+      const result = (await listOccupanciesHandler(
+        buildEvent({}),
+        {} as never,
+        () => undefined,
+      )) as APIGatewayProxyStructuredResultV2;
+      expect(result.statusCode).toBe(503);
+      expect(result.headers).toMatchObject({ 'content-type': 'application/problem+json' });
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('occupancy.list.handler_failed'),
+      );
+    });
+  });
+
+  describe('entrypoint wrappers', () => {
+    it.each([
+      ['./createHandler.js', 'createOccupancyHandler'],
+      ['./getHandler.js', 'getOccupancyHandler'],
+      ['./updateHandler.js', 'updateOccupancyHandler'],
+      ['./listHandler.js', 'listOccupanciesHandler'],
+    ])('%s re-exports %s as the Lambda `handler`', async (entry, exportName) => {
+      const wrapper = (await import(entry)) as { handler: unknown };
+      const source = (await import('./handler.js')) as Record<string, unknown>;
+      expect(wrapper.handler).toBe(source[exportName]);
     });
   });
 
