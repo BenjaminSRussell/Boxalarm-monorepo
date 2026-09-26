@@ -5,10 +5,16 @@ import { HttpApi } from "../../components/api/http-api";
 
 const TABLE_ARN = "arn:aws:dynamodb:us-east-1:123456789012:table/boxalarm-dev-incident-service";
 
+const routeKeys: string[] = [];
+
 beforeEach(() => {
+  routeKeys.length = 0;
   pulumi.runtime.setMocks({
     newResource: (args: pulumi.runtime.MockResourceArgs) => {
       const state: Record<string, unknown> = { ...args.inputs };
+      if (args.type === "aws:apigatewayv2/route:Route") {
+        routeKeys.push(args.inputs.routeKey as string);
+      }
       if (args.type === "aws:iam/role:Role") {
         state.arn = `arn:aws:iam::123456789012:role/${args.inputs.name ?? args.name}`;
       }
@@ -115,5 +121,47 @@ describe("Incident", () => {
     ]);
     expect(alert).toEqual(["ReportBatchItemFailures"]);
     expect(response).toEqual(["ReportBatchItemFailures"]);
+  });
+
+  // F7.6/F7.7: the NERIS submit, status and retry handlers were bundled but never
+  // routed, so no incident could be submitted to NERIS through the API.
+  it("routes NERIS submit, submission status and retry at the architecture's paths", async () => {
+    const incident = await build();
+    await resolve(incident.submissionRetryLambda.function.arn);
+    await new Promise((r) => setImmediate(r));
+    expect(routeKeys).toEqual(
+      expect.arrayContaining([
+        "POST /api/v1/incidents/{incidentId}/submit",
+        "GET /api/v1/incidents/{incidentId}/submission",
+        "POST /api/v1/incidents/{incidentId}/submission/retry",
+      ]),
+    );
+  });
+
+  it("grants submit and retry the Update + outbox Put of their transaction and the conflict GetItem", async () => {
+    const incident = await build();
+    for (const lambda of [incident.submitLambda, incident.submissionRetryLambda]) {
+      expect((await actionsFor(lambda, "IncidentSubmissionAccess")).sort()).toEqual([
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+      ]);
+    }
+    expect(await actionsFor(incident.submissionGetLambda, "IncidentSubmissionAccess")).toEqual([
+      "dynamodb:GetItem",
+    ]);
+  });
+
+  it("gives the submission Lambdas the incident table name and CMK access", async () => {
+    const incident = await build();
+    for (const lambda of [
+      incident.submitLambda,
+      incident.submissionGetLambda,
+      incident.submissionRetryLambda,
+    ]) {
+      const env = await resolve(lambda.function.environment);
+      expect(env?.variables?.INCIDENT_TABLE_NAME).toBe("boxalarm-dev-incident-service");
+      expect(await actionsFor(lambda, "IncidentCmkAccess")).toContain("kms:Decrypt");
+    }
   });
 });

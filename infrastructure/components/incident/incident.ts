@@ -69,6 +69,9 @@ export class Incident extends pulumi.ComponentResource {
   public readonly exposuresLambda: ServiceLambda;
   public readonly getLambda: ServiceLambda;
   public readonly searchLambda: ServiceLambda;
+  public readonly submitLambda: ServiceLambda;
+  public readonly submissionGetLambda: ServiceLambda;
+  public readonly submissionRetryLambda: ServiceLambda;
   public readonly dispatchAlertConsumer: QueueConsumer;
   public readonly dispatchResponseConsumer: QueueConsumer;
 
@@ -342,6 +345,67 @@ export class Incident extends pulumi.ComponentResource {
       { parent: this },
     );
 
+    // F7.6/F7.7 NERIS submission routes (architecture.md route table). submit.ts and
+    // retrySubmission.ts each run one transaction - Update the incident METADATA plus Put
+    // the neris.incident.submitted OUTBOX_ENTRY - then GetItem to explain a failed
+    // condition; getSubmission.ts is a single consistent GetItem. Role gating is the
+    // handlers' authorizer-group check (submit: ADMIN/CHIEF; status and retry: OFFICER and
+    // up), not Cedar, so no Verified Permissions grant.
+    const submissionRoutes = [
+      {
+        key: "submit",
+        fn: "submit",
+        routeKey: "POST /api/v1/incidents/{incidentId}/submit",
+        actions: ["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
+      },
+      {
+        key: "submission-get",
+        fn: "submission-get",
+        routeKey: "GET /api/v1/incidents/{incidentId}/submission",
+        actions: ["dynamodb:GetItem"],
+      },
+      {
+        key: "submission-retry",
+        fn: "submission-retry",
+        routeKey: "POST /api/v1/incidents/{incidentId}/submission/retry",
+        actions: ["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
+      },
+    ] as const;
+    const submissionLambdas = submissionRoutes.map((route) => {
+      const lambda = new ServiceLambda(
+        `${name}-${route.key}`,
+        {
+          env,
+          serviceName: "incident-service",
+          functionName: `boxalarm-${env}-incident-${route.key}`,
+          handler: LAMBDA_HANDLER,
+          code: lambdaCode("incident-service", route.fn),
+          logGroup: args.logGroup,
+          environment: baseEnvironment,
+          additionalPolicyStatements: pulumi
+            .all([cmkStatement, args.incidentTableArn])
+            .apply(([cmk, tableArn]) => [
+              {
+                Sid: "IncidentSubmissionAccess" as const,
+                Effect: "Allow" as const,
+                Action: [...route.actions],
+                Resource: [tableArn],
+              },
+              ...cmk,
+            ]),
+        },
+        { parent: this },
+      );
+      args.httpApi.route(
+        `${name}-${route.key}-route`,
+        { routeKey: route.routeKey, lambda },
+        { parent: this },
+      );
+      return lambda;
+    });
+    [this.submitLambda, this.submissionGetLambda, this.submissionRetryLambda] =
+      submissionLambdas as [ServiceLambda, ServiceLambda, ServiceLambda];
+
     // #237: dispatch/roster projection consumers off the alerting-plane bridge
     // (dispatch.alert.received, alerting.response.confirmed republished onto
     // boxalarm-{env}-platform-bus by another story). One QueueConsumer per
@@ -437,6 +501,9 @@ export class Incident extends pulumi.ComponentResource {
       exposuresLambda: this.exposuresLambda,
       getLambda: this.getLambda,
       searchLambda: this.searchLambda,
+      submitLambda: this.submitLambda,
+      submissionGetLambda: this.submissionGetLambda,
+      submissionRetryLambda: this.submissionRetryLambda,
     });
   }
 }
