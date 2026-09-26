@@ -562,4 +562,59 @@ export const LAMBDA_ENTRIES = [
     function: 'export-worker',
     entry: 'src/services/reporting-service/export/worker.ts',
   },
+  {
+    service: 'inventory-service',
+    function: 'equipment-list',
+    entry: 'src/services/inventory-service/equipment/list/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'equipment-get',
+    entry: 'src/services/inventory-service/equipment/get/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'equipment-create',
+    entry: 'src/services/inventory-service/equipment/create/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'equipment-assignment',
+    entry: 'src/services/inventory-service/equipment/assignment/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'equipment-location',
+    entry: 'src/services/inventory-service/equipment/location/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'equipment-lifecycle',
+    entry: 'src/services/inventory-service/lifecycle/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'consumables-list',
+    entry: 'src/services/inventory-service/consumables/list/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'consumable-reorder-scanner',
+    entry: 'src/services/inventory-service/consumableReorderScanner/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'ppe-get',
+    entry: 'src/services/inventory-service/ppe/get/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'ppe-issue',
+    entry: 'src/services/inventory-service/ppe/issue/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'ppe-expiry-scanner',
+    entry: 'src/services/inventory-service/ppeExpiryScanner/handler.ts',
+  },
 ];

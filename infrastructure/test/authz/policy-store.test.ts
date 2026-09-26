@@ -321,6 +321,126 @@ describe("PolicyStore", () => {
     });
   });
 
+  // api-gap P0-6: inventory-service actions. An action or resource type missing from the
+  // schema is an implicit DENY in Verified Permissions, so each one is evaluated here
+  // against the real schema with cedar-wasm, the way decide.ts builds the request.
+  describe("inventory policies (read: every role; write: chief/admin/officer)", () => {
+    const dept = { type: "Boxalarm::Department", id: "dept-1" };
+    const asset = { type: "Boxalarm::Asset", id: "asset-1" };
+    const member = { type: "Boxalarm::Member", id: "member-1" };
+    const RESOURCE: Record<string, { type: string; id: string }> = {
+      ListEquipment: dept,
+      ViewEquipmentAsset: asset,
+      ListConsumables: dept,
+      ViewPpeAssignments: member,
+      RegisterEquipmentAsset: dept,
+      AssignEquipmentAsset: asset,
+      SetEquipmentLocation: asset,
+      TransitionAssetLifecycle: asset,
+      IssuePpeAssignment: member,
+    };
+
+    async function decide(
+      group: string,
+      action: string,
+      groupId = `pool-1|${group}`,
+    ): Promise<string> {
+      const { CEDAR_SCHEMA, inventoryReadActionsPolicy, inventoryAdminActionsPolicy } =
+        await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const resource = RESOURCE[action]!;
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "pool-1|user-1" },
+        action: { type: "Boxalarm::Action", id: action },
+        resource,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        policies: {
+          staticPolicies: `${inventoryReadActionsPolicy("pool-1")}\n${inventoryAdminActionsPolicy("pool-1")}`,
+        },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "pool-1|user-1" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: groupId }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: groupId }, attrs: {}, parents: [] },
+          { uid: resource, attrs: {}, parents: [] },
+        ],
+      });
+      expect(result.type, JSON.stringify(result)).toBe("success");
+      return result.type === "success" ? result.response.decision : "error";
+    }
+
+    it("declares every inventory action (and the Asset type) in the schema", async () => {
+      const { CEDAR_SCHEMA, INVENTORY_READ_ACTIONS, INVENTORY_ADMIN_ACTIONS } =
+        await import("../../components/authz/cedar-policies");
+      const schema = JSON.parse(CEDAR_SCHEMA) as {
+        Boxalarm: { entityTypes: Record<string, unknown>; actions: Record<string, unknown> };
+      };
+      expect(schema.Boxalarm.entityTypes).toHaveProperty("Asset");
+      for (const action of [...INVENTORY_READ_ACTIONS, ...INVENTORY_ADMIN_ACTIONS]) {
+        expect(schema.Boxalarm.actions, action).toHaveProperty(action);
+        expect(RESOURCE, action).toHaveProperty(action);
+      }
+    });
+
+    it.each(["MEMBER", "OFFICER", "TRAINING", "APPARATUS", "ADMIN", "CHIEF"])(
+      "ALLOWs %s every inventory read",
+      async (group) => {
+        for (const action of [
+          "ListEquipment",
+          "ViewEquipmentAsset",
+          "ListConsumables",
+          "ViewPpeAssignments",
+        ]) {
+          expect(await decide(group, action), action).toBe("allow");
+        }
+      },
+    );
+
+    const WRITES = [
+      "RegisterEquipmentAsset",
+      "AssignEquipmentAsset",
+      "SetEquipmentLocation",
+      "TransitionAssetLifecycle",
+      "IssuePpeAssignment",
+    ];
+
+    it.each(["OFFICER", "CHIEF", "ADMIN"])("ALLOWs %s every inventory write", async (group) => {
+      for (const action of WRITES) {
+        expect(await decide(group, action), action).toBe("allow");
+      }
+    });
+
+    it.each(["MEMBER", "TRAINING", "APPARATUS"])(
+      "DENYs %s every inventory write",
+      async (group) => {
+        for (const action of WRITES) {
+          expect(await decide(group, action), action).toBe("deny");
+        }
+      },
+    );
+
+    it("DENYs a CHIEF whose group id is the bare name (the pre-#361 form)", async () => {
+      expect(await decide("CHIEF", "ListEquipment", "CHIEF")).toBe("deny");
+      expect(await decide("CHIEF", "RegisterEquipmentAsset", "CHIEF")).toBe("deny");
+    });
+
+    it("builds pool-qualified group ids, never bare group names", async () => {
+      const store = await build();
+      const [read, write] = await Promise.all([
+        resolve(store.inventoryReadActionsPolicy.definition),
+        resolve(store.inventoryAdminActionsPolicy.definition),
+      ]);
+      expect(read?.static?.statement).toContain('UserGroup::"pool-1|MEMBER"');
+      expect(write?.static?.statement).toContain('UserGroup::"pool-1|OFFICER"');
+      expect(write?.static?.statement).not.toContain('"pool-1|MEMBER"');
+      expect(write?.static?.statement).not.toContain('UserGroup::"CHIEF"');
+    });
+  });
+
   it("sets principalEntityType so Cognito principals resolve to Boxalarm::User", async () => {
     const store = await build();
     const principalEntityType = await resolve(store.identitySource.principalEntityType);
@@ -334,6 +454,8 @@ describe("PolicyStore", () => {
       resolve(store.viewConfigPolicy.definition),
       resolve(store.selfServiceActionsPolicy.definition),
       resolve(store.officerTierActionsPolicy.definition),
+      resolve(store.inventoryReadActionsPolicy.definition),
+      resolve(store.inventoryAdminActionsPolicy.definition),
     ]);
     for (const def of defs) {
       expect(def?.static?.statement).not.toMatch(

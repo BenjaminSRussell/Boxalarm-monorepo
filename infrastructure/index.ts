@@ -36,6 +36,9 @@ import { Registry as ApparatusRegistry } from "./components/apparatus/registry";
 import { Checks as ApparatusChecks } from "./components/apparatus/checks";
 import { Records as ApparatusRecords } from "./components/apparatus/records";
 import { Inventory as ApparatusInventory } from "./components/apparatus/inventory";
+import { Equipment as InventoryEquipment } from "./components/inventory/equipment";
+import { Consumables as InventoryConsumables } from "./components/inventory/consumables";
+import { Ppe as InventoryPpe } from "./components/inventory/ppe";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -362,6 +365,36 @@ export const apparatusRegistry = new ApparatusRegistry("apparatus-registry", app
 export const apparatusChecks = new ApparatusChecks("apparatus-checks", apparatusArgs);
 export const apparatusRecords = new ApparatusRecords("apparatus-records", apparatusArgs);
 export const apparatusInventory = new ApparatusInventory("apparatus-inventory", apparatusArgs);
+
+// api-gap P0-6: inventory-service — equipment registry, consumables and PPE, plus the
+// daily consumable-reorder and PPE-expiry scanners. All share the platform table.
+// Compartment inventory (/apparatus/{unitId}/inventory) belongs to apparatus-service.
+const inventoryLogGroup = serviceLogGroupByName["inventory-service"];
+const inventoryCommon = {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: inventoryLogGroup,
+  httpApi,
+};
+
+export const inventoryEquipment = new InventoryEquipment("inventory-equipment", inventoryCommon);
+
+export const inventoryConsumables = new InventoryConsumables("inventory-consumables", {
+  ...inventoryCommon,
+  deptId,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+});
+
+export const inventoryPpe = new InventoryPpe("inventory-ppe", {
+  ...inventoryCommon,
+  deptId,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+});
 
 export const platformConfig = new PlatformConfig("platform-config", {
   env,

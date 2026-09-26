@@ -25,16 +25,6 @@ const API_PREFIX = "/api/v1/";
  * entry as well as on an unlisted gap, so this list is always the exact current gap.
  */
 const KNOWN_UNDEPLOYED = new Set<string>([
-  // inventory-service: no infra at all.
-  "GET /api/v1/inventory/consumables",
-  "GET /api/v1/inventory/equipment",
-  "GET /api/v1/inventory/equipment/{}",
-  "GET /api/v1/inventory/ppe/{}",
-  "POST /api/v1/inventory/equipment",
-  "POST /api/v1/inventory/ppe/{}",
-  "PUT /api/v1/inventory/equipment/{}/assignment",
-  "PUT /api/v1/inventory/equipment/{}/lifecycle",
-  "PUT /api/v1/inventory/equipment/{}/location",
   // inspections-service: no infra at all.
   "GET /api/v1/inspections",
   "GET /api/v1/inspections/hydrants",
