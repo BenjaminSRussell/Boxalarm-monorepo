@@ -99,13 +99,10 @@ export async function uploadPrePlanFile(uploadUrl: string, file: File): Promise<
   await fetch(uploadUrl, { method: 'PUT', body: file });
 }
 
-const FAR_FUTURE_DUE_BEFORE = '2099-12';
-
+// No dueBefore: the backend returns the department's full hydrant list (dueBefore=YYYY-MM
+// selects only the hydrants whose flow test falls due in that one month).
 export async function listHydrants(tokens: AuthTokenSource): Promise<Hydrant[]> {
-  const response = await apiRequest(
-    `inspections/hydrants?dueBefore=${FAR_FUTURE_DUE_BEFORE}`,
-    tokens,
-  );
+  const response = await apiRequest('inspections/hydrants', tokens);
   const body = (await response.json()) as { hydrants: Hydrant[] };
   return body.hydrants;
 }
