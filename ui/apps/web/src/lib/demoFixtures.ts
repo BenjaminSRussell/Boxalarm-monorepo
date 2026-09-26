@@ -33,6 +33,7 @@ import type {
 } from '../features/platform/types';
 import { tryHandleLosapExtras } from '../features/losap/demoFixtures';
 import { tryHandlePersonnelExtras } from '../features/personnel/demoFixtures';
+import { reportingDemoRequest } from '../features/reporting/demoFixtures';
 import { tryHandleScheduleExtras } from '../features/schedule/demoFixtures';
 import type { ApiRequestOptions, ProblemDetails } from './apiClient';
 import { trainingDemoRequest } from './trainingDemoFixtures';
@@ -267,6 +268,9 @@ export async function demoRequest(
     const response = await apparatusDemoRequest(path, method, body);
     if (response) return response;
   }
+
+  const reportingResponse = reportingDemoRequest(path, method, query);
+  if (reportingResponse) return reportingResponse;
 
   if (path === 'personnel/members' && method === 'GET') return json({ items: members });
 
