@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { withAuthorization, type GuardEvent } from '@boxalarm/authz';
 import { toVerifiedDeptId } from '@boxalarm/dept-scope';
 import { createDynamoClient, readInspectionsTableConfig } from './platformTable.js';
@@ -135,7 +134,6 @@ export function createPutPrePlanHandler(
   doc?: DynamoDBDocumentClient,
   signer?: SignUrlFn,
   authzClient?: VerifiedPermissionsClient,
-  secretsClient?: SecretsManagerClient,
 ): (event: GuardEvent) => Promise<APIGatewayProxyResultV2> {
   return withAuthorization<APIGatewayProxyResultV2>(
     async (event, principal) => {
@@ -152,29 +150,23 @@ export function createPutPrePlanHandler(
       const client = createDynamoClient(process.env, doc);
 
       try {
-        const assetsConfig = await readAssetsConfig(process.env, secretsClient);
+        // Read before the write so a missing bucket config fails without persisting a
+        // pre-plan whose files can never be uploaded.
+        const assetsConfig = readAssetsConfig(process.env);
         const prePlan = await putPrePlan(client, tableConfig.tableName, deptId, occupancyId, input);
-        const siteDiagramUploadUrl = input.siteDiagramFilename
-          ? createSignedUploadUrl(
-              assetsConfig,
-              deptId,
-              'PRE_PLAN',
-              prePlan.prePlanId,
-              input.siteDiagramFilename,
-              signer,
-            )
+        const siteDiagramUploadUrl = prePlan.siteDiagramS3Key
+          ? await createSignedUploadUrl(assetsConfig, prePlan.siteDiagramS3Key, signer)
           : undefined;
-        const attachmentUploadUrls = input.attachmentFilenames.map((filename) => ({
-          filename,
-          uploadUrl: createSignedUploadUrl(
-            assetsConfig,
-            deptId,
-            'PRE_PLAN',
-            prePlan.prePlanId,
+        const attachmentUploadUrls = await Promise.all(
+          input.attachmentFilenames.map(async (filename, index) => ({
             filename,
-            signer,
-          ),
-        }));
+            uploadUrl: await createSignedUploadUrl(
+              assetsConfig,
+              prePlan.attachmentS3Keys[index] ?? '',
+              signer,
+            ),
+          })),
+        );
         emitPrePlanMetric('Created');
         return {
           statusCode: 200,
