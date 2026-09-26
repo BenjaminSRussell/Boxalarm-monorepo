@@ -44,6 +44,11 @@ export const LAMBDA_ENTRIES = [
   },
   {
     service: 'platform-service',
+    function: 'retention-config',
+    entry: 'src/services/platform-service/retention/configHandler.ts',
+  },
+  {
+    service: 'platform-service',
     function: 'outbox-publisher',
     entry: 'src/services/platform-service/outbox-publisher/handler.ts',
   },

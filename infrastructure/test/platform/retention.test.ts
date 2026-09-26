@@ -3,9 +3,13 @@ import * as pulumi from "@pulumi/pulumi";
 import { ServiceLogGroup } from "../../components/observability/service-log-group";
 import { HttpApi } from "../../components/api/http-api";
 
+const created: Array<{ type: string; inputs: Record<string, unknown> }> = [];
+
 beforeEach(() => {
+  created.length = 0;
   pulumi.runtime.setMocks({
     newResource: (args: pulumi.runtime.MockResourceArgs) => {
+      created.push({ type: args.type, inputs: args.inputs as Record<string, unknown> });
       const state: Record<string, unknown> = { ...args.inputs };
       if (args.type === "aws:iam/role:Role") {
         state.arn = `arn:aws:iam::123456789012:role/${args.inputs.name ?? args.name}`;
@@ -145,20 +149,46 @@ describe("Retention", () => {
     expect(policy.Statement.some((s) => s.Sid === "DenyAuditMutations")).toBe(true);
   });
 
-  it("routes the admin disposal endpoint at POST /api/v1/platform/retention/disposal (backend-pinned path)", async () => {
+  async function routeKeys(): Promise<string[]> {
     const retention = await build();
+    await resolve(retention.configLambda.function.arn);
     await resolve(retention.disposalLambda.function.arn);
-    // The route is registered against the shared HttpApi; verifying the schedule
-    // target is the disposal Lambda is the more direct assertion available here.
-    const target = await resolve(retention.schedule.target);
-    const fnArn = await resolve(retention.disposalLambda.function.arn);
-    expect(target?.arn).toBe(fnArn);
+    await new Promise((r) => setImmediate(r));
+    return created
+      .filter((r) => r.type === "aws:apigatewayv2/route:Route")
+      .map((r) => r.inputs.routeKey as string)
+      .sort();
+  }
+
+  it("routes disposal and the retention config GET/PUT the web Settings page calls", async () => {
+    // configHandler.ts matches event.routeKey exactly; it was never bundled or routed,
+    // so the Settings retention panel 404ed.
+    expect(await routeKeys()).toEqual([
+      "GET /api/v1/platform/retention",
+      "POST /api/v1/platform/retention/disposal",
+      "PUT /api/v1/platform/retention",
+    ]);
   });
 
-  it("runs the disposal schedule daily", async () => {
+  it("points the config Lambda at the bundled retention-config handler with a least-privilege grant", async () => {
     const retention = await build();
-    const expr = await resolve(retention.schedule.scheduleExpression);
-    expect(expr).toBe("rate(1 day)");
+    const [env, policyJson] = await Promise.all([
+      resolve(retention.configLambda.function.environment),
+      resolve(retention.configLambda.rolePolicy.policy),
+    ]);
+    expect(env?.variables?.PLATFORM_TABLE_NAME).toBe("platform-table");
+    expect(env?.variables?.VERIFIED_PERMISSIONS_POLICY_STORE_ID).toBe("ps-1");
+    const policy = JSON.parse(policyJson) as {
+      Statement: Array<{ Sid: string; Action: string | string[] }>;
+    };
+    const access = policy.Statement.find((s) => s.Sid === "RetentionConfigAccess");
+    expect(access?.Action).toEqual(["dynamodb:GetItem", "dynamodb:PutItem"]);
+    expect(policy.Statement.some((s) => s.Sid === "DenyAuditMutations")).toBe(true);
+  });
+
+  it("creates no disposal schedule: disposal runs only on an explicit admin request", async () => {
+    await routeKeys();
+    expect(created.some((r) => r.type === "aws:scheduler/schedule:Schedule")).toBe(false);
   });
 
   it("alarms the chief topic on every disposal invocation, no volume threshold", async () => {

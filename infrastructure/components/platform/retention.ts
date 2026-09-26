@@ -20,12 +20,25 @@ export interface RetentionArgs {
   httpApi: HttpApi;
 }
 
-/** E8-S9-INFRA #260 records retention: daily schedule + admin route, disposal role, crypto-shred CMKs. */
+/**
+ * E8-S9-INFRA #260 records retention: the retention-config and admin disposal routes, the
+ * disposal role, and the crypto-shred CMKs.
+ *
+ * No scheduled disposal. runDisposal (disposal.ts) acts only on the explicit pk/sk
+ * candidates a CHIEF/ADMIN posts - nothing in the backend discovers candidates - so a
+ * scheduled invocation has nothing to dispose even with a non-HTTP entry point. The
+ * daily Scheduler target this component used to create hit an API-Gateway-shaped
+ * handler with a raw event and 401/404ed every run. Automatic discovery would make hard
+ * delete and KMS key destruction run unattended on a timer, which the architecture
+ * frames as an explicit, alarmed admin action (Data Protection: "destructive admin
+ * actions (... records disposal under N6.3)"), against a retention schedule that is
+ * itself still OQ-19. Disposal stays manual until that is decided.
+ */
 export class Retention extends pulumi.ComponentResource {
   public readonly archivedIncidentCmk: aws.kms.Key;
   public readonly archivedDeliveryReceiptCmk: aws.kms.Key;
   public readonly disposalLambda: ServiceLambda;
-  public readonly schedule: aws.scheduler.Schedule;
+  public readonly configLambda: ServiceLambda;
   public readonly invokedAlarm: aws.cloudwatch.MetricAlarm;
 
   constructor(name: string, args: RetentionArgs, opts?: pulumi.ComponentResourceOptions) {
@@ -140,75 +153,46 @@ export class Retention extends pulumi.ComponentResource {
       { parent: this },
     );
 
-    const schedulerRole = new aws.iam.Role(
-      `${name}-scheduler-role`,
+    // retention/configHandler.ts: GET reads the RETENTION config item (GetItem);
+    // putRetentionConfig re-reads it for the version, then does a conditional PutItem.
+    this.configLambda = new ServiceLambda(
+      `${name}-config`,
       {
-        name: `boxalarm-${env}-platform-retention-scheduler`,
-        assumeRolePolicy: JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Principal: { Service: "scheduler.amazonaws.com" },
-              Action: "sts:AssumeRole",
-            },
-          ],
-        }),
-      },
-      { parent: this },
-    );
-
-    new aws.iam.RolePolicy(
-      `${name}-scheduler-role-policy`,
-      {
-        role: schedulerRole.id,
-        policy: this.disposalLambda.function.arn.apply((arn) =>
-          JSON.stringify({
-            Version: "2012-10-17",
-            Statement: [
-              {
-                Sid: "InvokeDisposal",
-                Effect: "Allow",
-                Action: "lambda:InvokeFunction",
-                Resource: arn,
-              },
-            ],
-          }),
-        ),
-      },
-      { parent: this },
-    );
-
-    this.schedule = new aws.scheduler.Schedule(
-      `${name}-schedule`,
-      {
-        name: `boxalarm-${env}-platform-retention-disposal-daily`,
-        scheduleExpression: "rate(1 day)",
-        flexibleTimeWindow: { mode: "OFF" },
-        target: {
-          arn: this.disposalLambda.function.arn,
-          roleArn: schedulerRole.arn,
+        env,
+        serviceName: "platform-service",
+        functionName: `boxalarm-${env}-platform-retention-config`,
+        handler: LAMBDA_HANDLER,
+        code: lambdaCode("platform-service", "retention-config"),
+        logGroup: args.logGroup,
+        environment: {
+          PLATFORM_TABLE_NAME: args.platformTableName,
+          VERIFIED_PERMISSIONS_POLICY_STORE_ID: args.policyStoreId,
         },
+        additionalPolicyStatements: pulumi
+          .all([args.platformTableArn, args.policyStoreArn])
+          .apply(([tableArn, policyStoreArn]) => [
+            {
+              Sid: "RetentionConfigAccess" as const,
+              Effect: "Allow" as const,
+              Action: ["dynamodb:GetItem", "dynamodb:PutItem"],
+              Resource: tableArn,
+            },
+            auditMutationDenyStatement(tableArn),
+            verifiedPermissionsPolicyStatement(policyStoreArn),
+          ]),
       },
       { parent: this },
     );
 
-    // The daily schedule invokes the disposal Lambda directly (target.arn above, not
-    // an HTTP-shaped call) — but disposalHandler.ts's handler is written only for
-    // API-Gateway-shaped requests: it requires a bearer token and checks
-    // event.routeKey, so a raw Scheduler invocation gets a 401/404 and disposes
-    // nothing. Giving disposalHandler.ts a non-HTTP scheduled entry point is a
-    // backend change outside this infra-only PR's footprint. What IS fixable here:
-    // watching AWS/Lambda Invocations meant this alarm fired on every scheduled
-    // attempt regardless of whether disposal logic ever ran, paging the chief daily
-    // and burying real manual disposals in the noise. Watching the backend's own
-    // DisposalInvoked metric instead (disposal.ts's emitDisposalInvoked(), which
-    // only fires from inside runDisposal's finally block — i.e. only when the
-    // business logic actually executes, not on a failed-auth/404 request) means the
-    // alarm goes quiet on today's non-functional scheduled runs instead of paging
-    // on them, while still firing correctly for every real disposal a chief runs
-    // manually. See export.ts/recovery-monitor.ts for the same
-    // watch-what-the-backend-actually-emits fix applied to their alarms.
+    // configHandler.ts dispatches on event.routeKey, so these must match it exactly.
+    for (const method of ["GET", "PUT"] as const) {
+      args.httpApi.route(
+        `${name}-config-${method.toLowerCase()}-route`,
+        { routeKey: `${method} /api/v1/platform/retention`, lambda: this.configLambda },
+        { parent: this },
+      );
+    }
+
     this.invokedAlarm = new aws.cloudwatch.MetricAlarm(
       `${name}-invoked-alarm`,
       {
@@ -228,6 +212,7 @@ export class Retention extends pulumi.ComponentResource {
 
     this.registerOutputs({
       disposalLambda: this.disposalLambda,
+      configLambda: this.configLambda,
       archivedIncidentCmk: this.archivedIncidentCmk,
       archivedDeliveryReceiptCmk: this.archivedDeliveryReceiptCmk,
     });
