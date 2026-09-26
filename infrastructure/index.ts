@@ -33,6 +33,10 @@ import { Events as TrainingEvents } from "./components/training/events";
 import { Hours as TrainingHours } from "./components/training/hours";
 import { Reports as TrainingReports } from "./components/training/reports";
 import { Transcript as TrainingTranscript } from "./components/training/transcript";
+import { Occupancies } from "./components/inspections/occupancies";
+import { Hydrants } from "./components/inspections/hydrants";
+import { Records as InspectionRecords } from "./components/inspections/records";
+import { InspectionsMap } from "./components/inspections/map";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -345,6 +349,36 @@ export const trainingTranscript = new TrainingTranscript("training-transcript", 
   logGroup: trainingLogGroup,
   httpApi,
 });
+
+// F6 inspections-service: occupancies + pre-plans, hydrants, inspection records + field
+// capture, and the map. All state is in the platform table; pre-plan files and field-capture
+// photos go to the platform-assets bucket through S3 presigned URLs.
+const inspectionsLogGroup = serviceLogGroupByName["inspections-service"];
+const inspectionsBase = {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: inspectionsLogGroup,
+  httpApi,
+};
+
+export const inspectionsOccupancies = new Occupancies("inspections-occupancies", {
+  ...inspectionsBase,
+  assetsBucketName: platformAssets.bucketName,
+  assetsBucketArn: platformAssets.bucketArn,
+});
+
+export const inspectionsHydrants = new Hydrants("inspections-hydrants", inspectionsBase);
+
+export const inspectionsRecords = new InspectionRecords("inspections-records", {
+  ...inspectionsBase,
+  assetsBucketName: platformAssets.bucketName,
+  assetsBucketArn: platformAssets.bucketArn,
+});
+
+export const inspectionsMap = new InspectionsMap("inspections-map", inspectionsBase);
 
 export const platformConfig = new PlatformConfig("platform-config", {
   env,
