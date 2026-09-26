@@ -127,9 +127,9 @@ export function createGetComplianceHandler(
   return withAuthorization(
     (event, principal) => getCompliance(event, principal, resolveDeps(overrides)),
     {
-      actionType: 'Apparatus',
+      actionType: 'Boxalarm::Action',
       actionId: 'GetComplianceReport',
-      resourceType: 'Apparatus',
+      resourceType: 'Boxalarm::Apparatus',
       resourceId: () => 'COMPLIANCE',
       ...(overrides.authzClient !== undefined ? { client: overrides.authzClient } : {}),
     },

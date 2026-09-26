@@ -32,6 +32,10 @@ import { Events as TrainingEvents } from "./components/training/events";
 import { Hours as TrainingHours } from "./components/training/hours";
 import { Reports as TrainingReports } from "./components/training/reports";
 import { Transcript as TrainingTranscript } from "./components/training/transcript";
+import { Registry as ApparatusRegistry } from "./components/apparatus/registry";
+import { Checks as ApparatusChecks } from "./components/apparatus/checks";
+import { Records as ApparatusRecords } from "./components/apparatus/records";
+import { Inventory as ApparatusInventory } from "./components/apparatus/inventory";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -341,6 +345,23 @@ export const trainingTranscript = new TrainingTranscript("training-transcript", 
   logGroup: trainingLogGroup,
   httpApi,
 });
+
+// api-gap P0 #5: apparatus-service registry, checks/defects/compliance, maintenance/SCBA/
+// testing records, and compartment inventory. All on the platform table and the shared
+// policy store; the riding board stays in components/alerting/riding-board.ts.
+const apparatusArgs = {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: apparatusLogGroup,
+  httpApi,
+};
+export const apparatusRegistry = new ApparatusRegistry("apparatus-registry", apparatusArgs);
+export const apparatusChecks = new ApparatusChecks("apparatus-checks", apparatusArgs);
+export const apparatusRecords = new ApparatusRecords("apparatus-records", apparatusArgs);
+export const apparatusInventory = new ApparatusInventory("apparatus-inventory", apparatusArgs);
 
 export const platformConfig = new PlatformConfig("platform-config", {
   env,

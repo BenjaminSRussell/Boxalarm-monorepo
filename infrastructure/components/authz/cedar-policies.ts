@@ -78,6 +78,68 @@ export const OFFICER_TIER_ACTIONS = [
 ] as const;
 export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as const;
 
+// apparatus-service (api-gap P0 #5): the actionIds its withAuthorization callers send
+// (grepped from backend/src/services/apparatus-service, pinned by that service's
+// cedarActions.test.ts). Tiers follow docs/architecture.md §2's apparatus table: routes
+// marked "Cognito" are every-role; "Cognito(admin)" (service-status, compliance) and the
+// write routes the table does not list (maintenance log, hose/ladder/pump/aerial test log,
+// compartment item create/restock) are the apparatus-officer tier. That tier adds the
+// APPARATUS group to the architecture's chief/admin/officer definition of Cognito(admin),
+// because §7.1 gives /apparatus and /apparatus/:id to the apparatus role and the
+// APPARATUS group exists for exactly this officer.
+// Not here: riding-board actions (owned by the riding-board fix), and the three routes
+// that authorize without Cedar (list/get read on the dept-scoped authorizer context,
+// create on a manual CHIEF/ADMIN group check in authContext.ts).
+export const APPARATUS_MEMBER_ACTIONS = [
+  "GetChecklist",
+  "SubmitApparatusCheck",
+  "ReportDefect",
+  "ViewMaintenanceHistory",
+  "LogScbaRecord",
+  "ViewScbaTestingSchedules",
+  "ViewTestingSchedules",
+  "ListCompartmentInventory",
+] as const;
+
+export const APPARATUS_OFFICER_ACTIONS = [
+  "UpdateServiceStatus",
+  "GetComplianceReport",
+  "LogMaintenanceRecord",
+  "LogApparatusTestRecord",
+  "CreateCompartmentItem",
+  "UpdateCompartmentItemQuantity",
+] as const;
+export const APPARATUS_OFFICER_GROUPS = ["APPARATUS", "OFFICER", "CHIEF", "ADMIN"] as const;
+
+// Resource type each apparatus action is sent with. Every apparatus route passes
+// Boxalarm::Apparatus except the SCBA due-soon feed, which is department-wide.
+const APPARATUS_ACTION_RESOURCE: Record<
+  (typeof APPARATUS_MEMBER_ACTIONS)[number] | (typeof APPARATUS_OFFICER_ACTIONS)[number],
+  "Apparatus" | "Department"
+> = {
+  GetChecklist: "Apparatus",
+  SubmitApparatusCheck: "Apparatus",
+  ReportDefect: "Apparatus",
+  ViewMaintenanceHistory: "Apparatus",
+  LogScbaRecord: "Apparatus",
+  ViewScbaTestingSchedules: "Department",
+  ViewTestingSchedules: "Apparatus",
+  ListCompartmentInventory: "Apparatus",
+  UpdateServiceStatus: "Apparatus",
+  GetComplianceReport: "Apparatus",
+  LogMaintenanceRecord: "Apparatus",
+  LogApparatusTestRecord: "Apparatus",
+  CreateCompartmentItem: "Apparatus",
+  UpdateCompartmentItemQuantity: "Apparatus",
+};
+
+const APPARATUS_SCHEMA_ACTIONS = Object.fromEntries(
+  Object.entries(APPARATUS_ACTION_RESOURCE).map(([action, resourceType]) => [
+    action,
+    { appliesTo: { principalTypes: ["User"], resourceTypes: [resourceType] } },
+  ]),
+);
+
 // Department-scoping is NOT expressed here as a `when` clause comparing
 // principal/resource attributes. Two things rule that out for every action above:
 //   1. @boxalarm/authz's isAuthorized() calls IsAuthorizedWithTokenCommand with the
@@ -109,6 +171,7 @@ export const CEDAR_SCHEMA = JSON.stringify({
       TrainingEvent: {},
       TrainingReport: {},
       RidingBoard: {},
+      Apparatus: {},
     },
     actions: {
       ViewConfig: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
@@ -171,6 +234,7 @@ export const CEDAR_SCHEMA = JSON.stringify({
       AssignRidingPosition: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["RidingBoard"] },
       },
+      ...APPARATUS_SCHEMA_ACTIONS,
     },
   },
 });
@@ -235,4 +299,26 @@ export function officerTierActionsPolicy(userPoolId: string): string {
   ).join(" || ");
   const actions = OFFICER_TIER_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
   return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+function roleGatedPolicy(
+  userPoolId: string,
+  groups: readonly RoleGroup[],
+  actions: readonly string[],
+): string {
+  const groupCheck = groups
+    .map((g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`)
+    .join(" || ");
+  const actionList = actions.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
+  return `permit (\n  principal,\n  action in [${actionList}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+/** Every-role apparatus actions: checks, defects, and the reads architecture marks "Cognito". */
+export function apparatusMemberActionsPolicy(userPoolId: string): string {
+  return roleGatedPolicy(userPoolId, ROLE_GROUPS, APPARATUS_MEMBER_ACTIONS);
+}
+
+/** Apparatus-officer tier: service status, compliance, and maintenance/test/compartment writes. */
+export function apparatusOfficerActionsPolicy(userPoolId: string): string {
+  return roleGatedPolicy(userPoolId, APPARATUS_OFFICER_GROUPS, APPARATUS_OFFICER_ACTIONS);
 }

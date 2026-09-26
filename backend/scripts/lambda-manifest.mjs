@@ -413,6 +413,91 @@ export const LAMBDA_ENTRIES = [
     entry: 'src/services/apparatus-service/ridingBoard/assignHandler.ts',
   },
   {
+    service: 'apparatus-service',
+    function: 'list',
+    entry: 'src/services/apparatus-service/listApparatus.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'create',
+    entry: 'src/services/apparatus-service/createApparatus.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'get',
+    entry: 'src/services/apparatus-service/getApparatus.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'service-status-update',
+    entry: 'src/services/apparatus-service/serviceStatusHandler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'checklist-get',
+    entry: 'src/services/apparatus-service/getChecklistHandler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'checks-submit',
+    entry: 'src/services/apparatus-service/postChecks.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'defects-report',
+    entry: 'src/services/apparatus-service/reportDefectHandler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'compliance',
+    entry: 'src/services/apparatus-service/getComplianceHandler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'maintenance-get',
+    entry: 'src/services/apparatus-service/getMaintenance.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'maintenance-log',
+    entry: 'src/services/apparatus-service/postMaintenance.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'scba-log',
+    entry: 'src/services/apparatus-service/postScba.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'scba-testing-schedules',
+    entry: 'src/services/apparatus-service/getScbaTestingSchedules.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'tests-log',
+    entry: 'src/services/apparatus-service/postTestRecord.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'testing-schedules',
+    entry: 'src/services/apparatus-service/getTestingSchedules.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'inventory-list',
+    entry: 'src/services/apparatus-service/inventory-list/handler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'inventory-create',
+    entry: 'src/services/apparatus-service/inventory-create/handler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'inventory-quantity',
+    entry: 'src/services/apparatus-service/inventory-quantity/handler.ts',
+  },
+  {
     service: 'alerting-service',
     function: 'outbox-drain',
     entry: 'src/services/alerting-service/outboxDrainHandler.ts',
