@@ -75,6 +75,33 @@ export const OFFICER_TIER_ACTIONS = [
 ] as const;
 export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as const;
 
+// inspections-service (F6). Actions are what its withAuthorization / IsAuthorizedWithToken
+// callers send (getPrePlanHandler, putPrePlanHandler, listInspections, recordInspection,
+// fieldCapture, map, hydrant/*, occupancy/authorization.ts). Tiers follow architecture.md's
+// inspections route table: `Cognito` routes are every role; `Cognito(admin)` routes — defined
+// there as "chief/admin/officer role" — are OFFICER/CHIEF/ADMIN (no TRAINING/APPARATUS).
+//  - Every role: read a pre-plan, list the inspection schedule, the map, and recording work in
+//    the field — POST /inspections (schedule + conduct) and POST /field-capture are `Cognito`.
+//  - Officer/chief/admin: create or edit occupancies (POST is `Cognito(admin)`; the PUT has no
+//    row and takes the same action), pre-plan edits and hydrant writes (PUT is
+//    `Cognito(admin)`; hydrant create has no row and takes the write tier).
+export const INSPECTIONS_MEMBER_ACTIONS = [
+  "GetPrePlan",
+  "ListInspections",
+  "ViewInspectionsMap",
+  "ScheduleInspection",
+  "ConductInspection",
+  "SubmitFieldCapture",
+] as const;
+
+export const INSPECTIONS_OFFICER_ACTIONS = [
+  "WriteOccupancy",
+  "UpdatePrePlan",
+  "CreateHydrant",
+  "UpdateHydrant",
+] as const;
+export const INSPECTIONS_OFFICER_GROUPS = ["OFFICER", "CHIEF", "ADMIN"] as const;
+
 // Department-scoping is NOT expressed here as a `when` clause comparing
 // principal/resource attributes. Two things rule that out for every action above:
 //   1. @boxalarm/authz's isAuthorized() calls IsAuthorizedWithTokenCommand with the
@@ -105,6 +132,11 @@ export const CEDAR_SCHEMA = JSON.stringify({
       ShiftSwapRequest: {},
       TrainingEvent: {},
       TrainingReport: {},
+      Occupancy: {},
+      Hydrant: {},
+      Inspection: {},
+      InspectionList: {},
+      InspectionsMap: {},
     },
     actions: {
       ViewConfig: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
@@ -163,6 +195,26 @@ export const CEDAR_SCHEMA = JSON.stringify({
       },
       ListPendingShiftSwaps: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
+      },
+      GetPrePlan: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Occupancy"] } },
+      UpdatePrePlan: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Occupancy"] } },
+      WriteOccupancy: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Occupancy"] } },
+      CreateHydrant: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Hydrant"] } },
+      UpdateHydrant: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Hydrant"] } },
+      ListInspections: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["InspectionList"] },
+      },
+      ScheduleInspection: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Inspection"] },
+      },
+      ConductInspection: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Inspection"] },
+      },
+      SubmitFieldCapture: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Inspection"] },
+      },
+      ViewInspectionsMap: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["InspectionsMap"] },
       },
     },
   },
@@ -227,5 +279,23 @@ export function officerTierActionsPolicy(userPoolId: string): string {
     (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
   ).join(" || ");
   const actions = OFFICER_TIER_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
+  return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+/** inspections-service every-role actions (architecture.md `Cognito` inspections routes). */
+export function inspectionsMemberActionsPolicy(userPoolId: string): string {
+  const groupCheck = ROLE_GROUPS.map(
+    (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
+  ).join(" || ");
+  const actions = INSPECTIONS_MEMBER_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
+  return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+/** inspections-service writes — officer/chief/admin (architecture.md `Cognito(admin)`). */
+export function inspectionsOfficerActionsPolicy(userPoolId: string): string {
+  const groupCheck = INSPECTIONS_OFFICER_GROUPS.map(
+    (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
+  ).join(" || ");
+  const actions = INSPECTIONS_OFFICER_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
   return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
 }

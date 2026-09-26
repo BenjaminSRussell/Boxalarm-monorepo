@@ -307,19 +307,173 @@ describe("PolicyStore", () => {
     });
   });
 
+  // inspections-service (F6): every action its handlers send must be in the schema and
+  // permitted to the tier architecture.md's route table gives it, else it is an implicit DENY.
+  describe("inspections policies (every-role reads/field work, officer-tier writes)", () => {
+    const RESOURCE_BY_ACTION: Record<string, { type: string; id: string }> = {
+      GetPrePlan: { type: "Boxalarm::Occupancy", id: "OCC-1" },
+      UpdatePrePlan: { type: "Boxalarm::Occupancy", id: "OCC-1" },
+      WriteOccupancy: { type: "Boxalarm::Occupancy", id: "OCC-1" },
+      CreateHydrant: { type: "Boxalarm::Hydrant", id: "hydrants" },
+      UpdateHydrant: { type: "Boxalarm::Hydrant", id: "HYD-1" },
+      ListInspections: { type: "Boxalarm::InspectionList", id: "dept-1" },
+      ScheduleInspection: { type: "Boxalarm::Inspection", id: "OCC-1" },
+      ConductInspection: { type: "Boxalarm::Inspection", id: "INS-1" },
+      SubmitFieldCapture: { type: "Boxalarm::Inspection", id: "OCC-1" },
+      ViewInspectionsMap: { type: "Boxalarm::InspectionsMap", id: "dept-1" },
+    };
+
+    async function decide(groupId: string, action: string): Promise<string> {
+      const { CEDAR_SCHEMA, inspectionsMemberActionsPolicy, inspectionsOfficerActionsPolicy } =
+        await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const resource = RESOURCE_BY_ACTION[action]!;
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "pool-1|user-1" },
+        action: { type: "Boxalarm::Action", id: action },
+        resource,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        policies: {
+          staticPolicies: `${inspectionsMemberActionsPolicy("pool-1")}\n${inspectionsOfficerActionsPolicy("pool-1")}`,
+        },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "pool-1|user-1" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: groupId }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: groupId }, attrs: {}, parents: [] },
+          { uid: resource, attrs: {}, parents: [] },
+        ],
+      });
+      expect(result.type, JSON.stringify(result)).toBe("success");
+      return result.type === "success" ? result.response.decision : "error";
+    }
+
+    const MEMBER_ACTIONS = [
+      "GetPrePlan",
+      "ListInspections",
+      "ViewInspectionsMap",
+      "ScheduleInspection",
+      "ConductInspection",
+      "SubmitFieldCapture",
+    ];
+    const OFFICER_ACTIONS = ["WriteOccupancy", "UpdatePrePlan", "CreateHydrant", "UpdateHydrant"];
+    const ALL_GROUPS = ["MEMBER", "OFFICER", "TRAINING", "APPARATUS", "ADMIN", "CHIEF"];
+
+    it.each(MEMBER_ACTIONS.flatMap((a) => ALL_GROUPS.map((g) => [a, g])))(
+      "ALLOWs %s for %s (every role)",
+      async (action, group) => {
+        expect(await decide(`pool-1|${group}`, action)).toBe("allow");
+      },
+    );
+
+    it.each(OFFICER_ACTIONS.flatMap((a) => ["OFFICER", "CHIEF", "ADMIN"].map((g) => [a, g])))(
+      "ALLOWs %s for %s",
+      async (action, group) => {
+        expect(await decide(`pool-1|${group}`, action)).toBe("allow");
+      },
+    );
+
+    it.each(OFFICER_ACTIONS.flatMap((a) => ["MEMBER", "TRAINING", "APPARATUS"].map((g) => [a, g])))(
+      "DENYs %s for %s",
+      async (action, group) => {
+        expect(await decide(`pool-1|${group}`, action)).toBe("deny");
+      },
+    );
+
+    it.each([...MEMBER_ACTIONS, ...OFFICER_ACTIONS])(
+      "DENYs %s for a bare, pool-unqualified group id",
+      async (action) => {
+        expect(await decide("CHIEF", action)).toBe("deny");
+      },
+    );
+
+    it("builds pool-qualified group ids and keeps MEMBER out of the write tier", async () => {
+      const store = await build();
+      const [member, officer] = await Promise.all([
+        resolve(store.inspectionsMemberActionsPolicy.definition),
+        resolve(store.inspectionsOfficerActionsPolicy.definition),
+      ]);
+      expect(member?.static?.statement).toContain('UserGroup::"pool-1|MEMBER"');
+      expect(officer?.static?.statement).toContain('UserGroup::"pool-1|OFFICER"');
+      expect(officer?.static?.statement).not.toContain('"pool-1|MEMBER"');
+      expect(officer?.static?.statement).not.toContain('"pool-1|TRAINING"');
+      expect(`${member?.static?.statement}${officer?.static?.statement}`).not.toContain(
+        'UserGroup::"CHIEF"',
+      );
+    });
+
+    // Every Cedar action id the inspections-service source sends must be declared in the
+    // schema — an undeclared action is an implicit DENY that no policy can fix.
+    it("declares every action id inspections-service handlers send, with the Boxalarm::Action type", async () => {
+      const { readdirSync, readFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { CEDAR_SCHEMA } = await import("../../components/authz/cedar-policies");
+      const root = join(__dirname, "../../../backend/src/services/inspections-service");
+      const walk = (dir: string): string[] =>
+        readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+          entry.isDirectory()
+            ? walk(join(dir, entry.name))
+            : entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")
+              ? [join(dir, entry.name)]
+              : [],
+        );
+      const source = walk(root)
+        .map((file) => readFileSync(file, "utf8"))
+        .join("\n");
+      const sent = new Set(
+        [
+          ...source.matchAll(/actionId:\s*'([^']+)'/g),
+          ...source.matchAll(/_ACTION_ID\s*=\s*'([^']+)'/g),
+        ].map((m) => m[1]!),
+      );
+      const actionTypes = new Set(
+        [
+          ...source.matchAll(/actionType:\s*'([^']+)'/g),
+          ...source.matchAll(/_ACTION_TYPE\s*=\s*'([^']+)'/g),
+        ].map((m) => m[1]!),
+      );
+      const declared = Object.keys(
+        (JSON.parse(CEDAR_SCHEMA) as { Boxalarm: { actions: Record<string, unknown> } }).Boxalarm
+          .actions,
+      );
+      expect([...sent].sort()).toEqual([...MEMBER_ACTIONS, ...OFFICER_ACTIONS].sort());
+      expect([...sent].filter((a) => !declared.includes(a))).toEqual([]);
+      expect([...actionTypes]).toEqual(["Boxalarm::Action"]);
+
+      const resourceTypes = new Set(
+        [
+          ...source.matchAll(/resourceType:\s*'([^']+)'/g),
+          ...source.matchAll(/_RESOURCE_TYPE\s*=\s*'([^']+)'/g),
+        ].map((m) => m[1]!),
+      );
+      const entityTypes = Object.keys(
+        (JSON.parse(CEDAR_SCHEMA) as { Boxalarm: { entityTypes: Record<string, unknown> } })
+          .Boxalarm.entityTypes,
+      ).map((t) => `Boxalarm::${t}`);
+      expect(resourceTypes.size).toBeGreaterThan(0);
+      expect([...resourceTypes].filter((t) => !entityTypes.includes(t))).toEqual([]);
+    });
+  });
+
   it("sets principalEntityType so Cognito principals resolve to Boxalarm::User", async () => {
     const store = await build();
     const principalEntityType = await resolve(store.identitySource.principalEntityType);
     expect(principalEntityType).toBe("Boxalarm::User");
   });
 
-  it("declares no permit-all / default-allow policy — only the four role-gated statements (AC4 fail-secure)", async () => {
+  it("declares no permit-all / default-allow policy — only role-gated statements (AC4 fail-secure)", async () => {
     const store = await build();
     const defs = await Promise.all([
       resolve(store.adminActionsPolicy.definition),
       resolve(store.viewConfigPolicy.definition),
       resolve(store.selfServiceActionsPolicy.definition),
       resolve(store.officerTierActionsPolicy.definition),
+      resolve(store.inspectionsMemberActionsPolicy.definition),
+      resolve(store.inspectionsOfficerActionsPolicy.definition),
     ]);
     for (const def of defs) {
       expect(def?.static?.statement).not.toMatch(
