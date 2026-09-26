@@ -32,6 +32,9 @@ import { Events as TrainingEvents } from "./components/training/events";
 import { Hours as TrainingHours } from "./components/training/hours";
 import { Reports as TrainingReports } from "./components/training/reports";
 import { Transcript as TrainingTranscript } from "./components/training/transcript";
+import { Equipment as InventoryEquipment } from "./components/inventory/equipment";
+import { Consumables as InventoryConsumables } from "./components/inventory/consumables";
+import { Ppe as InventoryPpe } from "./components/inventory/ppe";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -340,6 +343,36 @@ export const trainingTranscript = new TrainingTranscript("training-transcript", 
   policyStoreId: policyStore.policyStoreId,
   logGroup: trainingLogGroup,
   httpApi,
+});
+
+// api-gap P0-6: inventory-service — equipment registry, consumables and PPE, plus the
+// daily consumable-reorder and PPE-expiry scanners. All share the platform table.
+// Compartment inventory (/apparatus/{unitId}/inventory) belongs to apparatus-service.
+const inventoryLogGroup = serviceLogGroupByName["inventory-service"];
+const inventoryCommon = {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: inventoryLogGroup,
+  httpApi,
+};
+
+export const inventoryEquipment = new InventoryEquipment("inventory-equipment", inventoryCommon);
+
+export const inventoryConsumables = new InventoryConsumables("inventory-consumables", {
+  ...inventoryCommon,
+  deptId,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+});
+
+export const inventoryPpe = new InventoryPpe("inventory-ppe", {
+  ...inventoryCommon,
+  deptId,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
 });
 
 export const platformConfig = new PlatformConfig("platform-config", {
