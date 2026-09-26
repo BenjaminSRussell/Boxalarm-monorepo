@@ -75,6 +75,31 @@ export const OFFICER_TIER_ACTIONS = [
 ] as const;
 export const OFFICER_TIER_GROUPS = ["OFFICER", "TRAINING", "CHIEF", "ADMIN"] as const;
 
+// inventory-service (api-gap P0-6): the actionIds its withAuthorization callers send
+// (backend/src/services/inventory-service/{equipment,consumables,lifecycle,ppe}). The
+// architecture's inventory table marks every read "Cognito" (any member) and the writes
+// "Cognito(admin)" — a Verified Permissions check requiring chief/admin/officer (§2
+// Auth column) — so reads go to every role and writes to exactly those three groups.
+// TRAINING and APPARATUS are deliberately not in the write tier: the architecture names
+// only chief/admin/officer, and the handlers' previous manual check allowed the same three.
+// IssuePpeAssignment has no row in the architecture table; issuing gear to a member is an
+// admin-tier write like registering equipment, so it sits with the other writes.
+export const INVENTORY_READ_ACTIONS = [
+  "ListEquipment",
+  "ViewEquipmentAsset",
+  "ListConsumables",
+  "ViewPpeAssignments",
+] as const;
+
+export const INVENTORY_ADMIN_ACTIONS = [
+  "RegisterEquipmentAsset",
+  "AssignEquipmentAsset",
+  "SetEquipmentLocation",
+  "TransitionAssetLifecycle",
+  "IssuePpeAssignment",
+] as const;
+export const INVENTORY_ADMIN_GROUPS = ["OFFICER", "CHIEF", "ADMIN"] as const;
+
 // Department-scoping is NOT expressed here as a `when` clause comparing
 // principal/resource attributes. Two things rule that out for every action above:
 //   1. @boxalarm/authz's isAuthorized() calls IsAuthorizedWithTokenCommand with the
@@ -105,6 +130,7 @@ export const CEDAR_SCHEMA = JSON.stringify({
       ShiftSwapRequest: {},
       TrainingEvent: {},
       TrainingReport: {},
+      Asset: {},
     },
     actions: {
       ViewConfig: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
@@ -164,6 +190,21 @@ export const CEDAR_SCHEMA = JSON.stringify({
       ListPendingShiftSwaps: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
       },
+      ListEquipment: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
+      ViewEquipmentAsset: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Asset"] } },
+      ListConsumables: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
+      },
+      ViewPpeAssignments: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Member"] } },
+      RegisterEquipmentAsset: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] },
+      },
+      AssignEquipmentAsset: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Asset"] } },
+      SetEquipmentLocation: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Asset"] } },
+      TransitionAssetLifecycle: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Asset"] },
+      },
+      IssuePpeAssignment: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Member"] } },
     },
   },
 });
@@ -227,5 +268,28 @@ export function officerTierActionsPolicy(userPoolId: string): string {
     (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
   ).join(" || ");
   const actions = OFFICER_TIER_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
+  return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+/**
+ * inventory-service reads (equipment registry, consumable stock, PPE) — every role. Like
+ * ViewCertifications, ViewPpeAssignments takes an arbitrary path memberId, so any member
+ * may read any same-department member's PPE; the architecture's "Cognito" auth on
+ * GET /inventory/ppe/{memberId} permits that, and the dept-scoped keys hold the boundary.
+ */
+export function inventoryReadActionsPolicy(userPoolId: string): string {
+  const groupCheck = ROLE_GROUPS.map(
+    (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
+  ).join(" || ");
+  const actions = INVENTORY_READ_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
+  return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
+}
+
+/** inventory-service writes (register/assign/locate equipment, lifecycle, issue PPE) — chief/admin/officer. */
+export function inventoryAdminActionsPolicy(userPoolId: string): string {
+  const groupCheck = INVENTORY_ADMIN_GROUPS.map(
+    (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,
+  ).join(" || ");
+  const actions = INVENTORY_ADMIN_ACTIONS.map((a) => `Boxalarm::Action::"${a}"`).join(", ");
   return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
 }
