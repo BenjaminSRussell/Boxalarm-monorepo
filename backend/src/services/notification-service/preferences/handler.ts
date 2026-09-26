@@ -3,6 +3,7 @@ import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
   badRequestProblem,
   extractTraceId,
+  notFoundProblem,
   serviceUnavailableProblem,
   withAuthorization,
   type CedarPrincipalContext,
@@ -138,3 +139,17 @@ export const putHandler = withAuthorization(putPreferences, {
   resourceType: 'Boxalarm::Member',
   resourceId: (event) => event.requestContext.authorizer?.lambda?.sub ?? '',
 });
+
+export const GET_ROUTE_KEY = 'GET /api/v1/notifications/preferences';
+export const PUT_ROUTE_KEY = 'PUT /api/v1/notifications/preferences';
+
+/** Lambda entry point: one function serves both preference routes, dispatched on routeKey. */
+export const handler = async (event: GuardEvent): Promise<APIGatewayProxyResultV2> => {
+  if (event.routeKey === GET_ROUTE_KEY) {
+    return getHandler(event);
+  }
+  if (event.routeKey === PUT_ROUTE_KEY) {
+    return putHandler(event);
+  }
+  return notFoundProblem(extractTraceId(event), `No route for ${event.routeKey}.`);
+};

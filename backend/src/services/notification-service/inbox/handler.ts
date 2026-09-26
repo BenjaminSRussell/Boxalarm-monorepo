@@ -156,3 +156,17 @@ export const markReadHandler = withAuthorization(markNotificationRead, {
   resourceType: 'Boxalarm::Notification',
   resourceId: (event) => event.pathParameters?.id ?? '',
 });
+
+export const LIST_ROUTE_KEY = 'GET /api/v1/notifications';
+export const MARK_READ_ROUTE_KEY = 'POST /api/v1/notifications/{id}/read';
+
+/** Lambda entry point: one function serves both inbox routes, dispatched on routeKey. */
+export const handler = async (event: GuardEvent): Promise<APIGatewayProxyResultV2> => {
+  if (event.routeKey === LIST_ROUTE_KEY) {
+    return listHandler(event);
+  }
+  if (event.routeKey === MARK_READ_ROUTE_KEY) {
+    return markReadHandler(event);
+  }
+  return notFoundProblem(extractTraceId(event), `No route for ${event.routeKey}.`);
+};
