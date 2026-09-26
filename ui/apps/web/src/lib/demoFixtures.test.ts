@@ -85,3 +85,37 @@ test('revokes a member session through the fixture store', async () => {
   const body = (await response.json()) as { status: string };
   expect(body.status).toBe('revoked');
 });
+
+test('serves the notification inbox, marks one read, and round-trips a preference', async () => {
+  const list = await apiRequest('notifications', tokens);
+  const inbox = (await list.json()) as {
+    items: { notificationId: string; readAt: number | null }[];
+    nextCursor: string | null;
+  };
+  expect(inbox.nextCursor).toBeNull();
+  const unread = inbox.items.find((n) => n.readAt === null);
+  expect(unread).toBeDefined();
+
+  await apiRequest(`notifications/${unread!.notificationId}/read`, tokens, { method: 'POST' });
+  const after = (await (await apiRequest('notifications?cursor=x', tokens)).json()) as {
+    items: { notificationId: string; readAt: number | null }[];
+  };
+  expect(
+    after.items.find((n) => n.notificationId === unread!.notificationId)?.readAt,
+  ).not.toBeNull();
+
+  await apiRequest('notifications/preferences', tokens, {
+    method: 'PUT',
+    body: JSON.stringify({ category: 'cert-expiry', channels: { push: true, email: false } }),
+  });
+  const prefs = (await (await apiRequest('notifications/preferences', tokens)).json()) as {
+    preferences: { category: string; channels: { push: boolean; email: boolean } }[];
+  };
+  expect(prefs.preferences).toEqual([
+    { category: 'cert-expiry', channels: { push: true, email: false } },
+  ]);
+
+  await expect(
+    apiRequest('notifications/missing/read', tokens, { method: 'POST' }),
+  ).rejects.toBeInstanceOf(ApiError);
+});

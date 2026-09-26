@@ -25,7 +25,7 @@ function buildEvent(routeKey: string, body: unknown): GuardEvent {
   return {
     version: '2.0',
     routeKey,
-    rawPath: '/notifications/preferences',
+    rawPath: '/api/v1/notifications/preferences',
     rawQueryString: '',
     headers: { authorization: 'Bearer token' },
     pathParameters: undefined,
@@ -74,7 +74,7 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
 
     const { putHandler, getHandler } = await import('./handler.js');
     const putResult = (await putHandler(
-      buildEvent('PUT /notifications/preferences', {
+      buildEvent('PUT /api/v1/notifications/preferences', {
         category: 'cert-expiry',
         channels: { push: true, email: false },
       }),
@@ -82,7 +82,7 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
     expect(putResult.statusCode).toBe(200);
 
     const getResult = (await getHandler(
-      buildEvent('GET /notifications/preferences', undefined),
+      buildEvent('GET /api/v1/notifications/preferences', undefined),
     )) as {
       statusCode: number;
       body: string;
@@ -113,7 +113,7 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
 
     const { putHandler } = await import('./handler.js');
     const result = (await putHandler(
-      buildEvent('PUT /notifications/preferences', { category: 'cert-expiry' }),
+      buildEvent('PUT /api/v1/notifications/preferences', { category: 'cert-expiry' }),
     )) as { statusCode: number };
 
     expect(result.statusCode).toBe(400);
@@ -127,7 +127,7 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
 
     const { putHandler } = await import('./handler.js');
     const result = (await putHandler(
-      buildEvent('PUT /notifications/preferences', {
+      buildEvent('PUT /api/v1/notifications/preferences', {
         category: 42,
         channels: { push: false, email: false },
       }),
@@ -143,7 +143,9 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
     mockDdb(dynamoSend);
 
     const { getHandler } = await import('./handler.js');
-    const result = (await getHandler(buildEvent('GET /notifications/preferences', undefined))) as {
+    const result = (await getHandler(
+      buildEvent('GET /api/v1/notifications/preferences', undefined),
+    )) as {
       statusCode: number;
     };
 
@@ -158,13 +160,54 @@ describe('preferences handler (entrypoint-test + authz-wiring obligations)', () 
 
     const { putHandler } = await import('./handler.js');
     const result = (await putHandler(
-      buildEvent('PUT /notifications/preferences', {
+      buildEvent('PUT /api/v1/notifications/preferences', {
         category: 'cert-expiry',
         channels: { push: true, email: false },
       }),
     )) as { statusCode: number };
 
     expect(result.statusCode).toBe(403);
+    expect(dynamoSend).not.toHaveBeenCalled();
+  });
+
+  it('the Lambda entry point dispatches GET and PUT /api/v1/notifications/preferences', async () => {
+    send.mockResolvedValue({ decision: Decision.ALLOW });
+    const dynamoSend = vi.fn().mockResolvedValue({ Items: [] });
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const get = (await handler(buildEvent('GET /api/v1/notifications/preferences', undefined))) as {
+      statusCode: number;
+      body: string;
+    };
+    expect(get.statusCode).toBe(200);
+    expect(JSON.parse(get.body)).toEqual({ preferences: [] });
+
+    const put = (await handler(
+      buildEvent('PUT /api/v1/notifications/preferences', {
+        category: 'cert-expiry',
+        channels: { push: true, email: false },
+      }),
+    )) as { statusCode: number };
+    expect(put.statusCode).toBe(200);
+    expect(
+      dynamoSend.mock.calls.map(
+        (c) => (c[0] as { constructor: { name: string } }).constructor.name,
+      ),
+    ).toEqual(['QueryCommand', 'PutCommand']);
+  });
+
+  it('the Lambda entry point returns 404 for the legacy bare /notifications/preferences route key', async () => {
+    const dynamoSend = vi.fn();
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const result = (await handler(buildEvent('GET /notifications/preferences', undefined))) as {
+      statusCode: number;
+    };
+
+    expect(result.statusCode).toBe(404);
+    expect(send).not.toHaveBeenCalled();
     expect(dynamoSend).not.toHaveBeenCalled();
   });
 });

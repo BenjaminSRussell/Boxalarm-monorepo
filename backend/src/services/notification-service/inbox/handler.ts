@@ -45,6 +45,19 @@ function decodeCursor(cursor: string | undefined): Record<string, unknown> | und
   }
 }
 
+// The member-facing shape: never the raw item, whose pk/sk/gsi1 keys and ttl are storage
+// details (and the pk embeds the dept scope).
+function toInboxEntry(item: Record<string, unknown>): Record<string, unknown> {
+  return {
+    notificationId: item.notificationId,
+    category: item.category,
+    summary: item.summary,
+    items: item.items ?? [],
+    createdAt: item.createdAt,
+    readAt: item.readAt ?? null,
+  };
+}
+
 async function listNotifications(
   event: GuardEvent,
   principal: CedarPrincipalContext,
@@ -72,7 +85,7 @@ async function listNotifications(
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        items: result.Items ?? [],
+        items: (result.Items ?? []).map(toInboxEntry),
         nextCursor: encodeCursor(result.LastEvaluatedKey as Record<string, unknown> | undefined),
       }),
     };
@@ -156,3 +169,17 @@ export const markReadHandler = withAuthorization(markNotificationRead, {
   resourceType: 'Boxalarm::Notification',
   resourceId: (event) => event.pathParameters?.id ?? '',
 });
+
+export const LIST_ROUTE_KEY = 'GET /api/v1/notifications';
+export const MARK_READ_ROUTE_KEY = 'POST /api/v1/notifications/{id}/read';
+
+/** Lambda entry point: one function serves both inbox routes, dispatched on routeKey. */
+export const handler = async (event: GuardEvent): Promise<APIGatewayProxyResultV2> => {
+  if (event.routeKey === LIST_ROUTE_KEY) {
+    return listHandler(event);
+  }
+  if (event.routeKey === MARK_READ_ROUTE_KEY) {
+    return markReadHandler(event);
+  }
+  return notFoundProblem(extractTraceId(event), `No route for ${event.routeKey}.`);
+};

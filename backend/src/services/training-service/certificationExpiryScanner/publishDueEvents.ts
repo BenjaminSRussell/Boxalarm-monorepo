@@ -125,7 +125,10 @@ export async function publishDueEvent(
               source: EVENT_SOURCE,
               correlationId: params.correlationId,
               schemaVersion: '1.0',
+              // deptId: notification-service's consumer builds every dept-scoped key
+              // from it, and nothing else in the envelope carries the department.
               payload: {
+                deptId: params.deptId,
                 memberId: params.memberId,
                 certId: params.certId,
                 expiryDate: params.expiryDate,

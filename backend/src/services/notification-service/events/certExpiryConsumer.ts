@@ -22,8 +22,20 @@ interface CertExpiryDueEnvelope {
   readonly expiryDate: string;
 }
 
+const ACCEPTED_EVENT_TYPES: ReadonlySet<unknown> = new Set([
+  'cert.expiry.due',
+  // architecture.md N-5's canonical rename; training-service still emits cert.expiry.due.
+  'training.expiry.due',
+]);
+
+// The SQS body is the EventBridge event (rule target, no input transformer): the
+// standard Boxalarm envelope lives under `detail`, never at the top level.
 function parseEnvelope(body: string): CertExpiryDueEnvelope {
-  const raw = JSON.parse(body) as Record<string, unknown>;
+  const parsed = JSON.parse(body) as { detail?: unknown };
+  const raw = parsed.detail as Record<string, unknown> | undefined;
+  if (typeof raw !== 'object' || raw === null || !ACCEPTED_EVENT_TYPES.has(raw.eventType)) {
+    throw new Error('cert.expiry.due event failed shape validation');
+  }
   const eventId = raw.eventId;
   const payload = raw.payload as Record<string, unknown> | undefined;
   const deptId = payload?.deptId;

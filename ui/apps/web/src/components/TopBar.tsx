@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { primaryRole as pickPrimaryRole } from '../auth/roles';
 import { useOnlineStatus } from '../lib/useOnlineStatus';
@@ -20,9 +21,12 @@ interface TopBarProps {
    * PrimaryNav's static sidebar is hidden and this button is the only way to reach navigation
    * and Sign out. Visible only below `md` (AppShell.module.css `.menuButton`). */
   onOpenNav: () => void;
+  /** Right-side slot for the notification bell (AppShell passes NotificationBell, which needs
+   * the query client and router that AppShell always has). */
+  notifications?: ReactNode;
 }
 
-export function TopBar({ onOpenNav }: TopBarProps) {
+export function TopBar({ onOpenNav, notifications }: TopBarProps) {
   const { roles } = useAuth();
   const [palette, setPalette] = usePalette();
   const isCab = palette === 'cab';
@@ -60,6 +64,7 @@ export function TopBar({ onOpenNav }: TopBarProps) {
         </div>
       </div>
       <div className={styles.topbarRight}>
+        {notifications}
         {primaryRole ? (
           <span className={styles.roleLabel}>{ROLE_LABEL[primaryRole] ?? primaryRole}</span>
         ) : null}

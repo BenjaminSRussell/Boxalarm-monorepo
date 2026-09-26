@@ -15,6 +15,7 @@ const GUARDED_SERVICES = new Set([
   "apparatus-service",
   "inventory-service",
   "inspections-service",
+  "notification-service",
 ]);
 
 const { lambdaCodeCalls } = vi.hoisted(() => ({ lambdaCodeCalls: new Set<string>() }));

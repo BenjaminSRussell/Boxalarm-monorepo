@@ -682,4 +682,24 @@ export const LAMBDA_ENTRIES = [
     function: 'field-capture',
     entry: 'src/services/inspections-service/fieldCapture/handler.ts',
   },
+  {
+    service: 'notification-service',
+    function: 'inbox',
+    entry: 'src/services/notification-service/inbox/handler.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'preferences',
+    entry: 'src/services/notification-service/preferences/handler.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'cert-expiry-consumer',
+    entry: 'src/services/notification-service/events/certExpiryConsumer.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'digest-job',
+    entry: 'src/services/notification-service/digest/digestJob.ts',
+  },
 ];

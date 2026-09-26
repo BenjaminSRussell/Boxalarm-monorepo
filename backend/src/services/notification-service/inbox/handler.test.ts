@@ -29,7 +29,7 @@ function buildEvent(
   return {
     version: '2.0',
     routeKey,
-    rawPath: '/notifications',
+    rawPath: '/api/v1/notifications',
     rawQueryString: '',
     headers: { authorization: 'Bearer token' },
     pathParameters,
@@ -61,7 +61,7 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     vi.doUnmock('../dynamoClient.js');
   });
 
-  it('GET /notifications returns 200 with the member-scoped page and a nextCursor', async () => {
+  it('GET /api/v1/notifications returns 200 with the member-scoped page and a nextCursor', async () => {
     send.mockResolvedValue({ decision: Decision.ALLOW });
     const dynamoSend = vi.fn().mockResolvedValue({
       Items: [{ notificationId: 'NOTIF-1', readAt: null }],
@@ -70,7 +70,7 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     mockDdb(dynamoSend);
 
     const { listHandler } = await import('./handler.js');
-    const result = (await listHandler(buildEvent('GET /notifications', undefined))) as {
+    const result = (await listHandler(buildEvent('GET /api/v1/notifications', undefined))) as {
       statusCode: number;
       body: string;
     };
@@ -81,13 +81,13 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     expect(body.nextCursor).not.toBeNull();
   });
 
-  it('GET /notifications returns 401/403 when Verified Permissions denies, never invoking the query', async () => {
+  it('GET /api/v1/notifications returns 401/403 when Verified Permissions denies, never invoking the query', async () => {
     send.mockResolvedValue({ decision: Decision.DENY });
     const dynamoSend = vi.fn();
     mockDdb(dynamoSend);
 
     const { listHandler } = await import('./handler.js');
-    const result = (await listHandler(buildEvent('GET /notifications', undefined))) as {
+    const result = (await listHandler(buildEvent('GET /api/v1/notifications', undefined))) as {
       statusCode: number;
     };
 
@@ -95,7 +95,7 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     expect(dynamoSend).not.toHaveBeenCalled();
   });
 
-  it('POST /notifications/{id}/read marks readAt and returns it (AC6)', async () => {
+  it('POST /api/v1/notifications/{id}/read marks readAt and returns it (AC6)', async () => {
     send.mockResolvedValue({ decision: Decision.ALLOW });
     const dynamoSend = vi
       .fn()
@@ -114,7 +114,7 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
 
     const { markReadHandler } = await import('./handler.js');
     const result = (await markReadHandler(
-      buildEvent('POST /notifications/{id}/read', { id: 'NOTIF-1' }),
+      buildEvent('POST /api/v1/notifications/{id}/read', { id: 'NOTIF-1' }),
     )) as { statusCode: number; body: string };
 
     expect(result.statusCode).toBe(200);
@@ -123,44 +123,124 @@ describe('inbox handler (entrypoint-test + authz-wiring obligations)', () => {
     expect(typeof body.readAt).toBe('number');
   });
 
-  it('POST /notifications/{id}/read returns 400 when the id path parameter is absent (P9)', async () => {
+  it('POST /api/v1/notifications/{id}/read returns 400 when the id path parameter is absent (P9)', async () => {
     send.mockResolvedValue({ decision: Decision.ALLOW });
     const dynamoSend = vi.fn();
     mockDdb(dynamoSend);
 
     const { markReadHandler } = await import('./handler.js');
     const result = (await markReadHandler(
-      buildEvent('POST /notifications/{id}/read', undefined),
+      buildEvent('POST /api/v1/notifications/{id}/read', undefined),
     )) as { statusCode: number };
 
     expect(result.statusCode).toBe(400);
     expect(dynamoSend).not.toHaveBeenCalled();
   });
 
-  it("POST /notifications/{id}/read returns 404 when the id is not in the member's own inbox", async () => {
+  it("POST /api/v1/notifications/{id}/read returns 404 when the id is not in the member's own inbox", async () => {
     send.mockResolvedValue({ decision: Decision.ALLOW });
     const dynamoSend = vi.fn().mockResolvedValue({ Items: [] });
     mockDdb(dynamoSend);
 
     const { markReadHandler } = await import('./handler.js');
     const result = (await markReadHandler(
-      buildEvent('POST /notifications/{id}/read', { id: 'NOTIF-missing' }),
+      buildEvent('POST /api/v1/notifications/{id}/read', { id: 'NOTIF-missing' }),
     )) as { statusCode: number };
 
     expect(result.statusCode).toBe(404);
   });
 
-  it('POST /notifications/{id}/read returns 401/403 when Verified Permissions denies', async () => {
+  it('POST /api/v1/notifications/{id}/read returns 401/403 when Verified Permissions denies', async () => {
     send.mockResolvedValue({ decision: Decision.DENY });
     const dynamoSend = vi.fn();
     mockDdb(dynamoSend);
 
     const { markReadHandler } = await import('./handler.js');
     const result = (await markReadHandler(
-      buildEvent('POST /notifications/{id}/read', { id: 'NOTIF-1' }),
+      buildEvent('POST /api/v1/notifications/{id}/read', { id: 'NOTIF-1' }),
     )) as { statusCode: number };
 
     expect(result.statusCode).toBe(403);
     expect(dynamoSend).not.toHaveBeenCalled();
+  });
+
+  it('GET /api/v1/notifications returns only the member-facing fields, never storage keys', async () => {
+    send.mockResolvedValue({ decision: Decision.ALLOW });
+    const dynamoSend = vi.fn().mockResolvedValue({
+      Items: [
+        {
+          pk: 'DEPT#NICHOLS#MEMBER#MBR-1',
+          sk: 'NOTIF#MBR-1#1#NOTIF-1',
+          gsi1pk: 'DEPT#NICHOLS#MEMBER#MBR-1',
+          gsi1sk: 'NOTIFICATION#NOTIF-1',
+          ttl: 123,
+          entityType: 'NOTIFICATION',
+          memberId: 'MBR-1',
+          notificationId: 'NOTIF-1',
+          category: 'cert-expiry',
+          summary: '1 item expiring',
+          items: [{ certId: 'CERT-1', expiryDate: '2027-01-10' }],
+          createdAt: 1,
+          readAt: null,
+        },
+      ],
+    });
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const result = (await handler(buildEvent('GET /api/v1/notifications', undefined))) as {
+      statusCode: number;
+      body: string;
+    };
+
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body) as { items: Record<string, unknown>[] };
+    expect(body.items).toEqual([
+      {
+        notificationId: 'NOTIF-1',
+        category: 'cert-expiry',
+        summary: '1 item expiring',
+        items: [{ certId: 'CERT-1', expiryDate: '2027-01-10' }],
+        createdAt: 1,
+        readAt: null,
+      },
+    ]);
+  });
+
+  it('the Lambda entry point dispatches POST /api/v1/notifications/{id}/read to mark-read', async () => {
+    send.mockResolvedValue({ decision: Decision.ALLOW });
+    const dynamoSend = vi
+      .fn()
+      .mockImplementation((command: { constructor: { name: string } }) =>
+        Promise.resolve(
+          command.constructor.name === 'QueryCommand'
+            ? { Items: [{ sk: 'NOTIF#MBR-1#1#NOTIF-1' }] }
+            : {},
+        ),
+      );
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const result = (await handler(
+      buildEvent('POST /api/v1/notifications/{id}/read', { id: 'NOTIF-1' }),
+    )) as { statusCode: number; body: string };
+
+    expect(result.statusCode).toBe(200);
+    expect((JSON.parse(result.body) as { notificationId: string }).notificationId).toBe('NOTIF-1');
+  });
+
+  it('the Lambda entry point returns 404 for the legacy bare /notifications route key', async () => {
+    send.mockResolvedValue({ decision: Decision.ALLOW });
+    const dynamoSend = vi.fn();
+    mockDdb(dynamoSend);
+
+    const { handler } = await import('./handler.js');
+    const result = (await handler(buildEvent('GET /notifications', undefined))) as {
+      statusCode: number;
+    };
+
+    expect(result.statusCode).toBe(404);
+    expect(dynamoSend).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 });

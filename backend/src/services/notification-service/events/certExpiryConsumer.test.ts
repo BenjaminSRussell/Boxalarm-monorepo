@@ -18,14 +18,21 @@ function sqsEvent(payload: Record<string, unknown>, messageId = 'msg-1'): SQSEve
     Records: [
       {
         messageId,
+        // What an EventBridge rule -> SQS target delivers: the event, envelope under detail.
         body: JSON.stringify({
-          eventId: 'evt-1',
-          eventTime: '2026-09-15T00:00:00Z',
-          eventType: 'cert.expiry.due',
+          version: '0',
+          id: 'eb-1',
+          'detail-type': 'cert.expiry.due',
           source: 'training-service',
-          correlationId: 'CERT-1',
-          schemaVersion: '1.0',
-          payload,
+          detail: {
+            eventId: 'evt-1',
+            eventTime: '2026-09-15T00:00:00Z',
+            eventType: 'cert.expiry.due',
+            source: 'training-service',
+            correlationId: 'CERT-1',
+            schemaVersion: '1.0',
+            payload,
+          },
         }),
       },
     ],
@@ -121,5 +128,59 @@ describe('certExpiryConsumer (entrypoint-test obligation)', () => {
     ).rejects.toThrow('boom');
     expect(errorSpy.mock.calls[0]?.[0] as string).toContain('boom');
     errorSpy.mockRestore();
+  });
+
+  it('rejects a bare (un-wrapped) envelope instead of reading it as if it were the event', async () => {
+    const send = vi.fn();
+    mockDdb(send);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await import('./certExpiryConsumer.js');
+
+    const bare = {
+      Records: [
+        {
+          messageId: 'msg-2',
+          body: JSON.stringify({
+            eventId: 'evt-1',
+            eventType: 'cert.expiry.due',
+            payload: {
+              deptId: 'NICHOLS',
+              memberId: 'MBR-1',
+              certId: 'CERT-1',
+              expiryDate: '2027-01-10',
+            },
+          }),
+        },
+      ],
+    } as unknown as SQSEvent;
+
+    await expect(handler(bare)).rejects.toThrow('cert.expiry.due event failed shape validation');
+    expect(send).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('accepts the exact detail training-service publishes (producer/consumer contract)', async () => {
+    const send = vi.fn().mockResolvedValue({});
+    mockDdb(send);
+    const { handler } = await import('./certExpiryConsumer.js');
+
+    // Mirrors publishDueEvents.ts's Detail, including leadDays, which this consumer ignores.
+    await handler(
+      sqsEvent({
+        deptId: 'NICHOLS',
+        memberId: 'MBR-0034',
+        certId: 'CERT-0091',
+        expiryDate: '2026-10-14',
+        leadDays: 30,
+      }),
+    );
+
+    const call = send.mock.calls[0]?.[0] as {
+      input: { TransactItems: { Put?: { Item: Record<string, unknown> } }[] };
+    };
+    expect(call.input.TransactItems[0]?.Put?.Item).toMatchObject({
+      pk: 'DEPT#NICHOLS#MEMBER#MBR-0034',
+      certId: 'CERT-0091',
+    });
   });
 });

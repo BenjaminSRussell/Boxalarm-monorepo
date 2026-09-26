@@ -367,7 +367,13 @@ export class Certifications extends pulumi.ComponentResource {
       `${name}-scanner-schedule`,
       {
         name: `boxalarm-${env}-training-cert-expiry-scanner-daily`,
-        scheduleExpression: "rate(1 day)",
+        // A fixed UTC time, not rate(1 day): notification-service buckets the
+        // cert.expiry.due events this run publishes by UTC day, and its daily digest
+        // (components/notification/digest.ts, 12:00 UTC) only reads today's bucket. With
+        // rate(1 day) the run time is whenever the schedule was created — a run after the
+        // digest would strand that day's reminders forever.
+        scheduleExpression: "cron(0 10 * * ? *)",
+        scheduleExpressionTimezone: "UTC",
         flexibleTimeWindow: { mode: "OFF" },
         target: {
           arn: this.scannerLambda.function.arn,

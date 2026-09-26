@@ -24,13 +24,7 @@ const API_PREFIX = "/api/v1/";
  * normalized to `{}`. Deploying a route must remove its entry: the test fails on a stale
  * entry as well as on an unlisted gap, so this list is always the exact current gap.
  */
-const KNOWN_UNDEPLOYED = new Set<string>([
-  // notification-service: no infra, and its handlers use a bare /notifications prefix.
-  "GET /api/v1/notifications",
-  "GET /api/v1/notifications/preferences",
-  "POST /api/v1/notifications/{}/read",
-  "PUT /api/v1/notifications/preferences",
-]);
+const KNOWN_UNDEPLOYED = new Set<string>([]);
 
 interface UiCall {
   readonly method: string;

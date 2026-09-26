@@ -123,6 +123,7 @@ export const STACK_CONFIG: Record<string, string> = {
   "boxalarm-infra:voiceWebhookSecret": "test-voice-secret",
   "boxalarm-infra:pushWebhookSecret": "test-push-secret",
   "boxalarm-infra:canaryMemberId": "test-canary-member",
+  "boxalarm-infra:notificationSesFromAddress": "notifications@boxalarm.example",
 };
 
 /** Waits until no new mocked resources appear — index.ts registers many via apply(). */

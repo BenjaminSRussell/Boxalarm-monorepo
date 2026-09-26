@@ -57,6 +57,15 @@ export const SELF_SERVICE_ACTIONS = [
   "ViewTranscript",
   "ViewCertifications",
   "ViewTrainingHours",
+  // notification-service inbox + preferences (inbox/handler.ts, preferences/handler.ts).
+  // Strictly own-record: every one keys its DynamoDB access on the caller's own
+  // principal.sub, never a path memberId. MarkNotificationRead's resource is the path
+  // notification id, and the handler only finds it under the caller's own partition — a
+  // foreign id is a 404, so a role check is the whole Cedar decision.
+  "ViewOwnNotifications",
+  "MarkNotificationRead",
+  "ViewOwnNotificationPreferences",
+  "UpdateOwnNotificationPreferences",
 ] as const;
 
 export const OFFICER_TIER_ACTIONS = [
@@ -290,6 +299,7 @@ export const CEDAR_SCHEMA = JSON.stringify({
       Inspection: {},
       InspectionList: {},
       InspectionsMap: {},
+      Notification: {},
     },
     actions: {
       ViewConfig: { appliesTo: { principalTypes: ["User"], resourceTypes: ["Department"] } },
@@ -342,6 +352,18 @@ export const CEDAR_SCHEMA = JSON.stringify({
       },
       RecordTrainingAttendance: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["TrainingEvent"] },
+      },
+      ViewOwnNotifications: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Member"] },
+      },
+      MarkNotificationRead: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Notification"] },
+      },
+      ViewOwnNotificationPreferences: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Member"] },
+      },
+      UpdateOwnNotificationPreferences: {
+        appliesTo: { principalTypes: ["User"], resourceTypes: ["Member"] },
       },
       ApproveShiftSwap: {
         appliesTo: { principalTypes: ["User"], resourceTypes: ["ShiftSwapRequest"] },
@@ -428,7 +450,7 @@ export function viewConfigPolicy(userPoolId: string): string {
 }
 
 /**
- * Every-role personnel/training actions (E2/E3-INFRA). Two different scopes live here:
+ * Every-role personnel/training/notification actions (E2/E3-INFRA). Three scopes live here:
  *  - Own-record: attendance, availability, LOSAP total and SelfUpdateMember act on the
  *    caller's own principal.sub (the handler derives it, or rejects a path memberId that is
  *    not the caller's).
@@ -437,6 +459,8 @@ export function viewConfigPolicy(userPoolId: string): string {
  *    read any same-department member's quals, certifications (including attachmentS3Key),
  *    transcript and hours. The architecture's "Cognito" auth on those routes permits that;
  *    the department boundary is enforced by the dept-scoped keys, not by Cedar (see above).
+ *  - Own inbox: the four notification actions read/write only the caller's own
+ *    notifications and preferences (principal.sub), so every role holds them.
  */
 export function selfServiceActionsPolicy(userPoolId: string): string {
   const groupCheck = ROLE_GROUPS.map(

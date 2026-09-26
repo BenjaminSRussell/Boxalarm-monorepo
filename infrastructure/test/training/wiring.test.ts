@@ -148,6 +148,10 @@ describe("training Lambdas: env and IAM match their handlers", { timeout: 30_000
         deadLetterConfig?: { arn: string };
       };
       expect(target.retryPolicy?.maximumRetryAttempts).toBe(3);
+      // Pinned ahead of the notification digest (12:00 UTC), which reads only today's
+      // UTC bucket of the cert.expiry.due events this run publishes.
+      expect(schedule?.inputs.scheduleExpression).toBe("cron(0 10 * * ? *)");
+      expect(schedule?.inputs.scheduleExpressionTimezone).toBe("UTC");
       const dlqArn = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:boxalarm-dev-training-cert-expiry-scanner-dlq`;
       expect(target.deadLetterConfig?.arn).toBe(dlqArn);
 
