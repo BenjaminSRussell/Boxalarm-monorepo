@@ -8,6 +8,7 @@ import type {
   PutExposureInput,
   ResponseUnit,
   ResponseUnitType,
+  SubmissionStatus,
   TimeField,
 } from './types';
 import { MAX_NARRATIVE_LENGTH, TIME_FIELDS } from './types';
@@ -181,6 +182,8 @@ const seededDispatches: Record<
   },
 };
 
+const submissionByIncident = new Map<string, SubmissionStatus>();
+
 function findById(incidentId: string): Incident | undefined {
   return incidents.find((incident) => incident.incidentId === incidentId);
 }
@@ -313,6 +316,40 @@ export async function incidentsDemoRequest(
     };
     incidents = incidents.map((item) => (item.incidentId === incidentId ? updated : item));
     return json(updated);
+  }
+
+  // Demo NERIS submission: the worker is simulated as accepting on the next status read.
+  if (parts[2] === 'submit' && method === 'POST') {
+    if (incident.status !== 'VALIDATED') {
+      return problem(
+        409,
+        'Conflict',
+        `incident "${incidentId}" is not VALIDATED and cannot be submitted (current status "${incident.status}")`,
+      );
+    }
+    const submitted: Incident = { ...incident, status: 'SUBMITTED', updatedAt: nowSeconds };
+    incidents = incidents.map((item) => (item.incidentId === incidentId ? submitted : item));
+    submissionByIncident.set(incidentId, 'SUBMITTED');
+    return json({ incidentId, submissionStatus: 'SUBMITTED' }, 202);
+  }
+
+  if (parts[2] === 'submission' && parts.length === 3 && method === 'GET') {
+    const submissionStatus = submissionByIncident.get(incidentId) ?? null;
+    if (submissionStatus === 'SUBMITTED' || submissionStatus === 'RETRYING') {
+      submissionByIncident.set(incidentId, 'ACCEPTED');
+      incidents = incidents.map((item) =>
+        item.incidentId === incidentId ? { ...item, status: 'ACCEPTED' } : item,
+      );
+    }
+    return json({ incidentId, status: incident.status, submissionStatus });
+  }
+
+  if (parts[2] === 'submission' && parts[3] === 'retry' && method === 'POST') {
+    if (submissionByIncident.get(incidentId) !== 'FAILED') {
+      return problem(409, 'Conflict', `incident "${incidentId}" submission is not FAILED`);
+    }
+    submissionByIncident.set(incidentId, 'RETRYING');
+    return json({ incidentId, submissionStatus: 'RETRYING' }, 202);
   }
 
   if (parts[2] === 'narrative' && method === 'PUT') {

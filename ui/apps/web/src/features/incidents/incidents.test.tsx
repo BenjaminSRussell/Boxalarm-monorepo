@@ -366,6 +366,99 @@ test('valid core fields reach Validated and enable Submit', async () => {
   expect(screen.getByRole('button', { name: 'Submit' })).toHaveProperty('disabled', false);
 });
 
+test('Submit sends a validated report to NERIS and shows the submission status', async () => {
+  let current = detail({ status: 'VALIDATED' });
+  let submitCalls = 0;
+  server.use(
+    http.get('/api/v1/incidents/i-1', () => HttpResponse.json(current)),
+    http.post('/api/v1/incidents/i-1/submit', () => {
+      submitCalls += 1;
+      current = { ...current, status: 'SUBMITTED' };
+      return HttpResponse.json(
+        { incidentId: 'i-1', submissionStatus: 'SUBMITTED' },
+        { status: 202 },
+      );
+    }),
+    http.get('/api/v1/incidents/i-1/submission', () =>
+      HttpResponse.json({ incidentId: 'i-1', status: 'SUBMITTED', submissionStatus: 'SUBMITTED' }),
+    ),
+  );
+
+  const user = userEvent.setup();
+  renderIncidents(['CHIEF'], '/incidents/i-1');
+  await screen.findByRole('heading', { level: 1, name: /14 Elm St/ });
+  await user.click(screen.getByRole('button', { name: 'Review and submit' }));
+  await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+  expect(await screen.findByText('Sent to NERIS, waiting for a response')).toBeTruthy();
+  expect(submitCalls).toBe(1);
+  expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull();
+});
+
+test('a failed NERIS submission shows its reason and can be retried', async () => {
+  let submissionStatus = 'FAILED';
+  let retryCalls = 0;
+  server.use(
+    http.get('/api/v1/incidents/i-1', () => HttpResponse.json(detail({ status: 'SUBMITTED' }))),
+    http.get('/api/v1/incidents/i-1/submission', () =>
+      HttpResponse.json({
+        incidentId: 'i-1',
+        status: 'SUBMITTED',
+        submissionStatus,
+        ...(submissionStatus === 'FAILED' ? { submissionFailureReason: 'SERVER_ERROR' } : {}),
+      }),
+    ),
+    http.post('/api/v1/incidents/i-1/submission/retry', () => {
+      retryCalls += 1;
+      submissionStatus = 'RETRYING';
+      return HttpResponse.json(
+        { incidentId: 'i-1', submissionStatus: 'RETRYING' },
+        { status: 202 },
+      );
+    }),
+  );
+
+  const user = userEvent.setup();
+  renderIncidents(['OFFICER'], '/incidents/i-1');
+  await screen.findByRole('heading', { level: 1, name: /14 Elm St/ });
+  await user.click(screen.getByRole('button', { name: 'Review and submit' }));
+
+  expect(await screen.findByText('NERIS submission failed')).toBeTruthy();
+  expect(screen.getByText('Reason: SERVER_ERROR')).toBeTruthy();
+  await user.click(screen.getByRole('button', { name: 'Retry submission' }));
+  expect(await screen.findByText('Retrying, NERIS has not accepted it yet')).toBeTruthy();
+  expect(retryCalls).toBe(1);
+});
+
+test('a submit rejected by the API is shown, not swallowed', async () => {
+  server.use(
+    http.get('/api/v1/incidents/i-1', () => HttpResponse.json(detail({ status: 'VALIDATED' }))),
+    http.post('/api/v1/incidents/i-1/submit', () =>
+      HttpResponse.json(
+        {
+          type: 'about:blank',
+          title: 'Forbidden',
+          status: 403,
+          detail: 'Submitting an incident to NERIS requires an admin or chief role.',
+          traceId: 't-1',
+        },
+        { status: 403 },
+      ),
+    ),
+  );
+
+  const user = userEvent.setup();
+  renderIncidents(['OFFICER'], '/incidents/i-1');
+  await screen.findByRole('heading', { level: 1, name: /14 Elm St/ });
+  await user.click(screen.getByRole('button', { name: 'Review and submit' }));
+  await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+  expect(
+    (await screen.findAllByText('Submitting an incident to NERIS requires an admin or chief role.'))
+      .length,
+  ).toBeGreaterThan(0);
+});
+
 test('narrative saves and reloads unchanged, and an over-long narrative is kept', async () => {
   let current = detail({ narrative: 'Working fire, first floor kitchen.' });
   server.use(

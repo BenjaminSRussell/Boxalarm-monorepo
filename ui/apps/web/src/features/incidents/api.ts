@@ -14,6 +14,8 @@ import type {
   PutExposureResponse,
   ResponseUnit,
   SearchIncidentsParams,
+  SubmissionAccepted,
+  SubmissionState,
   TimeField,
   UpdateIncidentInput,
 } from './types';
@@ -108,6 +110,36 @@ export async function putExposure(
     body: JSON.stringify(input),
   });
   return (await response.json()) as PutExposureResponse;
+}
+
+/** F7.6: accept-and-queue — 202 once the incident is SUBMITTED and the worker is enqueued. */
+export async function submitIncident(
+  tokens: AuthTokenSource,
+  incidentId: string,
+): Promise<SubmissionAccepted> {
+  const response = await apiRequest(`${incidentPath(incidentId)}/submit`, tokens, {
+    method: 'POST',
+  });
+  return (await response.json()) as SubmissionAccepted;
+}
+
+export async function getSubmission(
+  tokens: AuthTokenSource,
+  incidentId: string,
+): Promise<SubmissionState> {
+  const response = await apiRequest(`${incidentPath(incidentId)}/submission`, tokens);
+  return (await response.json()) as SubmissionState;
+}
+
+/** Re-queues a FAILED submission (409 for any other submission status). */
+export async function retrySubmission(
+  tokens: AuthTokenSource,
+  incidentId: string,
+): Promise<SubmissionAccepted> {
+  const response = await apiRequest(`${incidentPath(incidentId)}/submission/retry`, tokens, {
+    method: 'POST',
+  });
+  return (await response.json()) as SubmissionAccepted;
 }
 
 export function fieldErrorsFromUnknown(error: unknown): FieldError[] {

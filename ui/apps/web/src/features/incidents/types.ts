@@ -23,6 +23,23 @@ export interface Incident {
   updatedAt: number;
 }
 
+/** incident-service submissionRepository.ts SUBMISSION_STATUSES (F7.7). */
+export type SubmissionStatus = 'SUBMITTED' | 'ACCEPTED' | 'FAILED' | 'RETRYING';
+
+/** GET /incidents/{id}/submission — status of the NERIS submission, never silently dropped. */
+export interface SubmissionState {
+  incidentId: string;
+  status: IncidentStatus;
+  submissionStatus: SubmissionStatus | null;
+  submissionFailureReason?: string;
+}
+
+/** 202 body of POST .../submit and POST .../submission/retry. */
+export interface SubmissionAccepted {
+  incidentId: string;
+  submissionStatus: SubmissionStatus;
+}
+
 export type ResponseUnitType = 'APPARATUS' | 'MEMBER';
 
 export interface ResponseUnit {

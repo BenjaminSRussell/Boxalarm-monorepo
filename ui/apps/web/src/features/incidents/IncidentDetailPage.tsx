@@ -11,9 +11,12 @@ import { PageHeader } from '../../components/ui/PageHeader';
 import {
   fieldErrorsFromUnknown,
   getIncident,
+  getSubmission,
   putExposure,
   putNarrative,
   putResponseTimes,
+  retrySubmission,
+  submitIncident,
   updateIncident,
 } from './api';
 import { focusFieldById } from './focusField';
@@ -24,6 +27,7 @@ import type {
   IncidentSecondary,
   IncidentStatus,
   ResponseUnit,
+  SubmissionStatus,
   TimeField,
 } from './types';
 import { MAX_NARRATIVE_LENGTH, TIME_FIELDS } from './types';
@@ -53,6 +57,24 @@ const STATUS_LABEL: Record<IncidentStatus, string> = {
   ACCEPTED: 'Accepted',
   REJECTED: 'Rejected',
 };
+
+const SUBMISSION_ROLE: Record<SubmissionStatus, 'neutral' | 'info' | 'warning' | 'ok' | 'danger'> =
+  {
+    SUBMITTED: 'warning',
+    RETRYING: 'warning',
+    ACCEPTED: 'ok',
+    FAILED: 'danger',
+  };
+
+const SUBMISSION_LABEL: Record<SubmissionStatus, string> = {
+  SUBMITTED: 'Sent to NERIS, waiting for a response',
+  RETRYING: 'Retrying, NERIS has not accepted it yet',
+  ACCEPTED: 'Accepted by NERIS',
+  FAILED: 'NERIS submission failed',
+};
+
+/** While NERIS has not answered, re-read the status so a failure is never silently missed. */
+const SUBMISSION_POLL_MS = 15_000;
 
 const TIME_LABEL: Record<TimeField, string> = {
   dispatchedAt: 'Dispatched',
@@ -113,6 +135,20 @@ function IncidentReport({ incident }: { incident: IncidentDetail }) {
   const skipInitialFocus = useRef(true);
   const errorTick = useRef(0);
   const [focusErrors, setFocusErrors] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const submitted = incident.status !== 'DRAFT' && incident.status !== 'VALIDATED';
+  const submissionQuery = useQuery({
+    queryKey: ['incident-submission', incident.incidentId],
+    queryFn: () => getSubmission(auth, incident.incidentId),
+    enabled: submitted,
+    refetchInterval: (query) => {
+      const status = query.state.data?.submissionStatus;
+      return status === 'SUBMITTED' || status === 'RETRYING' ? SUBMISSION_POLL_MS : false;
+    },
+  });
+  const submissionIncidentStatus = submissionQuery.data?.status;
 
   const active = steps[step] ?? steps[0];
   const missing = missingRequiredCoreFields(CORE_SCHEMA, fields);
@@ -129,6 +165,15 @@ function IncidentReport({ incident }: { incident: IncidentDetail }) {
       `Incident report for ${incident.incidentType ?? 'unclassified'} at ${incident.address ?? 'unknown address'}. ${filled} of 5 fields already filled from the dispatch and the response roster. ${missingRequiredCoreFields(CORE_SCHEMA, coreStrings(incident.corePayload)).length} still needed.`,
     );
   }, [incident]);
+
+  // The worker moves the incident to ACCEPTED/REJECTED; keep the report's status chip in step.
+  useEffect(() => {
+    if (submissionIncidentStatus && submissionIncidentStatus !== incident.status) {
+      queryClient.setQueryData<IncidentDetail>(['incident', incident.incidentId], (current) =>
+        current ? { ...current, status: submissionIncidentStatus } : current,
+      );
+    }
+  }, [submissionIncidentStatus, incident.status, incident.incidentId, queryClient]);
 
   useEffect(() => {
     if (skipInitialFocus.current) {
@@ -345,6 +390,47 @@ function IncidentReport({ incident }: { incident: IncidentDetail }) {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  function problemText(error: unknown, fallback: string): string {
+    return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
+  }
+
+  async function submitToNeris() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await submitIncident(auth, incident.incidentId);
+      writeIncident({ status: 'SUBMITTED' });
+      await queryClient.invalidateQueries({
+        queryKey: ['incident-submission', incident.incidentId],
+      });
+      setAnnounce('Report sent to NERIS. Waiting for NERIS to accept it.');
+    } catch (error) {
+      const detail = problemText(error, 'Unable to submit the report to NERIS.');
+      setSubmitError(detail);
+      setAnnounce(detail);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function retryNeris() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await retrySubmission(auth, incident.incidentId);
+      await queryClient.invalidateQueries({
+        queryKey: ['incident-submission', incident.incidentId],
+      });
+      setAnnounce('Submission queued for retry.');
+    } catch (error) {
+      const detail = problemText(error, 'Unable to retry the NERIS submission.');
+      setSubmitError(detail);
+      setAnnounce(detail);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -689,18 +775,66 @@ function IncidentReport({ incident }: { incident: IncidentDetail }) {
             {STATUS_LABEL[incident.status]}
           </StatusChip>
         </p>
-        <p id="submit-status">
-          {incident.status === 'VALIDATED'
-            ? 'Report status is Validated. Submit is available.'
-            : 'Submit stays unavailable until the report status is Validated.'}
+        {submitError ? <p role="alert">{submitError}</p> : null}
+        {submitted ? (
+          <SubmissionPanel />
+        ) : (
+          <>
+            <p id="submit-status">
+              {incident.status === 'VALIDATED'
+                ? 'Report status is Validated. Submit is available.'
+                : 'Submit stays unavailable until the report status is Validated.'}
+            </p>
+            <Button
+              type="button"
+              disabled={incident.status !== 'VALIDATED'}
+              loading={submitting}
+              aria-describedby="submit-status"
+              onClick={() => void submitToNeris()}
+            >
+              Submit
+            </Button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  function SubmissionPanel() {
+    if (submissionQuery.isLoading) {
+      return <p aria-busy="true">Checking the NERIS submission status.</p>;
+    }
+    if (submissionQuery.error) {
+      const forbidden =
+        submissionQuery.error instanceof ApiError && submissionQuery.error.problem.status === 403;
+      return (
+        <p role={forbidden ? undefined : 'alert'}>
+          {forbidden
+            ? 'Only officers, admins and chiefs can see the NERIS submission status.'
+            : 'Unable to read the NERIS submission status.'}
         </p>
-        <Button
-          type="button"
-          disabled={incident.status !== 'VALIDATED'}
-          aria-describedby="submit-status"
-        >
-          Submit
-        </Button>
+      );
+    }
+    const state = submissionQuery.data;
+    const status = state?.submissionStatus ?? null;
+    return (
+      <div aria-live="polite">
+        <p>
+          NERIS submission:{' '}
+          {status ? (
+            <StatusChip status={SUBMISSION_ROLE[status]}>{SUBMISSION_LABEL[status]}</StatusChip>
+          ) : (
+            'Not sent to NERIS.'
+          )}
+        </p>
+        {status === 'FAILED' ? (
+          <>
+            <p>Reason: {state?.submissionFailureReason ?? 'NERIS did not give a reason.'}</p>
+            <Button type="button" loading={submitting} onClick={() => void retryNeris()}>
+              Retry submission
+            </Button>
+          </>
+        ) : null}
       </div>
     );
   }
