@@ -15,6 +15,7 @@ import { PlatformTable } from "./components/data/platform-table";
 import { IncidentTable } from "./components/data/incident-table";
 import { AlertingTable } from "./components/data/alerting-table";
 import { AuditTrail } from "./components/data/audit-trail";
+import { PlatformAssetsBucket } from "./components/data/platform-assets";
 import { NerisConfig } from "./components/neris/neris-config";
 import { PolicyStore } from "./components/authz/policy-store";
 import { PlatformBus } from "./components/messaging/platform-bus";
@@ -148,6 +149,9 @@ export const httpApi = new HttpApi("http-api", {
 export const platformTable = new PlatformTable("platform", { env });
 export const incidentTable = new IncidentTable("incident", { env });
 export const alertingTable = new AlertingTable("alerting", { env });
+// architecture.md §8 platform-assets bucket (pre-plan files, inspection photos, and later
+// cert/PPE/defect attachments), reached by clients through S3 presigned URLs.
+export const platformAssets = new PlatformAssetsBucket("platform-assets", { env, webOrigin });
 
 // E8-S5-INFRA #84: CloudTrail data events on alerting table + Object Lock archive.
 export const auditTrail = new AuditTrail("audit-trail", {
