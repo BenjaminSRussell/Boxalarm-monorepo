@@ -95,7 +95,7 @@ function buildApiAlertsRepository(tokens: AuthTokenSource, apiBaseUrl: string): 
     },
 
     async assignRidingSeat(dispatchId, seat) {
-      await req(`apparatus/riding-board/${encodeURIComponent(dispatchId)}/assign`, {
+      await req(`apparatus/riding-board/${encodeURIComponent(dispatchId)}/assignments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

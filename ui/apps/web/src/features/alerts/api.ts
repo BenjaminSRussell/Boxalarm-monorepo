@@ -60,7 +60,7 @@ export async function assignRidingSeat(
   dispatchId: string,
   seat: { unitId: string; positionCode: string; memberId: string | null; expectedVersion: number },
 ): Promise<void> {
-  await apiRequest(`apparatus/riding-board/${encodeURIComponent(dispatchId)}/assign`, tokens, {
+  await apiRequest(`apparatus/riding-board/${encodeURIComponent(dispatchId)}/assignments`, tokens, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -225,7 +225,7 @@ test('a failed riding-board seat assignment surfaces an error instead of silentl
         ],
       }),
     ),
-    http.post('/api/v1/apparatus/riding-board/D-2/assign', () =>
+    http.post('/api/v1/apparatus/riding-board/D-2/assignments', () =>
       HttpResponse.json(
         {
           type: 'about:blank',

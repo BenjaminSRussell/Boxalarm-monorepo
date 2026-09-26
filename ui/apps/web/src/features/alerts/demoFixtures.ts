@@ -292,7 +292,7 @@ export function demoAlertsRequest(
   if (
     parts[0] === 'apparatus' &&
     parts[1] === 'riding-board' &&
-    parts[3] === 'assign' &&
+    parts[3] === 'assignments' &&
     method === 'POST'
   ) {
     const dispatchId = decodeURIComponent(parts[2] ?? '');
