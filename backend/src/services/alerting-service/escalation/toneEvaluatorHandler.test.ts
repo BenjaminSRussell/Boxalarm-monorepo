@@ -118,6 +118,8 @@ function createFakeDdb(
       readonly currentToneSequence: number;
       readonly toneLadderStatus: string;
     };
+    /** Written just before the first transaction - a concurrent evaluation's commit. */
+    readonly insertBeforeTransact?: FakeItem;
   } = {},
 ): {
   send: DynamoDBDocumentClient['send'];
@@ -214,6 +216,15 @@ function createFakeDdb(
             { Code: 'None' },
             { Code: 'None' },
           ],
+        );
+      }
+      if (
+        options.insertBeforeTransact &&
+        !items.has(`${options.insertBeforeTransact.pk}#${options.insertBeforeTransact.sk}`)
+      ) {
+        items.set(
+          `${options.insertBeforeTransact.pk}#${options.insertBeforeTransact.sk}`,
+          options.insertBeforeTransact,
         );
       }
       if (options.completeLadderBeforeTransact) {
@@ -790,8 +801,11 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     process.env = { ...originalEnv };
   });
 
-  async function load(seed: readonly FakeItem[]) {
-    const fake = createFakeDdb(seed);
+  async function load(
+    seed: readonly FakeItem[],
+    options: Parameters<typeof createFakeDdb>[1] = {},
+  ) {
+    const fake = createFakeDdb(seed, options);
     const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
     const { createSnsClient } = await import('../fanout/snsClient.js');
     vi.mocked(createDynamoClient).mockReturnValue({
@@ -900,6 +914,25 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     await expect(handler(manual(2))).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
   });
 
+  // Review MINOR-R1: the timer's skip guard lands while the advance is paging. The advance has
+  // already paged everyone, so it must still claim the tone - not answer "already fired".
+  it('an advance racing the timer skip still claims the tone it paged', async () => {
+    const { handler, sns, items } = await load([METADATA_ITEM, ELIGIBLE_MEMBER, RESPONDING], {
+      insertBeforeTransact: {
+        pk: PK,
+        sk: 'TONE#2',
+        entityType: 'TONE_EVENT_GUARD',
+        toneSequence: 2,
+        skipped: true,
+      },
+    });
+
+    await expect(handler(manual(2))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+    expect(items.get(`${PK}#TONE#2`)?.skipped).toBe(false);
+    expect(items.get(`${PK}#METADATA`)?.currentToneSequence).toBe(2);
+  });
+
   it('a timer retry of a skipped tone stays skipped (only a manual advance may fire it)', async () => {
     const { handler, sns } = await load([METADATA_ITEM, ELIGIBLE_MEMBER, RESPONDING]);
     const timer = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 };
@@ -921,6 +954,22 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     expect(requestMutualAid).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'TONE_3_PREDICATE_UNMET' }),
     );
+  });
+
+  it('the scheduled tone 3 also requests mutual aid when paging a member fails, then rethrows', async () => {
+    const { handler, sns, items } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+    ]);
+    sns.send.mockRejectedValueOnce(new Error('sns unavailable'));
+
+    await expect(
+      handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 3 }),
+    ).rejects.toThrow('sns unavailable');
+    expect(requestMutualAid).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'TONE_3_PREDICATE_UNMET' }),
+    );
+    expect(items.get(`${PK}#TONE#3`)).toBeUndefined();
   });
 
   it('a failed push page still sends the SMS page to that member', async () => {
