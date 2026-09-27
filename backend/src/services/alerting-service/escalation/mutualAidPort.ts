@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { PublishCommand, type SNSClient } from '@aws-sdk/client-sns';
 import {
   GetCommand,
@@ -156,7 +157,9 @@ async function promptOfficer(
           ),
         ),
         MessageGroupId: dispatchId,
-        MessageDeduplicationId: idempotencyKey,
+        // Hashed like every other alerting publish: SNS FIFO allows at most 128 characters
+        // from a restricted set, which a raw key with an unusual dispatchId can break.
+        MessageDeduplicationId: createHash('sha256').update(idempotencyKey).digest('hex'),
         MessageAttributes: { channel: { DataType: 'String', StringValue: 'push' } },
       }),
     );

@@ -14,12 +14,13 @@ import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import { readDispatchAlertText } from '../channels/channelEnvelope.js';
 import { createDynamoClient, readAlertingConfig } from '../eligibility/dynamoClient.js';
 import { logError, logInfo } from '../dispatches/logger.js';
-import { requestMutualAid } from '../escalation/mutualAidPort.js';
+import { MutualAidPromptIncompleteError, requestMutualAid } from '../escalation/mutualAidPort.js';
 import { createSnsClient, readFanOutTopicConfig } from '../fanout/snsClient.js';
 import {
   LADDER_CONTROL_FAILED_METRIC,
   LADDER_CONTROL_METRIC_NAMESPACE,
   dataUnavailableProblem,
+  outcomeUnknownProblem,
   getDispatchMetadata,
   getMutualAidEvent,
   jsonResponse,
@@ -108,6 +109,12 @@ async function trigger(
   } catch (error) {
     logError('alerting.ladderControl.mutualAidTrigger.failed', error, { traceId, dispatchId });
     emitOutcomeMetric(LADDER_CONTROL_METRIC_NAMESPACE, LADDER_CONTROL_FAILED_METRIC, CONTROL);
+    if (error instanceof MutualAidPromptIncompleteError) {
+      return outcomeUnknownProblem(
+        traceId,
+        `Mutual aid is recorded, but ${error.failed} of ${error.officers} officers could not be prompted. Trigger again to prompt only the officers who were missed, and make the mutual-aid call directly if it is urgent.`,
+      );
+    }
     return dataUnavailableProblem(traceId);
   }
 }

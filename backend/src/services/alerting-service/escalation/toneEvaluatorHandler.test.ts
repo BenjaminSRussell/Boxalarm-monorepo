@@ -207,6 +207,12 @@ function createFakeDdb(
         ) {
           return { Code: 'ConditionalCheckFailed' };
         }
+        if (put?.ConditionExpression === 'attribute_not_exists(pk) OR skipped = :skipped') {
+          const current = items.get(`${put.Item.pk}#${put.Item.sk}`);
+          if (current && current.skipped !== true) {
+            return { Code: 'ConditionalCheckFailed' };
+          }
+        }
         const update = txItem.Update as
           | {
               Key: { pk: string; sk: string };
@@ -727,6 +733,75 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     );
     expect(dedupIds.size).toBe(1);
     expect(new Set(publishedMemberIds(sns))).toEqual(new Set(['mbr-1']));
+  });
+
+  // Review CRITICAL-1: a predicate-met skip claims TONE#n; a later manual advance of that
+  // tone was refused as "already fired" and paged nobody.
+  it('fires a tone the timer skipped because the predicate was met', async () => {
+    const { handler, sns, items } = await load([METADATA_ITEM, ELIGIBLE_MEMBER, RESPONDING]);
+    const timer = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 };
+
+    await expect(handler(timer)).resolves.toEqual({ outcome: 'SKIPPED_PREDICATE_MET' });
+    expect(sns.send).not.toHaveBeenCalled();
+    expect(items.get(`${PK}#TONE#2`)?.skipped).toBe(true);
+
+    await expect(handler(manual(2))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+    expect(items.get(`${PK}#TONE#2`)?.skipped).toBe(false);
+    expect(items.get(`${PK}#METADATA`)?.currentToneSequence).toBe(2);
+
+    // Once fired it is a real guard: neither a timer retry nor another advance re-fires it.
+    await expect(handler(timer)).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+    await expect(handler(manual(2))).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+  });
+
+  it('a timer retry of a skipped tone stays skipped (only a manual advance may fire it)', async () => {
+    const { handler, sns } = await load([METADATA_ITEM, ELIGIBLE_MEMBER, RESPONDING]);
+    const timer = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 };
+
+    await handler(timer);
+    await expect(handler(timer)).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+    expect(sns.send).not.toHaveBeenCalled();
+  });
+
+  // Review MAJOR-1: a failure paging one member must not also block mutual aid.
+  it('still requests mutual aid for tone 3 when paging a member fails, then rethrows', async () => {
+    const { handler, sns } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+    ]);
+    sns.send.mockRejectedValue(new Error('sns unavailable'));
+
+    await expect(handler(manual(3))).rejects.toThrow('sns unavailable');
+    expect(requestMutualAid).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'TONE_3_PREDICATE_UNMET' }),
+    );
+  });
+
+  it('a failed push page still sends the SMS page to that member', async () => {
+    const withSms: FakeItem = {
+      ...ELIGIBLE_MEMBER,
+      contactChannels: [
+        { channel: 'PUSH', token: 'tok', platform: 'ios', valid: true },
+        // The producer-side SMS shape (see the open SMS target-shape split in #361).
+        { channel: 'sms', token: '+12035550100', valid: true },
+      ],
+    };
+    const { handler, sns } = await load([METADATA_ITEM, withSms]);
+    sns.send.mockImplementation(
+      (command: { input: { MessageAttributes: { channel: { StringValue: string } } } }) =>
+        command.input.MessageAttributes.channel.StringValue === 'push'
+          ? Promise.reject(new Error('push provider down'))
+          : Promise.resolve({}),
+    );
+
+    await expect(handler(manual(2))).rejects.toThrow('push provider down');
+    const channels = sns.send.mock.calls.map(
+      (call) =>
+        (call[0] as { input: { MessageAttributes: { channel: { StringValue: string } } } }).input
+          .MessageAttributes.channel.StringValue,
+    );
+    expect(channels).toEqual(['push', 'sms']);
   });
 
   it('does not fire on a halted ladder', async () => {

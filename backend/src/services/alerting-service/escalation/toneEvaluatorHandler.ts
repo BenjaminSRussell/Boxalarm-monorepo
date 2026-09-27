@@ -246,6 +246,10 @@ async function publishToneChannel(
   );
 }
 
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error('non-Error thrown', { cause: error });
+}
+
 async function fireToneForMember(
   ddb: DynamoDBDocumentClient,
   sns: SNSClient,
@@ -258,6 +262,10 @@ async function fireToneForMember(
   toneSequence: number,
   member: EligibilitySnapshotItem,
 ): Promise<void> {
+  // Every channel is attempted even if an earlier one fails: a push outage must not also
+  // cost the member their SMS page and voice escalation. The first failure is rethrown
+  // after the voice schedule, so the evaluation still retries.
+  let channelFailure: Error | undefined;
   for (const channel of FAN_OUT_CHANNELS) {
     if (channel === 'push' && resolvePushTarget(member.contactChannels).skipped) {
       continue;
@@ -265,18 +273,22 @@ async function fireToneForMember(
     if (channel === 'sms' && resolveSmsTarget(member.contactChannels).skipped) {
       continue;
     }
-    await publishToneChannel(
-      ddb,
-      sns,
-      tableName,
-      topicArn,
-      deptId,
-      dispatchId,
-      dispatch,
-      member.memberId,
-      channel,
-      toneSequence,
-    );
+    try {
+      await publishToneChannel(
+        ddb,
+        sns,
+        tableName,
+        topicArn,
+        deptId,
+        dispatchId,
+        dispatch,
+        member.memberId,
+        channel,
+        toneSequence,
+      );
+    } catch (error) {
+      channelFailure ??= asError(error);
+    }
   }
   try {
     await createEscalationSchedule(
@@ -298,6 +310,9 @@ async function fireToneForMember(
       memberId: member.memberId,
       toneSequence,
     });
+  }
+  if (channelFailure !== undefined) {
+    throw channelFailure;
   }
 }
 
@@ -402,7 +417,12 @@ async function commitToneEvaluation(
     readonly requiredQuals: readonly string[];
     readonly respondingCount: number;
   },
-  options: { readonly advanceMetadata: boolean; readonly triggeredBy?: string | undefined },
+  options: {
+    readonly advanceMetadata: boolean;
+    readonly triggeredBy?: string | undefined;
+    /** Firing a tone whose guard only records a predicate-met skip (manual advance). */
+    readonly upgradeSkippedGuard?: boolean;
+  },
 ): Promise<ToneCommitResult> {
   const correlationId = `${dispatchId}#${toneSequence}`;
   const guardAndAudit: NonNullable<TransactWriteCommandInput['TransactItems']> = [
@@ -416,8 +436,17 @@ async function commitToneEvaluation(
           dispatchId,
           deptId,
           toneSequence,
+          // A predicate-met skip still claims the tone so Scheduler retries of that skip are
+          // idempotent, but it is not a firing: a manual advance may fire the tone later.
+          skipped: !options.advanceMetadata,
         },
-        ConditionExpression: 'attribute_not_exists(pk)',
+        // Normally the tone may be claimed once. A manual advance of a tone that was only
+        // skipped may take over the skip guard - exactly once, since the upgraded guard is
+        // no longer skipped and a concurrent twin's condition then fails.
+        ConditionExpression: options.upgradeSkippedGuard
+          ? 'attribute_not_exists(pk) OR skipped = :skipped'
+          : 'attribute_not_exists(pk)',
+        ...(options.upgradeSkippedGuard ? { ExpressionAttributeValues: { ':skipped': true } } : {}),
       },
     },
     {
@@ -545,7 +574,10 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       ConsistentRead: true,
     }),
   );
-  if (existingGuard.Item) {
+  // A guard that only records a predicate-met skip does not stop a manual advance: the tone
+  // never fired, and the officer is asking for it precisely because more people are needed.
+  const upgradeSkippedGuard = manualOverride !== undefined && existingGuard.Item?.skipped === true;
+  if (existingGuard.Item && !upgradeSkippedGuard) {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });
     return { outcome: 'SKIPPED_ALREADY_FIRED' };
   }
@@ -592,18 +624,26 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
   }
 
   const eligibleMembers = await queryEligibleMembers(ddb, tableName, deptId);
-  await fireTone(
-    ddb,
-    sns,
-    scheduler,
-    tableName,
-    topicArn,
-    deptId,
-    dispatchId,
-    dispatch,
-    toneSequence,
-    eligibleMembers,
-  );
+  // A failure paging some member must not also block mutual aid for tone 3: it is recorded,
+  // mutual aid is still requested, and the first failure is rethrown so the evaluation
+  // retries (re-publishing only unsent pages).
+  let evaluationFailure: Error | undefined;
+  try {
+    await fireTone(
+      ddb,
+      sns,
+      scheduler,
+      tableName,
+      topicArn,
+      deptId,
+      dispatchId,
+      dispatch,
+      toneSequence,
+      eligibleMembers,
+    );
+  } catch (error) {
+    evaluationFailure = asError(error);
+  }
 
   // A manual advance bypasses the predicate to fire, but mutual aid still follows the
   // architecture's rule — tone 3 fired with the predicate unmet — so an officer advancing a
@@ -629,8 +669,11 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     } catch (error) {
       logError('alerting.toneLadder.mutualAidFailed', error, { correlationId });
       emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidRequestFailed');
-      throw error;
+      evaluationFailure ??= asError(error);
     }
+  }
+  if (evaluationFailure !== undefined) {
+    throw evaluationFailure;
   }
 
   const fireCommit = await commitToneEvaluation(
@@ -644,7 +687,7 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     outcome,
     eligibleMembers.length,
     predicateSnapshot,
-    { advanceMetadata: true, triggeredBy: manualOverride?.triggeredBy },
+    { advanceMetadata: true, triggeredBy: manualOverride?.triggeredBy, upgradeSkippedGuard },
   );
   if (fireCommit === 'already_exists') {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });

@@ -174,15 +174,26 @@ async function reattemptClaimedFailure(
   if (!claimedButFailed) {
     return false;
   }
-  await ddb.send(
-    new UpdateCommand({
-      TableName: tableName,
-      Key: { pk, sk },
-      UpdateExpression: 'SET sentAt = :sentAt REMOVE failureReason',
-      ConditionExpression: 'attribute_exists(idempotencyKey) AND deliveredAt = :nullVal',
-      ExpressionAttributeValues: { ':sentAt': sentAt, ':nullVal': null },
-    }),
-  );
+  // Re-claims the failed attempt atomically: the condition requires failureReason to still be
+  // set, and the update removes it, so when two redeliveries both saw the failure only one
+  // wins the re-claim and sends; the other is treated as a duplicate.
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { pk, sk },
+        UpdateExpression: 'SET sentAt = :sentAt REMOVE failureReason',
+        ConditionExpression:
+          'attribute_exists(idempotencyKey) AND attribute_exists(failureReason) AND deliveredAt = :nullVal',
+        ExpressionAttributeValues: { ':sentAt': sentAt, ':nullVal': null },
+      }),
+    );
+  } catch (error) {
+    if (error instanceof ConditionalCheckFailedException) {
+      return false;
+    }
+    throw error;
+  }
   return true;
 }
 
