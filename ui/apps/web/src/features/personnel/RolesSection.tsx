@@ -52,7 +52,7 @@ export function RolesSection({ member, canEdit }: { member: Member; canEdit: boo
       void queryClient.invalidateQueries({ queryKey: ['personnel', 'members'] });
       setMessage(
         result.changed
-          ? `Roles saved. ${member.firstName}'s app picks up the change within an hour, when it next refreshes.`
+          ? `Roles saved. ${result.takesEffect}`
           : 'Roles already matched. Nothing changed.',
       );
     },
@@ -140,7 +140,9 @@ export function RolesSection({ member, canEdit }: { member: Member; canEdit: boo
           Review role changes
         </button>
       </form>
-      {message ? <p role="status">{message}</p> : null}
+      {/* Always mounted: several screen readers skip a live region that appears already
+          filled, so the message is swapped into an existing one. */}
+      <p role="status">{message ?? ''}</p>
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}

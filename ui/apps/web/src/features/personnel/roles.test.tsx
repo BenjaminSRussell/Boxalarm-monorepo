@@ -82,7 +82,8 @@ function serveMember(stored: Member, reply?: (roles: string[]) => Response) {
         memberId: 'm1',
         roles,
         changed: true,
-        takesEffect: 'within one hour',
+        takesEffect:
+          "The change applies when the member's app next refreshes its session, within one hour.",
       });
     }),
   );
@@ -113,8 +114,9 @@ test('a chief grants and removes roles through a confirm step that names the cha
 
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(puts).toEqual([['MEMBER', 'OFFICER']]);
-  expect(screen.getByRole('status').textContent).toMatch(
-    /Sam's app picks up the change within an hour, when it next refreshes/,
+  // The server's own wording, not a client-side paraphrase.
+  expect(screen.getByRole('status').textContent).toBe(
+    "Roles saved. The change applies when the member's app next refreshes its session, within one hour.",
   );
   expect(
     (within(form).getByRole('checkbox', { name: 'OFFICER' }) as HTMLInputElement).checked,
