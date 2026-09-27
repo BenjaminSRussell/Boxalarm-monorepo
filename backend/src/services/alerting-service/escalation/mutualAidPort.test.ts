@@ -266,3 +266,144 @@ describe('requestMutualAid', () => {
     expect(snsSend).not.toHaveBeenCalled();
   });
 });
+
+// F1.14: "halting also suppresses automatic mutual-aid triggering", race-safe — the check is
+// a ConditionCheck on METADATA inside the singleton's own transaction. A manual trigger is
+// allowed "at any time", halted or not.
+describe('requestMutualAid and a halted tone ladder', () => {
+  const OFFICER: FakeItem = {
+    pk: ELIGIBILITY_PK,
+    sk: 'MEMBER#officer-1',
+    entityType: 'MEMBER_ELIGIBILITY_SNAPSHOT',
+    memberId: 'officer-1',
+    active: true,
+    quals: [],
+    roles: ['OFFICER'],
+    contactChannels: [{ channel: 'PUSH', token: 'tok', platform: 'ios', valid: true }],
+    availabilityState: 'AVAILABLE',
+    snapshotUpdatedAt: 0,
+  };
+
+  /** Evaluates both the singleton put and the METADATA halt ConditionCheck, like DynamoDB. */
+  function haltAwareDdb(metadata: FakeItem | undefined, transactError?: Error) {
+    const base = createFakeDdb(metadata ? [OFFICER, metadata] : [OFFICER]);
+    const transacts: Array<ReadonlyArray<Record<string, unknown>>> = [];
+    const send = vi.fn((command: unknown) => {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      if (name !== 'TransactWriteCommand') {
+        return base.send(command as never);
+      }
+      if (transactError) {
+        return Promise.reject(transactError);
+      }
+      const txItems = (command as { input: { TransactItems: Array<Record<string, unknown>> } })
+        .input.TransactItems;
+      transacts.push(txItems);
+      const reasons = txItems.map((txItem) => {
+        const put = txItem.Put as { Item: FakeItem } | undefined;
+        if (put && base.items.has(`${put.Item.pk}#${put.Item.sk}`)) {
+          return { Code: 'ConditionalCheckFailed' };
+        }
+        if (txItem.ConditionCheck && metadata?.toneLadderStatus === 'HALTED_MANUAL') {
+          return { Code: 'ConditionalCheckFailed' };
+        }
+        return { Code: 'None' };
+      });
+      if (reasons.some((reason) => reason.Code !== 'None')) {
+        return Promise.reject(
+          Object.assign(new Error('cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: reasons,
+          }),
+        );
+      }
+      for (const txItem of txItems) {
+        const put = txItem.Put as { Item: FakeItem } | undefined;
+        if (put) {
+          base.items.set(`${put.Item.pk}#${put.Item.sk}`, put.Item);
+        }
+      }
+      return Promise.resolve({});
+    });
+    return { send, items: base.items, transacts };
+  }
+
+  const halted: FakeItem = {
+    pk: 'DEPT#NICHOLS#DISPATCH#dispatch-1',
+    sk: 'METADATA',
+    toneLadderStatus: 'HALTED_MANUAL',
+  };
+
+  function request(send: ReturnType<typeof vi.fn>, snsSend: ReturnType<typeof vi.fn>, extra = {}) {
+    return requestMutualAid({
+      ddb: { send } as unknown as DynamoDBDocumentClient,
+      sns: { send: snsSend } as unknown as SNSClient,
+      tableName: 'alerting-table',
+      topicArn: 'arn:aws:sns:us-east-1:1:alerting-topic.fifo',
+      deptId: DEPT_ID,
+      dispatchId: 'dispatch-1',
+      dispatch: DISPATCH_TEXT,
+      reason: 'TONE_3_PREDICATE_UNMET',
+      ...extra,
+    });
+  }
+
+  it('does not record or prompt an automatic trigger once the ladder is halted', async () => {
+    const { send, items, transacts } = haltAwareDdb(halted);
+    const snsSend = vi.fn().mockResolvedValue({});
+
+    const result = await request(send, snsSend);
+
+    expect(result).toEqual({
+      requested: false,
+      officersNotified: 0,
+      adapterUsed: 'OFFICER_MANUAL_PROMPT',
+      suppressedBy: 'HALTED_MANUAL',
+    });
+    expect(items.has('DEPT#NICHOLS#DISPATCH#dispatch-1#MUTUALAID#SINGLETON')).toBe(false);
+    expect(snsSend).not.toHaveBeenCalled();
+    expect(transacts[0]?.[1]).toMatchObject({
+      ConditionCheck: {
+        Key: { pk: 'DEPT#NICHOLS#DISPATCH#dispatch-1', sk: 'METADATA' },
+        ExpressionAttributeValues: { ':halted': 'HALTED_MANUAL' },
+      },
+    });
+  });
+
+  it('still records an automatic trigger on an active ladder', async () => {
+    const { send, items } = haltAwareDdb({ ...halted, toneLadderStatus: 'ACTIVE' });
+    const snsSend = vi.fn().mockResolvedValue({});
+
+    const result = await request(send, snsSend);
+
+    expect(result).toMatchObject({ requested: true, officersNotified: 1 });
+    expect(items.get('DEPT#NICHOLS#DISPATCH#dispatch-1#MUTUALAID#SINGLETON')).toBeDefined();
+  });
+
+  it('lets an officer trigger manually on a halted ladder and records who did', async () => {
+    const { send, items, transacts } = haltAwareDdb(halted);
+    const snsSend = vi.fn().mockResolvedValue({});
+
+    const result = await request(send, snsSend, { reason: 'MANUAL', triggeredBy: 'officer-7' });
+
+    expect(result).toMatchObject({ requested: true, officersNotified: 1 });
+    expect(transacts[0]).toHaveLength(1);
+    expect(items.get('DEPT#NICHOLS#DISPATCH#dispatch-1#MUTUALAID#SINGLETON')).toMatchObject({
+      reason: 'MANUAL',
+      triggeredBy: 'officer-7',
+    });
+    expect(snsSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows a cancellation that recorded nothing instead of reporting "already requested"', async () => {
+    const conflict = Object.assign(new Error('conflict'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'TransactionConflict' }, { Code: 'None' }],
+    });
+    const { send } = haltAwareDdb(undefined, conflict);
+    const snsSend = vi.fn();
+
+    await expect(request(send, snsSend)).rejects.toBe(conflict);
+    expect(snsSend).not.toHaveBeenCalled();
+  });
+});
