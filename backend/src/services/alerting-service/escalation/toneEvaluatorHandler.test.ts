@@ -887,6 +887,13 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
     expect(items.get(`${PK}#TONE#2`)?.skipped).toBe(false);
     expect(items.get(`${PK}#METADATA`)?.currentToneSequence).toBe(2);
+    // Review MINOR-8: the skip and the manual fire usually land in the same second; both audit
+    // rows survive because the sort key carries the outcome.
+    const auditOutcomes = [...items.values()]
+      .filter((item) => item.entityType === 'TONE_EVENT' && item.toneSequence === 2)
+      .map((item) => item.outcome)
+      .sort();
+    expect(auditOutcomes).toEqual(['FIRED_MANUAL_OVERRIDE', 'SKIPPED_PREDICATE_MET']);
 
     // Once fired it is a real guard: neither a timer retry nor another advance re-fires it.
     await expect(handler(timer)).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });

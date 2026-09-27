@@ -401,6 +401,7 @@ describe('POST /tone-ladder/halt', () => {
       haltedBy: 'officer-7',
     });
     const audit = [...ddb.items.values()].find((item) => item.sk.startsWith('TONE#2#'));
+    expect(audit?.sk).toMatch(/^TONE#2#\d+#SKIPPED_MANUALLY_HALTED$/);
     expect(audit).toMatchObject({
       entityType: 'TONE_EVENT',
       toneSequence: 2,

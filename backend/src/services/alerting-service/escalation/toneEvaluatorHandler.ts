@@ -571,7 +571,9 @@ async function commitToneEvaluation(
         TableName: tableName,
         Item: {
           pk,
-          sk: `TONE#${toneSequence}#${evaluatedAt}`,
+          // The outcome keeps this row distinct from a halt's audit row (haltHandler.ts) or a
+          // skip later upgraded by a manual advance, written in the same second.
+          sk: `TONE#${toneSequence}#${evaluatedAt}#${outcome}`,
           entityType: 'TONE_EVENT',
           dispatchId,
           deptId,

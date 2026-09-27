@@ -92,7 +92,9 @@ async function attemptHalt(
               TableName: tableName,
               Item: {
                 pk,
-                sk: `TONE#${suppressedTone}#${haltedAt}`,
+                // Suffixed with the outcome: an unconditional put keyed on the second alone
+                // overwrote the Tone Evaluator's audit row for the same tone and second.
+                sk: `TONE#${suppressedTone}#${haltedAt}#SKIPPED_MANUALLY_HALTED`,
                 entityType: 'TONE_EVENT',
                 dispatchId,
                 deptId,
