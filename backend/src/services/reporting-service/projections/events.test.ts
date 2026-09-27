@@ -132,4 +132,17 @@ describe('projection event parsing', () => {
     );
     expect(projectionWrites(parsed, now)).toEqual([]);
   });
+
+  it('rejects a member.updated with neither memberId nor status instead of skipping it', () => {
+    const parsed = parseDomainEvent(
+      JSON.stringify({
+        detail: {
+          eventId: 'evt-10',
+          eventType: 'personnel.member.updated',
+          payload: { deptId: 'NICHOLS' },
+        },
+      }),
+    );
+    expect(() => projectionWrites(parsed, now)).toThrow();
+  });
 });

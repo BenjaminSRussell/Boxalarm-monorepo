@@ -26,7 +26,7 @@ interface MemberStatusChangedPayload {
 interface MemberStatusEnvelope {
   readonly eventType?: unknown;
   readonly correlationId?: unknown;
-  readonly payload?: { memberId?: unknown; status?: unknown };
+  readonly payload?: { memberId?: unknown; status?: unknown; newStatus?: unknown };
 }
 
 // EventBridge -> SQS delivers its own envelope with the producer payload nested under
@@ -52,8 +52,10 @@ function safeExtractCorrelationId(record: SQSRecord): string | undefined {
 
 /**
  * Returns undefined for a member.updated that is not a status change: profile, push-token
- * and role changes share the event type but carry no `status`, and must not be retried
- * into the DLQ. A `status` that is present but unusable is still malformed.
+ * and role changes share the event type but carry no status, and must not be retried into
+ * the DLQ. The status is `status`, or `newStatus` for events emitted before updateMemberStatus
+ * also wrote `status` - a redriven LOA/RETIRED event must still revoke. A missing memberId,
+ * or a status that is present but unusable, is still malformed.
  */
 function parseMemberStatusEvent(record: SQSRecord): MemberStatusChangedPayload | undefined {
   const envelope = unwrapEnvelope(record.body);
@@ -61,12 +63,12 @@ function parseMemberStatusEvent(record: SQSRecord): MemberStatusChangedPayload |
     throw new Error(`unexpected eventType: ${JSON.stringify(envelope.eventType)}`);
   }
   const memberId = envelope.payload?.memberId;
-  const status = envelope.payload?.status;
-  if (status === undefined) {
-    return undefined;
-  }
   if (typeof memberId !== 'string' || memberId.trim().length === 0) {
     throw new Error('payload.memberId is required and was not a non-empty string');
+  }
+  const status = envelope.payload?.status ?? envelope.payload?.newStatus;
+  if (status === undefined) {
+    return undefined;
   }
   if (typeof status !== 'string' || status.trim().length === 0) {
     throw new Error('payload.status is required and was not a non-empty string');

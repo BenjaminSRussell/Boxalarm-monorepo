@@ -141,6 +141,8 @@ export function projectionWrites(event: DomainEvent, nowMs: number): readonly Pr
     case 'personnel.member.updated':
       // member.updated also carries profile, push-token and role changes, which hold no
       // status and have nothing for the status rollup.
+      // memberId is checked first, so a payload with neither still reaches the DLQ.
+      requireString(payload, 'memberId');
       return payload.status === undefined && payload.newStatus === undefined
         ? []
         : [memberStatusWrite(payload)];

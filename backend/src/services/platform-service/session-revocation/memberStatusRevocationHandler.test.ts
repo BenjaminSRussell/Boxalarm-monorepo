@@ -152,6 +152,51 @@ describe('memberStatusRevocationHandler', () => {
     expect(revokeMemberSession).not.toHaveBeenCalled();
   });
 
+  // Events emitted before updateMemberStatus also wrote `status` carry only newStatus; a
+  // redrive of those from the DLQ must still end the sessions (member-roles review MINOR-6).
+  it('revokes on a newStatus-only LOA event (emitted before status was added)', async () => {
+    const revokeMemberSession = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./cognitoRevocationClient.js', () => ({
+      readRevocationConfig: () => ({ userPoolId: 'pool-1' }),
+      createRevocationClient: () => ({}),
+      revokeMemberSession,
+    }));
+
+    const { handler } = await import('./memberStatusRevocationHandler.js');
+    const legacy = {
+      ...memberUpdatedEvent('mbr-102', 'LOA'),
+      payload: {
+        deptId: 'NICHOLS',
+        memberId: 'mbr-102',
+        previousStatus: 'ACTIVE',
+        newStatus: 'LOA',
+      },
+    };
+    await handler({ Records: [sqsRecord(legacy)] }, {} as never, () => undefined);
+
+    expect(revokeMemberSession).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ username: 'mbr-102' }),
+    );
+  });
+
+  // Review MINOR-7: the "not a status change" skip must not swallow a garbage payload.
+  it('still DLQs a payload with neither memberId nor status', async () => {
+    const revokeMemberSession = vi.fn();
+    vi.doMock('./cognitoRevocationClient.js', () => ({
+      readRevocationConfig: () => ({ userPoolId: 'pool-1' }),
+      createRevocationClient: () => ({}),
+      revokeMemberSession,
+    }));
+
+    const { handler } = await import('./memberStatusRevocationHandler.js');
+    const garbage = { ...memberUpdatedEvent('mbr-102', 'LOA'), payload: { deptId: 'NICHOLS' } };
+
+    await expect(
+      handler({ Records: [sqsRecord(garbage)] }, {} as never, () => undefined),
+    ).rejects.toThrow('payload.memberId is required');
+  });
+
   it('rethrows (never swallows) on malformed payload — empty status — so SQS retries and the DLQ catches it', async () => {
     const revokeMemberSession = vi.fn();
     vi.doMock('./cognitoRevocationClient.js', () => ({
