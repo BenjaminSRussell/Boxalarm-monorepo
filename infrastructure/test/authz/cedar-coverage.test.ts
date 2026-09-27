@@ -21,12 +21,7 @@ import { STACK_CONFIG, installMocks, settleStack } from "../alerting/mock-harnes
  * Deployed actions still broken on this branch, fixed by a stacked change. The test fails
  * on a stale entry too, so remove each one as its fix lands.
  */
-const KNOWN_BROKEN = new Set<string>([
-  // reporting-service: non-namespaced types and undeclared actions (api-gap P1 #8).
-  "GetLosapYearEnd",
-  "ViewGrantsReport",
-  "ViewMembershipTrends",
-]);
+const KNOWN_BROKEN = new Set<string>([]);
 
 const { lambdaCodeCalls } = vi.hoisted(() => ({ lambdaCodeCalls: new Set<string>() }));
 

@@ -67,9 +67,9 @@ beforeEach(() => {
 describe('losap year-end handler', () => {
   it('wires the GetLosapYearEnd action against the Department resource (AC5 attachment point)', () => {
     expect(capturedOptions[0]).toMatchObject({
-      actionType: 'ReportingService',
+      actionType: 'Boxalarm::Action',
       actionId: 'GetLosapYearEnd',
-      resourceType: 'Department',
+      resourceType: 'Boxalarm::Department',
     });
   });
 

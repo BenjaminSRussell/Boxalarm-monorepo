@@ -144,13 +144,23 @@ async function acceptJob(
   }
 }
 
+/**
+ * Deployed as POST /api/v1/reporting/export (accept-and-queue) and
+ * GET /api/v1/reporting/export/{jobId} (status + signed link). The status read takes the
+ * path parameter first; `?jobId=` is still honoured for the query-string form. A GET that
+ * carries no jobId is rejected rather than treated as an accept, so a status poll can never
+ * start a new export job.
+ */
 async function innerExport(
   event: GuardEvent,
   principal: CedarPrincipalContext,
 ): Promise<APIGatewayProxyResultV2> {
-  const jobId = event.queryStringParameters?.jobId;
+  const jobId = event.pathParameters?.jobId ?? event.queryStringParameters?.jobId;
   if (jobId) {
     return readJob(event, principal, jobId);
+  }
+  if (event.requestContext.http?.method === 'GET') {
+    return badRequestProblem(extractTraceId(event), 'jobId is required to read an export job');
   }
   return acceptJob(event, principal);
 }

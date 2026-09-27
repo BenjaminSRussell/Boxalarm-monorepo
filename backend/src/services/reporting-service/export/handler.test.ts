@@ -42,11 +42,16 @@ import { handler } from './handler.js';
 
 const principal = { sub: 'chief-1', deptId: 'NICHOLS', 'cognito:groups': 'CHIEF' };
 
-function buildEvent(query: Record<string, string> = {}) {
+function buildEvent(
+  query: Record<string, string> = {},
+  method = 'POST',
+  pathParameters?: Record<string, string>,
+) {
   return {
     headers: {},
     queryStringParameters: query,
-    requestContext: { authorizer: { lambda: principal } },
+    ...(pathParameters ? { pathParameters } : {}),
+    requestContext: { http: { method }, authorizer: { lambda: principal } },
   } as never;
 }
 
@@ -112,6 +117,40 @@ describe('reporting export handler', () => {
     };
     expect(result.statusCode).toBe(200);
     expect(JSON.parse(result.body)).toMatchObject({ status: 'FAILED', detail: 'render failed' });
+  });
+
+  it('reads the job named by the {jobId} path parameter on GET /export/{jobId}', async () => {
+    getExportJob.mockResolvedValue({
+      jobId: 'job-3',
+      report: 'iso',
+      format: 'csv',
+      params: {},
+      status: 'PENDING',
+      requestedBy: 'chief-1',
+      requestedAt: '2026-09-25T00:00:00.000Z',
+    });
+    const result = (await handler(buildEvent({}, 'GET', { jobId: 'job-3' }))) as {
+      statusCode: number;
+      body: string;
+    };
+    expect(result.statusCode).toBe(200);
+    expect(getExportJob).toHaveBeenCalledWith(
+      expect.anything(),
+      'platform-table',
+      'NICHOLS',
+      'job-3',
+    );
+    expect(putExportJob).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  it('never starts a job from a GET that carries no jobId', async () => {
+    const result = (await handler(buildEvent({ report: 'dashboard', format: 'csv' }, 'GET'))) as {
+      statusCode: number;
+    };
+    expect(result.statusCode).toBe(400);
+    expect(putExportJob).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
   });
 
   it('returns a signed download link for a completed job', async () => {

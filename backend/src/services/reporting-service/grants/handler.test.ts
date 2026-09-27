@@ -76,6 +76,29 @@ describe('grants/handler.ts (entrypoint)', () => {
     expect(result).toMatchObject({ statusCode: 403 });
   });
 
+  it('asks Verified Permissions with the namespaced Boxalarm::Action / Boxalarm::Department types the Cedar schema declares', async () => {
+    const send = vi.fn().mockResolvedValue({ decision: Decision.DENY });
+    const { createAuthzClient } = await import('@boxalarm/authz');
+    createAuthzClient(process.env, { send } as unknown as VerifiedPermissionsClient);
+    const { createDynamoClient } = await import('../client.js');
+    createDynamoClient(process.env, fakeDynamoClient());
+    const { handler } = await import('./handler.js');
+
+    await handler(buildEvent());
+
+    const command = send.mock.calls[0]?.[0] as {
+      input: { action: unknown; resource: unknown };
+    };
+    expect(command.input.action).toEqual({
+      actionType: 'Boxalarm::Action',
+      actionId: 'ViewGrantsReport',
+    });
+    expect(command.input.resource).toEqual({
+      entityType: 'Boxalarm::Department',
+      entityId: 'NICHOLS',
+    });
+  });
+
   it('returns 401 (fail-closed) when the bearer token is missing (no authorization decision made)', async () => {
     const { createDynamoClient } = await import('../client.js');
     createDynamoClient(process.env, fakeDynamoClient());

@@ -59,8 +59,8 @@ async function innerGetLosapYearEndHandler(
 }
 
 export const handler = withAuthorization(innerGetLosapYearEndHandler, {
-  actionType: 'ReportingService',
+  actionType: 'Boxalarm::Action',
   actionId: 'GetLosapYearEnd',
-  resourceType: 'Department',
+  resourceType: 'Boxalarm::Department',
   resourceId: (event) => event.requestContext.authorizer?.lambda?.deptId ?? '',
 });

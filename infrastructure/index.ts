@@ -514,16 +514,6 @@ export const platformRetention = new Retention("platform-retention", {
   httpApi,
 });
 
-export const reporting = new Reporting("reporting", {
-  env,
-  platformTableName: platformTable.tableName,
-  platformTableArn: platformTable.tableArn,
-  policyStoreArn: policyStore.policyStoreArn,
-  policyStoreId: policyStore.policyStoreId,
-  logGroup: serviceLogGroupByName["reporting-service"],
-  httpApi,
-});
-
 const incidentServiceLogGroup = serviceLogGroupByName["incident-service"];
 
 export const incidentSchemaRefresh = new SchemaRefresh("incident-schema-refresh", {
@@ -636,6 +626,27 @@ export const routesOps = new RoutesOps("routes-ops", {
   logGroup: alertingLogGroup,
   policyStoreId: policyStore.policyStoreId,
   permissionsBoundaryArn: alertingBoundaryArn,
+});
+
+// reporting-service: every chief/officer report, CSV/PDF export, and the N1.9 cutover
+// decision. Declared after routesOps because GET cutover-decision invokes alerting's
+// delivery-baseline Lambda (its only cross-plane dependency).
+export const reporting = new Reporting("reporting", {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  incidentTableName: incidentTable.tableName,
+  incidentTableArn: incidentTable.tableArn,
+  incidentCmkArn: incidentTable.cmkArn,
+  deliveryBaselineFunctionName: routesOps.deliveryBaseline.lambda.function.name,
+  deliveryBaselineFunctionArn: routesOps.deliveryBaseline.lambda.function.arn,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+  chiefNotificationTopicArn: chiefNotificationTopic.topicArn,
+  policyStoreArn: policyStore.policyStoreArn,
+  policyStoreId: policyStore.policyStoreId,
+  logGroup: serviceLogGroupByName["reporting-service"],
+  httpApi,
 });
 
 // E1-S14-INFRA #39: push-token routes (platform table) + member-updated consumer

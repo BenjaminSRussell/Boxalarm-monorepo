@@ -119,3 +119,35 @@ test('serves the notification inbox, marks one read, and round-trips a preferenc
     apiRequest('notifications/missing/read', tokens, { method: 'POST' }),
   ).rejects.toBeInstanceOf(ApiError);
 });
+
+test('serves the reporting dashboard and response-time fixtures', async () => {
+  const dashboard = await apiRequest('reporting/dashboard', tokens);
+  const view = (await dashboard.json()) as { lastUpdated: string | null };
+  expect(view.lastUpdated).not.toBeNull();
+
+  const times = await apiRequest('reporting/response-times?from=1700000000&to=1800000000', tokens);
+  const body = (await times.json()) as { units: unknown[]; from: number };
+  expect(body.units.length).toBeGreaterThan(0);
+  expect(body.from).toBe(1700000000);
+});
+
+test('rejects a reporting range the real handler would reject', async () => {
+  await expect(
+    apiRequest('reporting/iso?from=1800000000&to=1700000000', tokens),
+  ).rejects.toBeInstanceOf(ApiError);
+  await expect(apiRequest('reporting/losap/year-end?year=26', tokens)).rejects.toBeInstanceOf(
+    ApiError,
+  );
+});
+
+test('queues a demo report export and polls it to COMPLETED with a download link', async () => {
+  const started = await apiRequest('reporting/export?report=losap&format=csv&year=2026', tokens, {
+    method: 'POST',
+  });
+  const { jobId, status } = (await started.json()) as { jobId: string; status: string };
+  expect(status).toBe('PENDING');
+  const polled = await apiRequest(`reporting/export/${jobId}`, tokens);
+  const job = (await polled.json()) as { status: string; downloadUrl?: string };
+  expect(job.status).toBe('COMPLETED');
+  expect(job.downloadUrl).toBeTruthy();
+});

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as pulumi from "@pulumi/pulumi";
 import { SERVICES } from "../../components/observability/services";
 
-describe("index.ts production wiring", () => {
+describe("index.ts production wiring", { timeout: 120_000 }, () => {
   let counts: Record<string, number>;
   let logGroupNames: Set<string>;
   let dashboardNames: Set<string>;

@@ -1,0 +1,39 @@
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--bx-space-md);
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--bx-space-md);
+  margin-top: var(--bx-space-lg);
+}
+
+.sections {
+  display: grid;
+  gap: var(--bx-space-lg);
+  margin-top: var(--bx-space-lg);
+}
+
+.meta {
+  margin: var(--bx-space-sm) 0 0;
+  color: var(--bx-fg-muted);
+  font-size: 14px;
+}
+
+.warning {
+  margin: var(--bx-space-md) 0 0;
+  padding: var(--bx-space-sm) var(--bx-space-md);
+  border-left: 3px solid var(--bx-status-warning);
+  background: var(--bx-surface);
+}
+
+.exportRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--bx-space-md);
+}
