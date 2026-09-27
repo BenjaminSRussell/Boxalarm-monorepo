@@ -206,6 +206,9 @@ describe('memberRepository', () => {
         deptId: 'NICHOLS',
         previousStatus: 'PROBATIONARY',
         newStatus: 'ACTIVE',
+        // What session revocation and the alerting eligibility snapshot read.
+        status: 'ACTIVE',
+        active: true,
         actorId: 'actor-1',
         changedAt: (outboxPut?.Put?.Item.payload as { changedAt: string }).changedAt,
       });

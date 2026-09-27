@@ -256,7 +256,20 @@ export async function updateMemberStatus(
               source: 'personnel-service',
               correlationId: memberId,
               schemaVersion: '1.0',
-              payload: { memberId, deptId, previousStatus, newStatus, actorId, changedAt },
+              payload: {
+                memberId,
+                deptId,
+                previousStatus,
+                newStatus,
+                // Read by the consumers that act on a status change: session revocation keys
+                // on `status` (LOA/RETIRED end every session) and the alerting eligibility
+                // snapshot on `active`. With only newStatus, a member set to LOA or RETIRED
+                // kept their sessions and kept being paged.
+                status: newStatus,
+                active: newStatus === 'ACTIVE',
+                actorId,
+                changedAt,
+              },
               status: 'PENDING',
               // ponytail: outbox relay left unbuilt (durable OUTBOX_ENTRY write only); upgrade
               // path is a DynamoDB Streams -> EventBridge Lambda once a ticket owns it (see
