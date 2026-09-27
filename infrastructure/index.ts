@@ -692,6 +692,7 @@ export const alertingAlarms = new AlertingAlarms("alerting-alarms", {
   fanOutOnFailureQueue: fanOut.onFailureQueue,
   escalationFunctionName: escalation.lambda.function.name,
   toneEvaluatorFunctionName: escalation.toneEvaluatorLambda.function.name,
+  escalationOnFailureQueue: escalation.onFailureQueue,
   memberUpdatedDlq: pushTokens.memberUpdatedDlq,
   memberUpdatedFunctionName: pushTokens.memberUpdatedConsumer.function.name,
 });

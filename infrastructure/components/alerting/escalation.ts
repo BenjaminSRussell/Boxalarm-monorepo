@@ -29,6 +29,13 @@ export class Escalation extends pulumi.ComponentResource {
   public readonly schedulerRole: aws.iam.Role;
   public readonly lambda: ServiceLambda;
   public readonly toneEvaluatorLambda: ServiceLambda;
+  /**
+   * Async-invocation failure destination for both Scheduler-driven Lambdas. Each message is a
+   * Lambda destination record whose requestPayload is the original evaluator/escalation
+   * payload; redrive by re-invoking the function with it (both handlers are idempotent:
+   * sent receipts are skipped, only unsent pages and prompts go out again).
+   */
+  public readonly onFailureQueue: aws.sqs.Queue;
   /** ARN pattern scoping scheduler:CreateSchedule to schedules within this group only. */
   public readonly scheduleResourcePattern: pulumi.Output<string>;
   /**
@@ -225,6 +232,56 @@ export class Escalation extends pulumi.ComponentResource {
       },
       { parent: this },
     );
+
+    // Scheduler invokes both Lambdas asynchronously. A throw is retried twice by Lambda and
+    // was then discarded with no record - yet re-publishing unsent pages and the mutual-aid
+    // rethrow depend on the evaluation being retried. Failed events now land here (alarmed
+    // in alarms.ts), with explicit retry and event-age limits instead of the defaults.
+    this.onFailureQueue = new aws.sqs.Queue(
+      `${name}-onfailure-queue`,
+      {
+        name: `boxalarm-${env}-alerting-escalation-onfailure`,
+        messageRetentionSeconds: 1209600,
+        sqsManagedSseEnabled: true,
+      },
+      { parent: this },
+    );
+    const asyncTargets = { escalation: this.lambda, "tone-evaluator": this.toneEvaluatorLambda };
+    for (const [key, target] of Object.entries(asyncTargets)) {
+      // The async destination is written with the function's own execution role.
+      new aws.iam.RolePolicy(
+        `${name}-${key}-onfailure-send`,
+        {
+          role: target.role.id,
+          policy: this.onFailureQueue.arn.apply((queueArn) =>
+            JSON.stringify({
+              Version: "2012-10-17",
+              Statement: [
+                {
+                  Sid: "SendToEscalationOnFailureQueue",
+                  Effect: "Allow",
+                  Action: ["sqs:SendMessage"],
+                  Resource: queueArn,
+                },
+              ],
+            }),
+          ),
+        },
+        { parent: this },
+      );
+      new aws.lambda.FunctionEventInvokeConfig(
+        `${name}-${key}-async-config`,
+        {
+          functionName: target.function.name,
+          maximumRetryAttempts: 2,
+          // A tone or voice escalation older than an hour is no longer a page worth sending
+          // automatically; it still lands on the queue for the audit trail and a human.
+          maximumEventAgeInSeconds: 3600,
+          destinationConfig: { onFailure: { destination: this.onFailureQueue.arn } },
+        },
+        { parent: this },
+      );
+    }
 
     grantAlertingCmk(
       name,

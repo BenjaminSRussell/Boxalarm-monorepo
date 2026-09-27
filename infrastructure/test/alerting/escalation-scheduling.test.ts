@@ -43,3 +43,34 @@ describe(
     );
   },
 );
+
+// Review MAJOR-2: a failed async evaluation was retried twice and then discarded, yet the
+// re-publish of unsent pages and the mutual-aid rethrow depend on that retry landing.
+describe(
+  "Escalation and tone evaluator — failed async invocations are kept",
+  { timeout: 30_000 },
+  () => {
+    it.each([
+      ["boxalarm-dev-alerting-escalation", "escalation"],
+      ["boxalarm-dev-alerting-tone-evaluator", "tone-evaluator"],
+    ])("%s sends exhausted events to the escalation on-failure queue", async (functionName) => {
+      await buildSchedulingChain();
+      const [queue] = resourcesOfType("aws:sqs/queue:Queue").filter(
+        (q) => q.inputs.name === "boxalarm-dev-alerting-escalation-onfailure",
+      );
+      expect(queue?.inputs.sqsManagedSseEnabled).toBe(true);
+      const queueArn =
+        "arn:aws:sqs:us-east-1:123456789012:boxalarm-dev-alerting-escalation-onfailure";
+
+      const config = resourcesOfType(
+        "aws:lambda/functionEventInvokeConfig:FunctionEventInvokeConfig",
+      ).find((c) => c.inputs.functionName === functionName);
+      expect(config?.inputs).toMatchObject({
+        maximumRetryAttempts: 2,
+        maximumEventAgeInSeconds: 3600,
+        destinationConfig: { onFailure: { destination: queueArn } },
+      });
+      expect(isGranted(statementsForRole(functionName), "sqs:SendMessage", queueArn)).toBe(true);
+    });
+  },
+);

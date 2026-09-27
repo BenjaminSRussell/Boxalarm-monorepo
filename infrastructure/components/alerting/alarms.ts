@@ -13,6 +13,8 @@ export interface AlertingAlarmsArgs {
   fanOutOnFailureQueue: aws.sqs.Queue;
   escalationFunctionName: pulumi.Input<string>;
   toneEvaluatorFunctionName: pulumi.Input<string>;
+  /** Async on-failure destination of escalation + tone evaluator — a record is a lost page. */
+  escalationOnFailureQueue: aws.sqs.Queue;
   memberUpdatedDlq: aws.sqs.Queue;
   memberUpdatedFunctionName: pulumi.Input<string>;
 }
@@ -130,8 +132,20 @@ export class AlertingAlarms extends pulumi.ComponentResource {
       evaluationPeriods: 1,
     });
 
-    // Escalation and tone-evaluator are invoked async by EventBridge Scheduler with no
-    // onFailure destination: a throw is retried twice and then dropped with no record.
+    // Escalation and tone-evaluator are invoked async by EventBridge Scheduler. After Lambda's
+    // retries a failed event lands in the on-failure queue (escalation.ts); any message there
+    // is a tone, voice escalation or mutual-aid request that did not complete.
+    pageAlarm("escalation-onfailure-alarm", {
+      name: `boxalarm-${env}-alerting-escalation-onfailure`,
+      namespace: "AWS/SQS",
+      metricName: "ApproximateNumberOfMessagesVisible",
+      dimensions: { QueueName: args.escalationOnFailureQueue.name },
+      statistic: "Maximum",
+      comparisonOperator: "GreaterThanThreshold",
+      threshold: 0,
+      period: 60,
+      evaluationPeriods: 1,
+    });
     lambdaAlarm(
       "escalation-errors-alarm",
       args.escalationFunctionName,

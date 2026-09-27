@@ -18,6 +18,9 @@ async function build(env = "dev") {
     }),
     escalationFunctionName: "boxalarm-dev-alerting-escalation",
     toneEvaluatorFunctionName: "boxalarm-dev-alerting-tone-evaluator",
+    escalationOnFailureQueue: new aws.sqs.Queue("escalation-onfailure", {
+      name: "boxalarm-dev-alerting-escalation-onfailure",
+    }),
     memberUpdatedDlq: new aws.sqs.Queue("member-updated-dlq", {
       name: "boxalarm-dev-alerting-member-updated-dlq",
     }),
@@ -98,6 +101,11 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
       "boxalarm-dev-alerting-fan-out-onfailure-not-empty",
       "ApproximateNumberOfMessagesVisible",
       { QueueName: "boxalarm-dev-alerting-fan-out-onfailure" },
+    ],
+    [
+      "boxalarm-dev-alerting-escalation-onfailure",
+      "ApproximateNumberOfMessagesVisible",
+      { QueueName: "boxalarm-dev-alerting-escalation-onfailure" },
     ],
     [
       "boxalarm-dev-alerting-escalation-errors",
