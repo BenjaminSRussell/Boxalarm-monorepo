@@ -163,9 +163,21 @@ function createFakeDdb(
     if (name === 'UpdateCommand') {
       const update = input as {
         Key: { pk: string; sk: string };
-        ExpressionAttributeValues: Record<string, unknown>;
+        UpdateExpression: string;
+        ExpressionAttributeValues?: Record<string, unknown>;
       };
-      if (':sentAt' in update.ExpressionAttributeValues) {
+      if (update.UpdateExpression.includes('mutualAidPending')) {
+        const key = `${update.Key.pk}#${update.Key.sk}`;
+        const next: FakeItem = { ...(items.get(key) ?? { pk: update.Key.pk, sk: update.Key.sk }) };
+        if (update.UpdateExpression.startsWith('REMOVE')) {
+          delete next.mutualAidPending;
+        } else {
+          next.mutualAidPending = true;
+        }
+        items.set(key, next);
+        return Promise.resolve({});
+      }
+      if (update.ExpressionAttributeValues && ':sentAt' in update.ExpressionAttributeValues) {
         const key = `${update.Key.pk}#${update.Key.sk}`;
         const receipt = items.get(key);
         if (receipt)
@@ -888,20 +900,60 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
   });
 
   // A mutual-aid failure after the tone-3 commit was only logged, and the next retry stopped
-  // at SKIPPED_ALREADY_FIRED - so the request was lost. It now runs before the commit.
-  it('leaves tone 3 uncommitted when mutual aid fails, so the retry requests it again', async () => {
+  // at SKIPPED_ALREADY_FIRED - so the request was lost. Review MINOR-R3: blocking the commit
+  // instead left a fully paged tone 3 showing as tone 2 for as long as one prompt failed.
+  // The commit now records the prompts as pending, and a retry re-runs only the prompt pass.
+  it('commits a fully paged tone 3 when mutual aid fails, and the retry re-prompts only', async () => {
+    const { handler, items, sns } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+    ]);
+    const scheduled = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 3 };
+    requestMutualAid.mockRejectedValueOnce(new Error('mutual aid prompt failed'));
+
+    await expect(handler(scheduled)).rejects.toThrow('mutual aid prompt failed');
+    expect(items.get(`${PK}#TONE#3`)).toMatchObject({ skipped: false, mutualAidPending: true });
+    expect(items.get(`${PK}#METADATA`)).toMatchObject({
+      currentToneSequence: 3,
+      toneLadderStatus: 'COMPLETED',
+    });
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+
+    await expect(handler(scheduled)).resolves.toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+    expect(requestMutualAid).toHaveBeenCalledTimes(2);
+    expect(items.get(`${PK}#TONE#3`)?.mutualAidPending).toBeUndefined();
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+
+    // Done: a further retry neither re-pages nor re-prompts.
+    await expect(handler(scheduled)).resolves.toEqual({ outcome: 'SKIPPED_COMPLETED' });
+    expect(requestMutualAid).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the prompts pending while the re-prompt keeps failing', async () => {
     const { handler, items } = await load([
       { ...METADATA_ITEM, currentToneSequence: 2 },
       ELIGIBLE_MEMBER,
     ]);
-    requestMutualAid.mockRejectedValueOnce(new Error('mutual aid prompt failed'));
+    const scheduled = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 3 };
+    requestMutualAid
+      .mockRejectedValueOnce(new Error('mutual aid prompt failed'))
+      .mockRejectedValueOnce(new Error('mutual aid prompt failed'));
 
-    await expect(handler(manual(3))).rejects.toThrow('mutual aid prompt failed');
+    await expect(handler(scheduled)).rejects.toThrow('mutual aid prompt failed');
+    await expect(handler(scheduled)).rejects.toThrow('mutual aid prompt failed');
+    expect(items.get(`${PK}#TONE#3`)?.mutualAidPending).toBe(true);
+  });
+
+  it('does not commit tone 3 while a member page is unsent, even when mutual aid succeeded', async () => {
+    const { handler, items, sns } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+    ]);
+    sns.send.mockRejectedValueOnce(new Error('sns unavailable'));
+
+    await expect(handler(manual(3))).rejects.toThrow('sns unavailable');
+    expect(requestMutualAid).toHaveBeenCalledTimes(1);
     expect(items.get(`${PK}#TONE#3`)).toBeUndefined();
-
-    await expect(handler(manual(3))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
-    expect(requestMutualAid).toHaveBeenCalledTimes(2);
-    expect(items.get(`${PK}#TONE#3`)).toBeDefined();
   });
 
   it('advancing to tone 3 with the predicate met pages tone 3 but does not request mutual aid', async () => {

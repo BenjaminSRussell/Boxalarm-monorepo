@@ -190,13 +190,20 @@ function metadata(overrides: Partial<FakeItem> = {}): FakeItem {
   };
 }
 
-function fakeLambda(outcome: string | { functionError: string } | Error) {
+function fakeLambda(outcome: string | { functionError: string; errorType?: string } | Error) {
   const send = vi.fn<(command: unknown) => Promise<unknown>>(() => {
     if (outcome instanceof Error) {
       return Promise.reject(outcome);
     }
     if (typeof outcome === 'object') {
-      return Promise.resolve({ FunctionError: outcome.functionError, Payload: undefined });
+      return Promise.resolve({
+        FunctionError: outcome.functionError,
+        Payload: outcome.errorType
+          ? new TextEncoder().encode(
+              JSON.stringify({ errorType: outcome.errorType, errorMessage: 'failed' }),
+            )
+          : undefined,
+      });
     }
     return Promise.resolve({
       Payload: new TextEncoder().encode(JSON.stringify({ outcome })),
@@ -317,6 +324,19 @@ describe('POST /tone-ladder/advance', () => {
 
     expect(result.statusCode).toBe(502);
     expect(result.body.detail).toMatch(/Tone 2 may not have reached every member/);
+  });
+
+  // Review MINOR-R3: tone 3 reached everyone and committed; only an officer prompt failed.
+  it('tells the officer the tone went out when only a mutual-aid prompt failed', async () => {
+    const { result } = await run(
+      [metadata({ currentToneSequence: 2 })],
+      { expectedCurrentToneSequence: 2 },
+      { functionError: 'Unhandled', errorType: 'MutualAidPromptIncompleteError' },
+    );
+
+    expect(result.statusCode).toBe(502);
+    expect(result.body.detail).toMatch(/Tone 3 was sent to every eligible member/);
+    expect(result.body.detail).toMatch(/Make the mutual-aid call now/);
   });
 
   it.each([

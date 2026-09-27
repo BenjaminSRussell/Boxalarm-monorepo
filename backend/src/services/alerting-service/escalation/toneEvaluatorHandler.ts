@@ -250,6 +250,76 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error('non-Error thrown', { cause: error });
 }
 
+async function requestTone3MutualAid(
+  ddb: DynamoDBDocumentClient,
+  sns: SNSClient,
+  tableName: string,
+  topicArn: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+  dispatch: DispatchMetadata,
+): Promise<void> {
+  try {
+    await requestMutualAid({
+      ddb,
+      sns,
+      tableName,
+      topicArn,
+      deptId,
+      dispatchId,
+      dispatch,
+      reason: 'TONE_3_PREDICATE_UNMET',
+    });
+  } catch (error) {
+    logError('alerting.toneLadder.mutualAidFailed', error, {
+      correlationId: `${dispatchId}#${TONE_SEQUENCE_THREE}`,
+    });
+    emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidRequestFailed');
+    throw error;
+  }
+}
+
+async function markMutualAidPending(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  pk: string,
+  toneSequence: number,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: { pk, sk: `TONE#${toneSequence}` },
+      UpdateExpression: 'SET mutualAidPending = :pending',
+      ExpressionAttributeValues: { ':pending': true },
+    }),
+  );
+}
+
+/** Re-runs the prompt pass for a committed tone 3 and clears the pending flag once it succeeds. */
+async function completePendingMutualAid(
+  ddb: DynamoDBDocumentClient,
+  sns: SNSClient,
+  tableName: string,
+  topicArn: string,
+  pk: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+  dispatch: DispatchMetadata,
+  toneSequence: number,
+): Promise<void> {
+  await requestTone3MutualAid(ddb, sns, tableName, topicArn, deptId, dispatchId, dispatch);
+  await ddb.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: { pk, sk: `TONE#${toneSequence}` },
+      UpdateExpression: 'REMOVE mutualAidPending',
+    }),
+  );
+  logInfo('alerting.toneLadder.mutualAidCompleted', {
+    correlationId: `${dispatchId}#${toneSequence}`,
+  });
+}
+
 function firingMarkerSk(toneSequence: number): string {
   return `FIRING#TONE#${toneSequence}`;
 }
@@ -464,6 +534,8 @@ async function commitToneEvaluation(
     readonly triggeredBy?: string | undefined;
     /** Firing a tone whose guard only records a predicate-met skip (manual advance). */
     readonly upgradeSkippedGuard?: boolean;
+    /** Every member was paged but a tone-3 mutual-aid prompt was not; a retry re-prompts. */
+    readonly mutualAidPending?: boolean;
   },
 ): Promise<ToneCommitResult> {
   const correlationId = `${dispatchId}#${toneSequence}`;
@@ -481,6 +553,7 @@ async function commitToneEvaluation(
           // A predicate-met skip still claims the tone so Scheduler retries of that skip are
           // idempotent, but it is not a firing: a manual advance may fire the tone later.
           skipped: !options.advanceMetadata,
+          ...(options.mutualAidPending ? { mutualAidPending: true } : {}),
         },
         // Normally the tone may be claimed once. A manual advance of a tone that was only
         // skipped may take over the skip guard - exactly once, since the upgraded guard is
@@ -604,11 +677,6 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     logInfo('alerting.toneLadder.skippedHalted', { correlationId });
     return { outcome: 'SKIPPED_MANUALLY_HALTED' };
   }
-  if (dispatch.toneLadderStatus === 'COMPLETED') {
-    logInfo('alerting.toneLadder.skippedCompleted', { correlationId });
-    return { outcome: 'SKIPPED_COMPLETED' };
-  }
-
   const existingGuard = await ddb.send(
     new GetCommand({
       TableName: tableName,
@@ -616,6 +684,27 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       ConsistentRead: true,
     }),
   );
+  // Tone 3 paged every member and committed, but some officer's mutual-aid prompt did not go
+  // out. Only the prompt pass is retried; checked before COMPLETED because that commit is
+  // what completed the ladder.
+  if (existingGuard.Item?.mutualAidPending === true) {
+    await completePendingMutualAid(
+      ddb,
+      sns,
+      tableName,
+      topicArn,
+      pk,
+      deptId,
+      dispatchId,
+      dispatch,
+      toneSequence,
+    );
+    return { outcome: 'SKIPPED_ALREADY_FIRED' };
+  }
+  if (dispatch.toneLadderStatus === 'COMPLETED') {
+    logInfo('alerting.toneLadder.skippedCompleted', { correlationId });
+    return { outcome: 'SKIPPED_COMPLETED' };
+  }
   // A guard that only records a predicate-met skip does not stop a manual advance: the tone
   // never fired, and the officer is asking for it precisely because more people are needed.
   const upgradeSkippedGuard = manualOverride !== undefined && existingGuard.Item?.skipped === true;
@@ -691,9 +780,9 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
 
   const eligibleMembers = await queryEligibleMembers(ddb, tableName, deptId);
   // A failure paging some member must not also block mutual aid for tone 3: it is recorded,
-  // mutual aid is still requested, and the first failure is rethrown so the evaluation
-  // retries (re-publishing only unsent pages).
-  let evaluationFailure: Error | undefined;
+  // mutual aid is still requested, and the failure is rethrown so the evaluation retries
+  // (re-publishing only unsent pages).
+  let pagingFailure: Error | undefined;
   try {
     await fireTone(
       ddb,
@@ -708,34 +797,24 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       eligibleMembers,
     );
   } catch (error) {
-    evaluationFailure = asError(error);
+    pagingFailure = asError(error);
   }
 
-  // Requested BEFORE the fire-guard commit, and a failure propagates: once TONE#3 is
-  // committed a retry returns SKIPPED_ALREADY_FIRED and never reaches this line, so a
-  // mutual-aid request that failed after the commit (and was only logged) was lost for
-  // good. Retrying the whole evaluation is safe - tone-3 receipts already marked sent are
-  // skipped, the MUTUALAID singleton is written once, and only unsent prompts go out again.
+  // Requested before the fire-guard commit, even when paging failed, so a paging retry does
+  // not also delay the mutual-aid call. A mutual-aid failure never blocks the commit once
+  // every member is paged: the guard records it as pending, and the retry re-runs only the
+  // prompt pass (see the pending check above) - sent prompts are skipped, the MUTUALAID
+  // singleton is written once.
+  let mutualAidFailure: Error | undefined;
   if (mutualAidDue) {
     try {
-      await requestMutualAid({
-        ddb,
-        sns,
-        tableName,
-        topicArn,
-        deptId,
-        dispatchId,
-        dispatch,
-        reason: 'TONE_3_PREDICATE_UNMET',
-      });
+      await requestTone3MutualAid(ddb, sns, tableName, topicArn, deptId, dispatchId, dispatch);
     } catch (error) {
-      logError('alerting.toneLadder.mutualAidFailed', error, { correlationId });
-      emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidRequestFailed');
-      evaluationFailure ??= asError(error);
+      mutualAidFailure = asError(error);
     }
   }
-  if (evaluationFailure !== undefined) {
-    throw evaluationFailure;
+  if (pagingFailure !== undefined) {
+    throw pagingFailure;
   }
 
   const fireCommit = await commitToneEvaluation(
@@ -756,8 +835,16 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       advanceMetadata: true,
       triggeredBy: manualOverride?.triggeredBy,
       upgradeSkippedGuard: manualOverride !== undefined,
+      mutualAidPending: mutualAidFailure !== undefined,
     },
   );
+  if (mutualAidFailure !== undefined) {
+    if (fireCommit === 'already_exists') {
+      // A twin committed the guard first, without knowing this attempt's prompts failed.
+      await markMutualAidPending(ddb, tableName, pk, toneSequence);
+    }
+    throw mutualAidFailure;
+  }
   if (fireCommit === 'already_exists') {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });
     return { outcome: 'SKIPPED_ALREADY_FIRED' };

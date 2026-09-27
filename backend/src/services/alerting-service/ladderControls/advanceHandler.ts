@@ -80,6 +80,25 @@ function parseExpectedTone(body: Record<string, unknown>): number | undefined {
     : undefined;
 }
 
+/**
+ * The evaluator's error class, from the runtime's `{errorType, errorMessage}` error payload.
+ * It separates "some member was not paged" from "every member was paged and the tone
+ * committed, but an officer's mutual-aid prompt was not" - an officer must act differently.
+ */
+function readErrorType(payload: Uint8Array | undefined): string | undefined {
+  if (!payload) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payload).toString('utf8')) as { errorType?: unknown };
+    return typeof parsed.errorType === 'string' ? parsed.errorType : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const MUTUAL_AID_PROMPT_INCOMPLETE = 'MutualAidPromptIncompleteError';
+
 type InvokeResult =
   | { readonly kind: 'outcome'; readonly outcome: ToneOutcome }
   | { readonly kind: 'failed'; readonly reason: string };
@@ -97,7 +116,7 @@ async function invokeToneEvaluator(
     }),
   );
   if (response.FunctionError) {
-    return { kind: 'failed', reason: response.FunctionError };
+    return { kind: 'failed', reason: readErrorType(response.Payload) ?? response.FunctionError };
   }
   if (!response.Payload) {
     return { kind: 'failed', reason: 'EmptyPayload' };
@@ -207,6 +226,12 @@ async function advance(
       toneSequence,
     });
     emitOutcomeMetric(LADDER_CONTROL_METRIC_NAMESPACE, LADDER_CONTROL_FAILED_METRIC, CONTROL);
+    if (result.reason === MUTUAL_AID_PROMPT_INCOMPLETE) {
+      return outcomeUnknownProblem(
+        traceId,
+        `Tone ${toneSequence} was sent to every eligible member, but the mutual-aid prompt did not reach every officer. Make the mutual-aid call now if no officer has confirmed it.`,
+      );
+    }
     return outcomeUnknownProblem(
       traceId,
       `Tone ${toneSequence} may not have reached every member. Check the ladder and delivery receipts before advancing again — retrying tone ${toneSequence} will not re-page members who already received it.`,
