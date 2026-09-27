@@ -59,6 +59,11 @@ const CertificationsPage = lazy(() =>
     default: mod.CertificationsPage,
   })),
 );
+const TrainingHoursPage = lazy(() =>
+  import('./features/training/TrainingHoursPage').then((mod) => ({
+    default: mod.TrainingHoursPage,
+  })),
+);
 const TrainingEventsPage = lazy(() =>
   import('./features/training/TrainingEventsPage').then((mod) => ({
     default: mod.TrainingEventsPage,
@@ -184,6 +189,7 @@ export function App() {
                   <Route path="personnel/:id" element={roleGuarded(<MemberDetailPage />)} />
                   <Route path="certifications" element={roleGuarded(<CertificationsPage />)} />
                   <Route path="training/events" element={roleGuarded(<TrainingEventsPage />)} />
+                  <Route path="training/hours" element={roleGuarded(<TrainingHoursPage />)} />
                   <Route path="apparatus" element={roleGuarded(<ApparatusListPage />)} />
                   <Route path="apparatus/compliance" element={roleGuarded(<CompliancePage />)} />
                   <Route path="apparatus/:id" element={roleGuarded(<ApparatusDetailPage />)} />
