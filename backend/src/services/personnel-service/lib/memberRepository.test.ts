@@ -76,9 +76,10 @@ describe('memberRepository', () => {
 
     it('creates a dept-scoped MEMBER item defaulted to PROBATIONARY status (AC1)', async () => {
       sendMock.mockResolvedValueOnce({});
-      const member = await createMember('table', PRINCIPAL, input, 'actor-1');
+      const member = await createMember('table', PRINCIPAL, input, 'actor-1', 'sub-jamie');
 
       expect(member.status).toBe('PROBATIONARY');
+      expect(member.memberId).toBe('sub-jamie');
       expect(member.deptId).toBe('NICHOLS');
       const items = lastCall().input.TransactItems ?? [];
       const memberPut = items[0]?.Put;
@@ -89,14 +90,14 @@ describe('memberRepository', () => {
 
     it('conditions the MEMBER write on the pk not already existing', async () => {
       sendMock.mockResolvedValueOnce({});
-      await createMember('table', PRINCIPAL, input, 'actor-1');
+      await createMember('table', PRINCIPAL, input, 'actor-1', 'sub-jamie');
       const items = lastCall().input.TransactItems ?? [];
       expect(items[0]?.Put?.ConditionExpression).toBe('attribute_not_exists(pk)');
     });
 
     it('writes an AUDIT_LOG_ENTRY alongside the MEMBER item in the same transaction (P9)', async () => {
       sendMock.mockResolvedValueOnce({});
-      const member = await createMember('table', PRINCIPAL, input, 'actor-1');
+      const member = await createMember('table', PRINCIPAL, input, 'actor-1', 'sub-jamie');
       const items = lastCall().input.TransactItems ?? [];
       expect(items).toHaveLength(2);
       const auditPut = items[1]?.Put;

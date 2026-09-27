@@ -2,11 +2,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer } from 'aws-lambda';
 import type { VerifiedAccessToken } from '../../platform-service/authorizer/tokenVerifier.js';
 
-const { createMemberMock } = vi.hoisted(() => ({ createMemberMock: vi.fn() }));
+const { createMemberMock, createLoginMock, deleteLoginMock } = vi.hoisted(() => ({
+  createMemberMock: vi.fn(),
+  createLoginMock: vi.fn(),
+  deleteLoginMock: vi.fn(),
+}));
 
 vi.mock('../lib/memberRepository.js', () => ({
   createMember: createMemberMock,
 }));
+
+vi.mock('../lib/memberLogin.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/memberLogin.js')>();
+  return {
+    ...actual,
+    getCognitoClient: () => ({}),
+    createMemberLogin: createLoginMock,
+    deleteMemberLogin: deleteLoginMock,
+  };
+});
+
+const { MemberLoginExistsError } = await import('../lib/memberLogin.js');
 
 const { handler } = await import('./create.js');
 
@@ -57,7 +73,10 @@ const VALID_BODY = JSON.stringify({
 describe('members/create handler (entrypoint test)', () => {
   beforeEach(() => {
     createMemberMock.mockReset();
+    createLoginMock.mockReset().mockResolvedValue('sub-jamie');
+    deleteLoginMock.mockReset().mockResolvedValue(undefined);
     process.env.PERSONNEL_TABLE_NAME = 'boxalarm-dev-platform';
+    process.env.COGNITO_USER_POOL_ID = 'us-east-1_pool';
   });
 
   it('creates a member and returns 201 with the persisted record (AC1)', async () => {
@@ -115,5 +134,41 @@ describe('members/create handler (entrypoint test)', () => {
     createMemberMock.mockResolvedValueOnce({ memberId: 'm1', status: 'PROBATIONARY' });
     await handler(buildEvent(VALID_BODY, 'ADMIN'), {} as never, () => undefined);
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('MemberCreated'));
+  });
+
+  it("creates the member's login first and keys the member on its sub", async () => {
+    createMemberMock.mockResolvedValueOnce({ memberId: 'sub-jamie', status: 'PROBATIONARY' });
+    await handler(buildEvent(VALID_BODY, 'ADMIN'), {} as never, () => undefined);
+    expect(createLoginMock).toHaveBeenCalledWith(
+      expect.anything(),
+      { userPoolId: 'us-east-1_pool' },
+      { email: 'jamie@example.com', deptId: 'NICHOLS' },
+    );
+    expect(createMemberMock.mock.calls[0]?.[4]).toBe('sub-jamie');
+  });
+
+  it('answers 409 without writing a member when a login already exists for the email', async () => {
+    createLoginMock.mockRejectedValueOnce(new MemberLoginExistsError('jamie@example.com'));
+    const result = await handler(buildEvent(VALID_BODY, 'ADMIN'), {} as never, () => undefined);
+    expect(result).toMatchObject({ statusCode: 409 });
+    expect(createMemberMock).not.toHaveBeenCalled();
+  });
+
+  it('deletes the new login when the member write fails, so a retry can succeed', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    createMemberMock.mockRejectedValueOnce(new Error('TransactionCanceled'));
+    const result = await handler(buildEvent(VALID_BODY, 'ADMIN'), {} as never, () => undefined);
+    expect(result).toMatchObject({ statusCode: 503 });
+    expect(deleteLoginMock).toHaveBeenCalledWith(
+      expect.anything(),
+      { userPoolId: 'us-east-1_pool' },
+      'jamie@example.com',
+    );
+  });
+
+  it('rejects a non-admin caller before creating any login', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await handler(buildEvent(VALID_BODY, 'MEMBER'), {} as never, () => undefined);
+    expect(createLoginMock).not.toHaveBeenCalled();
   });
 });

@@ -69,14 +69,15 @@ function toMember(item: Record<string, unknown>): Member {
   };
 }
 
+/** memberId is the member's Cognito `sub` (see memberLogin.ts), never a generated id. */
 export async function createMember(
   tableName: string,
   principal: VerifiedPrincipal,
   input: NewMemberInput,
   actorId: string,
+  memberId: string,
 ): Promise<Member> {
   const deptId = toVerifiedDeptId(principal);
-  const memberId = randomUUID();
   const now = Date.now();
   const changedAt = new Date(now).toISOString();
   const auditDate = changedAt.slice(0, 10);
