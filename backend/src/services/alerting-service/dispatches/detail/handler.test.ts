@@ -112,6 +112,83 @@ describe('alert-detail handler', () => {
     errorSpy.mockRestore();
   });
 
+  describe('mutualAid (officer ladder controls, F1.13)', () => {
+    function bySk(items: Record<string, unknown>) {
+      return {
+        send: vi.fn((command: { input: { Key: { sk: string } } }) => {
+          const item = items[command.input.Key.sk];
+          return item instanceof Error ? Promise.reject(item) : Promise.resolve({ Item: item });
+        }),
+      } as unknown as DynamoDBDocumentClient;
+    }
+
+    it('is null when mutual aid has not been requested', async () => {
+      const { createHandler } = await import('./handler.js');
+      const handler = createHandler({
+        authzClient: fakeAuthzClient('ALLOW'),
+        docClient: bySk({ METADATA: DISPATCH_ITEM }),
+      });
+
+      const body = JSON.parse(
+        ((await handler(buildEvent('NICHOLS-4471-1798000000'))) as { body: string }).body,
+      ) as Record<string, unknown>;
+
+      expect(body.mutualAid).toBeNull();
+    });
+
+    it('carries the requested/acknowledged state of the MUTUAL_AID_EVENT singleton', async () => {
+      const { createHandler } = await import('./handler.js');
+      const handler = createHandler({
+        authzClient: fakeAuthzClient('ALLOW'),
+        docClient: bySk({
+          METADATA: DISPATCH_ITEM,
+          'MUTUALAID#SINGLETON': {
+            entityType: 'MUTUAL_AID_EVENT',
+            reason: 'TONE_3_PREDICATE_UNMET',
+            triggeredAt: 1798000360,
+            acknowledgedBy: 'officer-7',
+            acknowledgedAt: 1798000400,
+            notes: 'Called Trumbull Center',
+            adapterUsed: 'OFFICER_MANUAL_PROMPT',
+          },
+        }),
+      });
+
+      const body = JSON.parse(
+        ((await handler(buildEvent('NICHOLS-4471-1798000000'))) as { body: string }).body,
+      ) as Record<string, unknown>;
+
+      expect(body.mutualAid).toEqual({
+        triggeredAt: 1798000360,
+        reason: 'TONE_3_PREDICATE_UNMET',
+        triggeredBy: null,
+        acknowledgedBy: 'officer-7',
+        acknowledgedAt: 1798000400,
+        notes: 'Called Trumbull Center',
+      });
+    });
+
+    it('omits mutualAid (unknown, not "not requested") and still serves the alert when the read fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { createHandler } = await import('./handler.js');
+      const handler = createHandler({
+        authzClient: fakeAuthzClient('ALLOW'),
+        docClient: bySk({
+          METADATA: DISPATCH_ITEM,
+          'MUTUALAID#SINGLETON': new Error('throttled'),
+        }),
+      });
+
+      const result = await handler(buildEvent('NICHOLS-4471-1798000000'));
+
+      expect(result).toMatchObject({ statusCode: 200 });
+      const body = JSON.parse((result as { body: string }).body) as Record<string, unknown>;
+      expect(body.address).toBe('123 Main St');
+      expect('mutualAid' in body).toBe(false);
+      errorSpy.mockRestore();
+    });
+  });
+
   it('AC2: renders full core content with prePlan null when the DISPATCH_ALERT item has no prePlanRefs yet', async () => {
     const { createHandler } = await import('./handler.js');
     const docClient = {

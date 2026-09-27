@@ -39,6 +39,22 @@ export async function getDispatchDetail(
   return result.Item as DispatchAlertItem | undefined;
 }
 
+/** The MUTUAL_AID_EVENT singleton (architecture §3.1), or undefined if none was requested. */
+export async function getMutualAidEvent(
+  client: DynamoDBDocumentClient,
+  tableName: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+): Promise<Record<string, unknown> | undefined> {
+  const result = await client.send(
+    new GetCommand({
+      TableName: tableName,
+      Key: { pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId), sk: 'MUTUALAID#SINGLETON' },
+    }),
+  );
+  return result.Item?.entityType === 'MUTUAL_AID_EVENT' ? result.Item : undefined;
+}
+
 // Keyed by occupancyId per architecture.md:734 (`sk = OCCUPANCY#{occupancyId}`). The caller
 // (handler.ts fetchPrePlan) currently has no occupancyId to give this — see the TODO there.
 export async function getPrePlanCopy(
