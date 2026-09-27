@@ -98,12 +98,24 @@ describe('parseFieldCapturePayload', () => {
         occupancyId: 'OCC-1',
         inspectionId: 'INS-1',
         idempotencyKey: 'k',
-        conductedAt: new Date(Date.now() + 60_000).toISOString(),
+        conductedAt: new Date(Date.now() + 60 * 60_000).toISOString(),
       },
       FieldCaptureValidationError,
     ],
   ])('rejects %j', (body, errorClass) => {
     expect(() => parseFieldCapturePayload(body)).toThrow(errorClass);
+  });
+
+  it('accepts a conductedAt up to five minutes ahead (a phone clock running fast)', () => {
+    const conductedAt = new Date(Date.now() + 60_000).toISOString();
+    expect(
+      parseFieldCapturePayload({
+        occupancyId: 'OCC-1',
+        inspectionId: 'INS-1',
+        idempotencyKey: 'k',
+        conductedAt,
+      }).conductedAt,
+    ).toBe(conductedAt);
   });
 
   it('accepts a past conductedAt and carries it through', () => {

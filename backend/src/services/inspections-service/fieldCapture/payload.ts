@@ -39,12 +39,18 @@ function isPathSafeId(value: unknown): value is string {
   return isPkSafeString(value) && isSafeAssetFilename(value);
 }
 
+// A capture is stamped by the phone and may sync much later from the offline outbox, so
+// the phone's clock - not the server's - sets conductedAt. A phone running a little fast
+// must not have its capture refused (a 400 is terminal in the outbox: the capture would be
+// lost), so allow modest skew while still rejecting a genuinely future timestamp.
+const CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
+
 function isPastOrPresentIsoDateTime(value: unknown): value is string {
   if (!isNonEmptyString(value)) {
     return false;
   }
   const parsed = Date.parse(value);
-  return !Number.isNaN(parsed) && parsed <= Date.now();
+  return !Number.isNaN(parsed) && parsed <= Date.now() + CLOCK_SKEW_ALLOWANCE_MS;
 }
 
 export function parseFieldCapturePayload(body: unknown): FieldCapturePayload {
