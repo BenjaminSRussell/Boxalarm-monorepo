@@ -508,3 +508,83 @@ describe('field capture', () => {
     expect(JSON.parse(row!.body).idempotencyKey).toBe('fc-1');
   });
 });
+
+describe('attendance', () => {
+  const entry = { activityType: 'DRILL', refId: null, occurredAt: 1_790_000_000, hours: 1 };
+
+  test('POSTs to personnel/attendance and clears the outbox on success', async () => {
+    mockApiRequest.mockResolvedValueOnce({
+      json: async () => ({ ...entry, losapPointsAwarded: 1 }),
+    });
+
+    await syncManager.enqueueAttendance('attendance-1790000000', 'Attendance — Drill', entry);
+    await flush();
+
+    expect(mockApiRequest).toHaveBeenCalledWith(
+      'personnel/attendance',
+      tokens,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(entry) }),
+    );
+    await expect(store.find('attendance-1790000000')).resolves.toBeUndefined();
+  });
+
+  test('queued offline, it is kept and drained when connectivity returns', async () => {
+    syncManager.configure(null, null);
+    mockAddEventListener.mockClear();
+    syncManager.configure(tokens, 'https://api.example.com');
+    await flush();
+    const onChange = mockAddEventListener.mock.calls[0][0] as (state: {
+      isConnected: boolean;
+    }) => void;
+    (NetInfo.fetch as jest.Mock).mockResolvedValueOnce({ isConnected: false });
+
+    await syncManager.enqueueAttendance('attendance-1790000000', 'Attendance — Drill', entry);
+    await flush();
+    expect(mockApiRequest).not.toHaveBeenCalled();
+    expect((await store.find('attendance-1790000000'))?.status).toBe('QUEUED');
+
+    mockApiRequest.mockResolvedValueOnce({ json: async () => entry });
+    onChange({ isConnected: true });
+    await flush();
+
+    await expect(store.find('attendance-1790000000')).resolves.toBeUndefined();
+  });
+
+  test('a 409 on replay means the first attempt landed: delivered, not rejected', async () => {
+    mockApiRequest.mockRejectedValueOnce(problem(409, 'Conflict'));
+
+    await syncManager.enqueueAttendance('attendance-1790000000', 'Attendance — Drill', entry);
+    await flush();
+
+    await expect(store.find('attendance-1790000000')).resolves.toBeUndefined();
+    expect(syncManager.hasSynced('attendance-1790000000')).toBe(true);
+  });
+
+  test('a 409 is still a rejection for kinds that carry their own idempotency key', async () => {
+    mockApiRequest.mockRejectedValueOnce(problem(409, 'Conflict'));
+
+    await syncManager.enqueueChecklistRun('ENGINE-2', 'check-409', {});
+    await flush();
+
+    expect((await store.find('check-409'))?.status).toBe('REJECTED');
+  });
+
+  test('a 400 validation failure is REJECTED with the reason and waits for the user', async () => {
+    mockApiRequest.mockRejectedValueOnce(
+      new ApiError({
+        type: 'about:blank',
+        title: 'Bad Request',
+        status: 400,
+        detail: 'The request body must supply activityType',
+        traceId: 't',
+      }),
+    );
+
+    await syncManager.enqueueAttendance('attendance-1790000000', 'Attendance — Drill', entry);
+    await flush();
+
+    const row = await store.find('attendance-1790000000');
+    expect(row?.status).toBe('REJECTED');
+    expect(row?.lastError).toMatch(/must supply activityType/);
+  });
+});

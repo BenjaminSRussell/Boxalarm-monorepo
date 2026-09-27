@@ -130,6 +130,17 @@ export async function enqueueFieldCapture(
   );
 }
 
+// POST /api/v1/personnel/attendance (personnel-service attendance/handler.ts). The record's key
+// is the member plus occurredAt, and the handler answers a repeat of that key with 409, so the
+// natural key doubles as the outbox id and a 409 on replay means "already recorded".
+export async function enqueueAttendance(
+  idempotencyKey: string,
+  label: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  await enqueueAndDrain('ATTENDANCE', idempotencyKey, label, 'personnel/attendance', body);
+}
+
 export async function retry(id: string): Promise<void> {
   await outbox.retry(id);
   await notify();
@@ -249,14 +260,38 @@ function readUploadTarget(row: OutboxRow, parsed: Record<string, unknown>): Uplo
   };
 }
 
-async function create(row: OutboxRow): Promise<OutboxRow | undefined> {
+// Kinds whose create endpoint has no idempotency key and instead answers a replay of an
+// already-stored natural key with 409 - for them a 409 means the first attempt landed (its
+// response was lost), so the entry is delivered, not refused.
+const CONFLICT_MEANS_DELIVERED: ReadonlySet<OutboxKind> = new Set(['ATTENDANCE']);
+
+async function post(row: OutboxRow): Promise<Response | null> {
   if (!tokens || !apiBaseUrl) throw new Error('Sync is not configured yet');
-  const response = await apiRequest(row.path, tokens, {
-    apiBaseUrl,
-    method: row.method,
-    headers: { 'Content-Type': 'application/json' },
-    body: row.body,
-  });
+  try {
+    return await apiRequest(row.path, tokens, {
+      apiBaseUrl,
+      method: row.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: row.body,
+    });
+  } catch (error) {
+    if (
+      CONFLICT_MEANS_DELIVERED.has(row.kind) &&
+      error instanceof ApiError &&
+      error.problem.status === 409
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function create(row: OutboxRow): Promise<OutboxRow | undefined> {
+  const response = await post(row);
+  if (!response) {
+    await outbox.advanceStage(row.id, { stage: 'DONE' });
+    return outbox.find(row.id);
+  }
   const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   const target = readUploadTarget(row, parsed);
   await outbox.advanceStage(row.id, {
