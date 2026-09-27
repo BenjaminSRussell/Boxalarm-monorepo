@@ -222,6 +222,13 @@ export const ALERTING_OFFICER_ACTIONS = [
   "ViewAlertingAuditLog",
   "ViewCanaryStatus",
   "ViewDeliveryBaseline",
+  // F1.14 / F1.13 officer ladder controls (architecture.md §2, Cognito(admin)). OQ-25 (who
+  // may halt, and what the SOG says a halt means) is open; until it is answered they take the
+  // same chief/admin/officer tier as every other Cognito(admin) alerting route.
+  "AdvanceToneLadder",
+  "HaltToneLadder",
+  "TriggerMutualAid",
+  "AcknowledgeMutualAid",
 ] as const;
 export const ALERTING_OFFICER_GROUPS = ["OFFICER", "CHIEF", "ADMIN"] as const;
 
@@ -245,6 +252,10 @@ const ALERTING_ACTION_RESOURCE: Record<
   ViewAlertingAuditLog: "Department",
   ViewCanaryStatus: "Department",
   ViewDeliveryBaseline: "Department",
+  AdvanceToneLadder: "Dispatch",
+  HaltToneLadder: "Dispatch",
+  TriggerMutualAid: "Dispatch",
+  AcknowledgeMutualAid: "Dispatch",
 };
 
 const ALERTING_SCHEMA_ACTIONS = Object.fromEntries(
@@ -574,7 +585,10 @@ export function alertingMemberActionsPolicy(userPoolId: string): string {
   return `permit (\n  principal,\n  action in [${actions}],\n  resource\n) when {\n  ${groupCheck}\n};`;
 }
 
-/** Cognito(admin) alerting actions: manual dispatch, receipts, audit, canary, diagnostics of others. */
+/**
+ * Cognito(admin) alerting actions: manual dispatch, receipts, audit, canary, diagnostics of
+ * others, and the tone-ladder / mutual-aid controls.
+ */
 export function alertingOfficerActionsPolicy(userPoolId: string): string {
   const groupCheck = ALERTING_OFFICER_GROUPS.map(
     (g) => `principal in Boxalarm::UserGroup::"${groupEntityId(userPoolId, g)}"`,

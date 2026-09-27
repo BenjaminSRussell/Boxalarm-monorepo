@@ -557,6 +557,40 @@ describe("PolicyStore", () => {
       },
     );
 
+    const LADDER_CONTROLS = [
+      "AdvanceToneLadder",
+      "HaltToneLadder",
+      "TriggerMutualAid",
+      "AcknowledgeMutualAid",
+    ];
+
+    it.each(
+      ["OFFICER", "CHIEF", "ADMIN"].flatMap((group) =>
+        LADDER_CONTROLS.map((action) => [group, action]),
+      ),
+    )("ALLOWs %s to %s on a Dispatch (F1.13/F1.14)", async (group, action) => {
+      expect(await decide(group!, action!, dispatch)).toBe("allow");
+    });
+
+    it.each(
+      ["MEMBER", "TRAINING", "APPARATUS"].flatMap((group) =>
+        LADDER_CONTROLS.map((action) => [group, action]),
+      ),
+    )("DENYs %s to %s (officer tier only)", async (group, action) => {
+      expect(await decide(group!, action!, dispatch)).toBe("deny");
+    });
+
+    it.each(LADDER_CONTROLS)(
+      "declares %s on Boxalarm::Dispatch only (a Department resource fails STRICT validation)",
+      async (action) => {
+        const { CEDAR_SCHEMA } = await import("../../components/authz/cedar-policies");
+        const schema = JSON.parse(CEDAR_SCHEMA) as {
+          Boxalarm: { actions: Record<string, { appliesTo: { resourceTypes: string[] } }> };
+        };
+        expect(schema.Boxalarm.actions[action]?.appliesTo.resourceTypes).toEqual(["Dispatch"]);
+      },
+    );
+
     it.each(["MEMBER", "TRAINING", "APPARATUS"])(
       "DENYs %s manual dispatch, receipts and the audit log",
       async (group) => {
