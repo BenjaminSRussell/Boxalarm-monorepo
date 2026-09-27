@@ -1,18 +1,17 @@
-import { palette, radius, spacing, touchTarget, typography } from '@boxalarm/design-tokens';
+import { radius, spacing, targetSize, typeScale } from '@boxalarm/design-tokens';
 import { useEffect, useRef, useState } from 'react';
+import { AccessibilityInfo, FlatList, Text, TouchableOpacity, View } from 'react-native';
+import { Button, Card, Screen, useTheme } from '../../components/ui';
 import {
-  AccessibilityInfo,
-  FlatList,
-  Text,
-  TouchableOpacity,
-  useColorScheme,
-  View,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAttendanceRepository } from '../../features/attendance/apiAttendanceRepository';
+  activityLabel,
+  useAttendanceRepository,
+} from '../../features/attendance/apiAttendanceRepository';
 import type { ActivityType, AttendanceRecord } from '../../features/attendance/types';
+import type { SyncItem } from '../../features/sync/types';
 import { ApiError } from '../../lib/apiClient';
 import { useOptionalConnectivity } from '../../sync/ConnectivityContext';
+import { DeliveryStatus } from '../../sync/DeliveryStatus';
+import * as syncManager from '../../sync/syncManager';
 
 const ACTIVITY_TYPES: ActivityType[] = ['CALL', 'DRILL', 'MEETING', 'WORK_DETAIL', 'STANDBY'];
 
@@ -24,23 +23,34 @@ function describeError(e: unknown, forbiddenMessage: string, fallbackMessage: st
 }
 
 export function AttendanceScreen() {
-  const scheme = useColorScheme();
-  const tokens = scheme === 'dark' ? palette.cab : palette.day;
+  const theme = useTheme();
   const repository = useAttendanceRepository();
   const { isOnline } = useOptionalConnectivity();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [pending, setPending] = useState<SyncItem[]>([]);
   const [activityType, setActivityType] = useState<ActivityType>('DRILL');
   const [error, setError] = useState<string | null>(null);
-  const queue = useRef<AttendanceRecord[]>([]);
+  const [historyUnavailable, setHistoryUnavailable] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // occurredAt (epoch seconds) is the record's server-side key and its outbox id, so two taps in
+  // the same second would collapse into one record; each new record is kept a second apart.
+  const lastOccurredAt = useRef(0);
+  const pendingCount = useRef(0);
 
   const loadRecords = () => {
     repository
       .getOwnRecords()
       .then((next) => {
         setError(null);
+        setHistoryUnavailable(false);
         setRecords(next);
       })
       .catch((e: unknown) => {
+        // A network failure is the expected offline case, not an error: recording still works.
+        if (!(e instanceof ApiError)) {
+          setHistoryUnavailable(true);
+          return;
+        }
         const message = describeError(
           e,
           'You do not have access to view this attendance history.',
@@ -53,128 +63,186 @@ export function AttendanceScreen() {
 
   useEffect(loadRecords, [repository]);
 
-  useEffect(() => {
-    if (!isOnline || queue.current.length === 0) return;
-    const pending = queue.current;
-    queue.current = [];
-    Promise.all(pending.map((entry) => repository.record(entry))).then(() => {
-      loadRecords();
-      AccessibilityInfo.announceForAccessibility('Queued attendance synced');
-    });
+  // Records still on the phone come from the SQLite outbox, so they survive an app restart and
+  // show their real state. When one leaves the outbox it was delivered (or discarded), so the
+  // server history is reloaded to show it there instead.
+  useEffect(
+    () =>
+      syncManager.subscribe((status) => {
+        const next = status.items.filter((item) => item.kind === 'ATTENDANCE');
+        if (next.length < pendingCount.current) loadRecords();
+        pendingCount.current = next.length;
+        setPending(next);
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOnline]);
+    [repository],
+  );
 
-  const handleRecord = () => {
-    const entry: AttendanceRecord = {
-      activityType,
-      refId: null,
-      occurredAt: Math.floor(Date.now() / 1000),
-      hours: 1,
-    };
-    if (!isOnline) {
-      queue.current.push(entry);
-      setRecords((prev) => [...prev, entry]);
-      AccessibilityInfo.announceForAccessibility('Queued. Will sync when you have signal.');
-      return;
+  const handleRecord = async () => {
+    const occurredAt = Math.max(Math.floor(Date.now() / 1000), lastOccurredAt.current + 1);
+    lastOccurredAt.current = occurredAt;
+    const entry: AttendanceRecord = { activityType, refId: null, occurredAt, hours: 1 };
+    setSaving(true);
+    setError(null);
+    try {
+      await repository.record(entry);
+      loadRecords();
+      AccessibilityInfo.announceForAccessibility(
+        isOnline
+          ? `${activityLabel(activityType)} attendance saved. Sending now.`
+          : `${activityLabel(activityType)} attendance saved on this phone. It sends when you have signal.`,
+      );
+    } catch (e: unknown) {
+      const message = describeError(
+        e,
+        'You do not have access to record attendance.',
+        'Could not save attendance on this phone. Try again.',
+      );
+      setError(message);
+      AccessibilityInfo.announceForAccessibility(message);
+    } finally {
+      setSaving(false);
     }
-    repository
-      .record(entry)
-      .then(() => {
-        loadRecords();
-        AccessibilityInfo.announceForAccessibility('Attendance recorded');
-      })
-      .catch((e: unknown) => {
-        const message = describeError(
-          e,
-          'You do not have access to record attendance.',
-          'Could not record attendance. Try again.',
-        );
-        setError(message);
-        AccessibilityInfo.announceForAccessibility(message);
-      });
   };
 
-  const sorted = [...records].sort((a, b) => a.occurredAt - b.occurredAt);
+  const sorted = [...records].sort((a, b) => b.occurredAt - a.occurredAt);
 
-  return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: tokens.background }}>
-      <View
-        style={{ padding: spacing.lg, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}
+  const header = (
+    <View style={{ gap: spacing.lg, paddingBottom: spacing.md }}>
+      <Text
+        accessibilityRole="header"
+        style={{ color: theme.fg, fontSize: typeScale.title.size, fontWeight: '700' }}
       >
-        {ACTIVITY_TYPES.map((type) => (
-          <TouchableOpacity
-            key={type}
-            accessibilityRole="button"
-            accessibilityState={{ selected: activityType === type }}
-            onPress={() => setActivityType(type)}
-            style={{
-              minHeight: touchTarget.baseline.ios,
-              paddingHorizontal: spacing.md,
-              justifyContent: 'center',
-              borderRadius: radius.default,
-              borderWidth: 1,
-              borderColor: tokens.accent,
-              backgroundColor: activityType === type ? tokens.accent : 'transparent',
-            }}
-          >
-            <Text
+        Attendance
+      </Text>
+      <View
+        accessibilityRole="radiogroup"
+        accessibilityLabel="Activity"
+        style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}
+      >
+        {ACTIVITY_TYPES.map((type) => {
+          const selected = activityType === type;
+          return (
+            <TouchableOpacity
+              key={type}
+              accessibilityRole="radio"
+              accessibilityLabel={activityLabel(type)}
+              accessibilityState={{ selected, checked: selected }}
+              onPress={() => setActivityType(type)}
               style={{
-                color: activityType === type ? tokens.background : tokens.accent,
-                fontSize: typography.size.sm,
+                minHeight: targetSize.field,
+                minWidth: targetSize.field,
+                paddingHorizontal: spacing.md,
+                justifyContent: 'center',
+                borderRadius: radius.default,
+                borderWidth: selected ? 2 : 1,
+                borderColor: selected ? theme.fg : theme.border,
+                backgroundColor: selected ? theme.fg : theme.surface,
               }}
             >
-              {type}
-            </Text>
-          </TouchableOpacity>
-        ))}
+              <Text
+                style={{
+                  color: selected ? theme.bg : theme.fg,
+                  fontSize: typeScale.body.size,
+                  fontWeight: '600',
+                }}
+              >
+                {activityLabel(type)}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
-      <TouchableOpacity
-        accessibilityRole="button"
-        onPress={handleRecord}
-        style={{
-          marginHorizontal: spacing.lg,
-          minHeight: touchTarget.baseline.ios,
-          alignItems: 'center',
-          justifyContent: 'center',
-          backgroundColor: tokens.accent,
-          borderRadius: radius.default,
-        }}
-      >
-        <Text
-          style={{ color: tokens.background, fontSize: typography.size.base, fontWeight: '600' }}
-        >
-          Record attendance
-        </Text>
-      </TouchableOpacity>
+      <Button
+        label={`Record ${activityLabel(activityType).toLowerCase()} attendance`}
+        fullWidth
+        loading={saving}
+        onPress={() => void handleRecord()}
+      />
       {error ? (
         <Text
           accessibilityRole="alert"
-          style={{
-            color: tokens.error,
-            marginHorizontal: spacing.lg,
-            marginTop: spacing.sm,
-            fontSize: typography.size.sm,
-          }}
+          style={{ color: theme.status.danger, fontSize: typeScale.body.size }}
         >
           {error}
         </Text>
       ) : null}
+      {pending.length > 0 ? (
+        <View style={{ gap: spacing.sm }}>
+          <Text
+            accessibilityRole="header"
+            style={{ color: theme.fg, fontSize: typeScale.heading.size, fontWeight: '600' }}
+          >
+            On this phone, not yet recorded
+          </Text>
+          {pending.map((item) => (
+            <Card key={item.id}>
+              <Text style={{ color: theme.fg, fontSize: typeScale.body.size }}>{item.label}</Text>
+              <DeliveryStatus
+                itemId={item.id}
+                label={item.label}
+                state={item.status}
+                lastError={item.lastError}
+                isOnline={isOnline}
+              />
+            </Card>
+          ))}
+        </View>
+      ) : null}
+      <Text
+        accessibilityRole="header"
+        style={{ color: theme.fg, fontSize: typeScale.heading.size, fontWeight: '600' }}
+      >
+        Recorded
+      </Text>
+    </View>
+  );
+
+  return (
+    <Screen scroll={false}>
       <FlatList
         data={sorted}
-        keyExtractor={(item, index) => `${item.activityType}-${item.occurredAt}-${index}`}
-        contentContainerStyle={{ padding: spacing.lg }}
+        ListHeaderComponent={header}
+        ListEmptyComponent={
+          <Text style={{ color: theme.fgMuted, fontSize: typeScale.body.size }}>
+            {historyUnavailable
+              ? 'History loads when you have signal. New records are still saved on this phone.'
+              : 'No attendance recorded yet.'}
+          </Text>
+        }
+        ListFooterComponent={
+          historyUnavailable && sorted.length > 0 ? (
+            <Text
+              style={{
+                color: theme.fgMuted,
+                fontSize: typeScale.body.size,
+                marginTop: spacing.sm,
+              }}
+            >
+              History may be out of date - it refreshes when you have signal.
+            </Text>
+          ) : undefined
+        }
+        keyExtractor={(item) => `${item.activityType}-${item.occurredAt}`}
         renderItem={({ item }) => (
-          <View style={{ paddingVertical: spacing.sm }}>
-            <Text style={{ color: tokens.foreground, fontSize: typography.size.base }}>
-              {item.activityType}
+          <View
+            accessible
+            style={{
+              paddingVertical: spacing.sm,
+              borderBottomWidth: 1,
+              borderBottomColor: theme.borderDecorative,
+            }}
+          >
+            <Text style={{ color: theme.fg, fontSize: typeScale.body.size }}>
+              {activityLabel(item.activityType)}
               {item.refId ? ` — dispatch ${item.refId}` : ''}
             </Text>
-            <Text style={{ color: tokens.foreground, opacity: 0.7, fontSize: typography.size.sm }}>
+            <Text style={{ color: theme.fgMuted, fontSize: typeScale.bodyDense.size }}>
               {new Date(item.occurredAt * 1000).toLocaleDateString()} — {item.hours}h
             </Text>
           </View>
         )}
       />
-    </SafeAreaView>
+    </Screen>
   );
 }

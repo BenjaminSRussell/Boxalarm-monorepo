@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import Config from 'react-native-config';
 import { useOptionalAuth } from '../../auth/AuthContext';
 import { apiRequest, ApiError } from '../../lib/apiClient';
@@ -44,11 +44,6 @@ export function useChecksRepository(): ChecksRepositoryWithFallbackFlag {
   // memoized object on every render.
   const authRef = useRef(auth);
   authRef.current = auth;
-
-  useEffect(() => {
-    const tokens = apiBaseUrl && isAuthenticated ? (authRef.current ?? null) : null;
-    syncManager.configure(tokens, apiBaseUrl || null);
-  }, [apiBaseUrl, isAuthenticated]);
 
   return useMemo<ChecksRepositoryWithFallbackFlag>(() => {
     if (!apiBaseUrl || !isAuthenticated) {

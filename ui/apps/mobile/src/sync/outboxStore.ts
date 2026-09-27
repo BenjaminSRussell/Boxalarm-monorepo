@@ -1,6 +1,6 @@
 import { getDb } from './db';
 
-export type OutboxKind = 'CHECKLIST_RUN' | 'DEFECT';
+export type OutboxKind = 'CHECKLIST_RUN' | 'DEFECT' | 'FIELD_CAPTURE' | 'ATTENDANCE';
 export type OutboxStage = 'CREATE' | 'UPLOAD_PHOTO' | 'DONE';
 // FAILED is transient (retried with backoff); REJECTED is terminal (the server refused the
 // request itself, e.g. a 4xx validation error) and waits for the user to retry or discard it.
