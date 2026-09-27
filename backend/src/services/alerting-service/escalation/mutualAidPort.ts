@@ -76,7 +76,8 @@ export class MutualAidPromptIncompleteError extends Error {
 type PromptOutcome = 'SENT' | 'ALREADY_SENT' | 'NO_PUSH_TARGET' | 'FAILED';
 
 const ADAPTER_NAME = 'OFFICER_MANUAL_PROMPT';
-const OFFICER_ROLE = 'OFFICER';
+/** architecture.md MUTUAL_AID_EVENT.officersNotified: roles containing OFFICER or CHIEF. */
+const PROMPTED_ROLES: readonly string[] = ['OFFICER', 'CHIEF'];
 
 /**
  * Claims, publishes, then marks one officer's prompt sent. The claim alone proves nothing:
@@ -317,7 +318,9 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
   }
 
   const eligibleMembers = await queryEligibleMembers(ddb, tableName, deptId);
-  const officers = eligibleMembers.filter((member) => member.roles.includes(OFFICER_ROLE));
+  const officers = eligibleMembers.filter((member) =>
+    member.roles.some((role) => PROMPTED_ROLES.includes(role)),
+  );
 
   // promptOfficer already catches its own DynamoDB/SNS failures and resolves to false rather
   // than throwing, so Promise.allSettled here is belt-and-suspenders: one officer's failure

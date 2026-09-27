@@ -194,6 +194,46 @@ describe('requestMutualAid', () => {
     });
   });
 
+  it('prompts a chief as well as an officer, and nobody holding neither role', async () => {
+    const snapshot = (memberId: string, roles: string[]): FakeItem => ({
+      pk: ELIGIBILITY_PK,
+      sk: `MEMBER#${memberId}`,
+      entityType: 'MEMBER_ELIGIBILITY_SNAPSHOT',
+      memberId,
+      active: true,
+      quals: [],
+      roles,
+      contactChannels: [
+        { channel: 'PUSH', token: `tok-${memberId}`, platform: 'ios', valid: true },
+      ],
+      availabilityState: 'AVAILABLE',
+      snapshotUpdatedAt: 0,
+    });
+    const { send, items } = createFakeDdb([
+      snapshot('chief-1', ['MEMBER', 'CHIEF']),
+      snapshot('officer-1', ['MEMBER', 'OFFICER']),
+      snapshot('training-1', ['MEMBER', 'TRAINING', 'ADMIN']),
+    ]);
+    const snsSend = vi.fn().mockResolvedValue({});
+
+    const result = await requestMutualAid({
+      ddb: { send } as unknown as DynamoDBDocumentClient,
+      sns: { send: snsSend } as unknown as SNSClient,
+      tableName: 'alerting-table',
+      topicArn: 'arn:aws:sns:us-east-1:1:alerting-topic.fifo',
+      deptId: DEPT_ID,
+      dispatchId: 'dispatch-1',
+      dispatch: DISPATCH_TEXT,
+      reason: 'TONE_3_PREDICATE_UNMET',
+    });
+
+    expect(result.officersNotified).toBe(2);
+    expect(items.has('DEPT#NICHOLS#DISPATCH#dispatch-1#MAPROMPT#chief-1#PUSH')).toBe(true);
+    expect(items.has('DEPT#NICHOLS#DISPATCH#dispatch-1#MAPROMPT#officer-1#PUSH')).toBe(true);
+    expect(items.has('DEPT#NICHOLS#DISPATCH#dispatch-1#MAPROMPT#training-1#PUSH')).toBe(false);
+    expect(snsSend).toHaveBeenCalledTimes(2);
+  });
+
   it('still reports success when the bridge outbox write fails (must never block or fail mutual aid)', async () => {
     const officer: FakeItem = {
       pk: ELIGIBILITY_PK,
