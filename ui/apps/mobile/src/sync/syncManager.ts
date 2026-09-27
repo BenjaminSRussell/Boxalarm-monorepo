@@ -18,7 +18,7 @@ let recoveredOrphans = false;
 let lastSyncAt: string | null = null;
 const listeners = new Set<Listener>();
 
-// Called on every auth/config change (apiChecksRepository's effect). While signed in, a NetInfo
+// Called on every auth/config change (useSyncEngine, mounted once at the app root). While signed in, a NetInfo
 // listener drains on reconnect; on sign-out it is removed so repeated login/logout cycles never
 // stack listeners. Entries queued while signed out are drained as soon as tokens arrive.
 export function configure(nextTokens: AuthTokenSource | null, nextApiBaseUrl: string | null): void {

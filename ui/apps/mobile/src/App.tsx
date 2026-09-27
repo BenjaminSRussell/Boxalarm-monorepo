@@ -7,10 +7,16 @@ import { usePushNotificationRouting } from './features/alerts/usePushNotificatio
 import { usePushTokenRegistration } from './features/alerts/usePushTokenRegistration';
 import { RootNavigator } from './navigation/RootNavigator';
 import { ConnectivityProvider } from './sync/ConnectivityContext';
+import { useSyncEngine } from './sync/useSyncEngine';
 
 function PushTokenSync() {
   usePushTokenRegistration();
   usePushNotificationRouting();
+  return null;
+}
+
+function SyncEngine() {
+  useSyncEngine();
   return null;
 }
 
@@ -48,6 +54,7 @@ export function App() {
           <AuthProvider>
             <StatusBar barStyle="default" />
             <PushTokenSync />
+            <SyncEngine />
             <RootNavigator />
           </AuthProvider>
         </ConnectivityProvider>
