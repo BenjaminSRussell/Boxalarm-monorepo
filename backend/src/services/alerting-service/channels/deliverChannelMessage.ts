@@ -23,6 +23,25 @@ import { sendViaHttpProvider } from './httpProviderAdapter.js';
 
 const METRIC_NAMESPACE = 'Boxalarm/AlertingChannel';
 
+/**
+ * A send guard moves CLAIMED -> SENT (provider accepted) or FAILED (provider refused, with
+ * failureReason). A guard left CLAIMED means the attempt never finished: the worker died
+ * mid-send, or the FAILED write itself failed. Guards written before sendState existed carry
+ * none and are treated as sent, as they always were.
+ */
+const SEND_STATE_CLAIMED = 'CLAIMED';
+const SEND_STATE_SENT = 'SENT';
+const SEND_STATE_FAILED = 'FAILED';
+
+/**
+ * How old a CLAIMED guard must be before a redelivery may take it over. Longer than the
+ * worker's 15s Lambda timeout (infrastructure DEFAULT_WORKER_TIMEOUT_SECONDS), so the
+ * attempt that wrote it has certainly ended; shorter than the queue's 30s visibility
+ * timeout, so the redelivery of a message whose worker died does qualify. A concurrent twin
+ * - a re-publish of the same page - sees a fresh claim and is skipped as a duplicate.
+ */
+export const STALE_CLAIM_SECONDS = 20;
+
 const CHANNEL_TIER: Record<ChannelName, 'primary' | 'escalation'> = {
   push: 'primary',
   sms: 'primary',
@@ -124,6 +143,7 @@ export async function deliverChannelMessage(
           deliveredAt: null,
           openedAt: null,
           failureReason: null,
+          sendState: SEND_STATE_CLAIMED,
           idempotencyKey,
         },
         ConditionExpression: 'attribute_not_exists(idempotencyKey)',
@@ -158,6 +178,7 @@ export async function deliverChannelMessage(
   }
 
   emitOutcomeMetric(METRIC_NAMESPACE, 'Sent', channel);
+  await recordSent(ddb, tableName, pk, sk);
 }
 
 async function reattemptClaimedFailure(
@@ -167,27 +188,48 @@ async function reattemptClaimedFailure(
   sk: string,
   sentAt: number,
 ): Promise<boolean> {
-  const existing = await ddb.send(new GetCommand({ TableName: tableName, Key: { pk, sk } }));
+  // Strongly consistent: a failure recorded moments ago must not read as a clean claim.
+  const existing = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: { pk, sk }, ConsistentRead: true }),
+  );
   const item = existing.Item;
-  const claimedButFailed =
-    Boolean(item) && item?.failureReason != null && item?.deliveredAt == null;
-  if (!claimedButFailed) {
+  if (!item || item.deliveredAt != null) {
     return false;
   }
-  // Re-claims the failed attempt atomically: the condition requires failureReason to still be
-  // set, and the update removes it, so when two redeliveries both saw the failure only one
-  // wins the re-claim and sends; the other is treated as a duplicate.
+  const claimedButFailed = item.failureReason != null;
+  // Review MINOR-R5: a worker killed mid-send, or whose failureReason write was throttled,
+  // left a claim with no failure recorded - and every redelivery skipped it as a duplicate,
+  // so that member was never paged on this channel.
+  const claimAbandoned =
+    item.sendState === SEND_STATE_CLAIMED &&
+    typeof item.sentAt === 'number' &&
+    item.sentAt < sentAt - STALE_CLAIM_SECONDS;
+  if (!claimedButFailed && !claimAbandoned) {
+    return false;
+  }
+  // Re-claims atomically: the condition requires the state that was just read - the failure
+  // still recorded, or the same abandoned claim - so when two redeliveries both saw it only
+  // one wins the re-claim and sends; the other is treated as a duplicate.
   try {
     await ddb.send(
       new UpdateCommand({
         TableName: tableName,
         Key: { pk, sk },
-        UpdateExpression: 'SET sentAt = :sentAt REMOVE failureReason',
-        ConditionExpression:
-          'attribute_exists(idempotencyKey) AND attribute_exists(failureReason) AND deliveredAt = :nullVal',
-        ExpressionAttributeValues: { ':sentAt': sentAt, ':nullVal': null },
+        UpdateExpression: 'SET sentAt = :sentAt, sendState = :claimed REMOVE failureReason',
+        ConditionExpression: claimedButFailed
+          ? 'attribute_exists(idempotencyKey) AND attribute_exists(failureReason) AND deliveredAt = :nullVal'
+          : 'attribute_exists(idempotencyKey) AND sendState = :claimed AND sentAt = :observedSentAt AND deliveredAt = :nullVal',
+        ExpressionAttributeValues: {
+          ':sentAt': sentAt,
+          ':claimed': SEND_STATE_CLAIMED,
+          ':nullVal': null,
+          ...(claimedButFailed ? {} : { ':observedSentAt': item.sentAt as number }),
+        },
       }),
     );
+    if (claimAbandoned) {
+      logInfo('alerting.channel.abandoned_claim_retaken', { pk, sk });
+    }
   } catch (error) {
     if (error instanceof ConditionalCheckFailedException) {
       return false;
@@ -209,15 +251,42 @@ async function recordClaimedFailure(
       new UpdateCommand({
         TableName: tableName,
         Key: { pk, sk },
-        UpdateExpression: 'SET failureReason = :reason',
+        UpdateExpression: 'SET failureReason = :reason, sendState = :failed',
         ConditionExpression: 'attribute_exists(idempotencyKey)',
         ExpressionAttributeValues: {
           ':reason': error instanceof Error ? error.message : String(error),
+          ':failed': SEND_STATE_FAILED,
         },
       }),
     );
   } catch (updateError) {
     logError('alerting.channel.failure_reason_write_failed', updateError, { pk, sk });
+  }
+}
+
+/**
+ * Marks the guard SENT so it is never taken over as abandoned. A failed write is only logged:
+ * the page went out, and the worst case is one duplicate send after the stale window - for a
+ * page, a duplicate is the safe side of a miss.
+ */
+async function recordSent(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  pk: string,
+  sk: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { pk, sk },
+        UpdateExpression: 'SET sendState = :sent',
+        ConditionExpression: 'attribute_exists(idempotencyKey)',
+        ExpressionAttributeValues: { ':sent': SEND_STATE_SENT },
+      }),
+    );
+  } catch (error) {
+    logError('alerting.channel.sent_state_write_failed', error, { pk, sk });
   }
 }
 

@@ -38,9 +38,15 @@ describe('deliverChannelMessage', () => {
 
     await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
 
-    expect(send).toHaveBeenCalledTimes(1);
+    // The claim, then SENT once the provider accepted it.
+    expect(send).toHaveBeenCalledTimes(2);
     const putInput = (send.mock.calls[0]?.[0] as { input: { Item: Record<string, unknown> } })
       .input;
+    expect(putInput.Item.sendState).toBe('CLAIMED');
+    expect(
+      (send.mock.calls[1]?.[0] as { input: { ExpressionAttributeValues: Record<string, unknown> } })
+        .input.ExpressionAttributeValues,
+    ).toEqual({ ':sent': 'SENT' });
     expect(putInput.Item.pk).toBe('DEPT#NICHOLS#DISPATCH#dispatch-1');
     expect(putInput.Item.sk).toBe('RECEIPT#mbr-1#PUSH#1');
     expect(putInput.Item.idempotencyKey).toBe('dispatch-1#1#mbr-1#PUSH');
@@ -187,6 +193,91 @@ describe('deliverChannelMessage', () => {
       (call) => (call[0] as { constructor: { name: string } }).constructor.name === 'UpdateCommand',
     );
     expect(updateCall).toBeDefined();
+  });
+
+  describe('a redelivery finding a claim with no failure recorded (review MINOR-R5)', () => {
+    const now = () => Math.floor(Date.now() / 1000);
+
+    function claimedGuard(existing: Record<string, unknown>, reclaim: 'ok' | 'lost' = 'ok') {
+      return vi.fn().mockImplementation((command: { constructor: { name: string } }) => {
+        const name = command.constructor.name;
+        if (name === 'PutCommand') {
+          return Promise.reject(
+            new ConditionalCheckFailedException({ message: 'exists', $metadata: {} }),
+          );
+        }
+        if (name === 'GetCommand') {
+          return Promise.resolve({ Item: existing });
+        }
+        return reclaim === 'lost'
+          ? Promise.reject(new ConditionalCheckFailedException({ message: 'lost', $metadata: {} }))
+          : Promise.resolve({});
+      });
+    }
+
+    it('retakes an abandoned claim (worker died mid-send) and sends', async () => {
+      const abandonedAt = now() - 35;
+      const send = claimedGuard({
+        sendState: 'CLAIMED',
+        sentAt: abandonedAt,
+        failureReason: null,
+        deliveredAt: null,
+      });
+      const sendViaHttpProvider = vi.fn().mockResolvedValue(undefined);
+      mockAdapter(sendViaHttpProvider);
+      const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+      await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
+
+      expect(sendViaHttpProvider).toHaveBeenCalledTimes(1);
+      const get = send.mock.calls.find(
+        (call) => (call[0] as { constructor: { name: string } }).constructor.name === 'GetCommand',
+      )?.[0] as { input: Record<string, unknown> };
+      expect(get.input.ConsistentRead).toBe(true);
+      const reclaim = send.mock.calls.find(
+        (call) =>
+          (call[0] as { constructor: { name: string } }).constructor.name === 'UpdateCommand',
+      )?.[0] as { input: { ConditionExpression: string; ExpressionAttributeValues: object } };
+      // Optimistic on the exact claim read, so only one of two redeliveries can take it.
+      expect(reclaim.input.ConditionExpression).toContain('sentAt = :observedSentAt');
+      expect(reclaim.input.ExpressionAttributeValues).toMatchObject({
+        ':observedSentAt': abandonedAt,
+      });
+    });
+
+    it.each([
+      ['a fresh claim (a concurrent twin still sending)', { sendState: 'CLAIMED', sentAt: 0 }],
+      ['a claim marked SENT', { sendState: 'SENT', sentAt: -100 }],
+      ['a claim written before sendState existed', { sentAt: -100 }],
+    ])('skips %s as a duplicate', async (_label, guard) => {
+      const send = claimedGuard({
+        ...guard,
+        sentAt: now() + guard.sentAt,
+        failureReason: null,
+        deliveredAt: null,
+      });
+      const sendViaHttpProvider = vi.fn();
+      mockAdapter(sendViaHttpProvider);
+      const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+      await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
+
+      expect(sendViaHttpProvider).not.toHaveBeenCalled();
+    });
+
+    it('a redelivery that loses the re-claim race does not send', async () => {
+      const send = claimedGuard(
+        { sendState: 'CLAIMED', sentAt: now() - 35, failureReason: null, deliveredAt: null },
+        'lost',
+      );
+      const sendViaHttpProvider = vi.fn();
+      mockAdapter(sendViaHttpProvider);
+      const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+      await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
+
+      expect(sendViaHttpProvider).not.toHaveBeenCalled();
+    });
   });
 
   it('logs the original error and rethrows when the receipt write itself fails for a non-duplicate reason', async () => {
