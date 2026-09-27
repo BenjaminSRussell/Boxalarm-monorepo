@@ -10,7 +10,11 @@ import {
 } from '@boxalarm/authz';
 import { toVerifiedDeptId, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { createDynamoClient, readApparatusTableConfig } from './dynamoClient.js';
-import { createDefectPhotoUploadUrl, readDefectPhotoUploadConfig } from './defectPhotoUpload.js';
+import {
+  createDefectPhotoUploadUrl,
+  readDefectPhotoUploadConfig,
+  resignDefectPhotoUploadUrl,
+} from './defectPhotoUpload.js';
 import {
   ApparatusNotFoundError,
   DuplicateDefectReportError,
@@ -179,6 +183,32 @@ function toResponseBody(defect: DefectRecord, uploadUrl?: string): Record<string
   };
 }
 
+/**
+ * The stored defect for a replayed clientMutationId. When the replay still carries a photo,
+ * the stored photo key is re-signed: the offline outbox replays the POST precisely when the
+ * first upload link expired before the photo went up, and without a new link the photo was
+ * lost for good.
+ */
+async function replayedDefectResponse(
+  existing: DefectRecord,
+  photoFilename: string | undefined,
+  deptId: VerifiedDeptId,
+): Promise<APIGatewayProxyResultV2> {
+  const uploadUrl =
+    photoFilename && existing.photoS3Key
+      ? await resignDefectPhotoUploadUrl(
+          await readDefectPhotoUploadConfig(process.env),
+          deptId,
+          existing.photoS3Key,
+        )
+      : undefined;
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(toResponseBody(existing, uploadUrl)),
+  };
+}
+
 async function reportDefect(
   event: GuardEvent,
   principal: CedarPrincipalContext,
@@ -221,11 +251,7 @@ async function reportDefect(
         clientMutationId: value.clientMutationId,
       });
       if (existing) {
-        return {
-          statusCode: 200,
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(toResponseBody(existing)),
-        };
+        return await replayedDefectResponse(existing, value.photoFilename, deptId);
       }
     } catch (error) {
       console.error(
@@ -308,11 +334,7 @@ async function reportDefect(
         clientMutationId: value.clientMutationId,
       });
       if (existing) {
-        return {
-          statusCode: 200,
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(toResponseBody(existing)),
-        };
+        return replayedDefectResponse(existing, value.photoFilename, deptId);
       }
     }
     console.error(

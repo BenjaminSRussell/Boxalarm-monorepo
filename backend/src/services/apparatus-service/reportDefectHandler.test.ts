@@ -76,7 +76,7 @@ function apparatusItem() {
 function fakeDynamoClient(options: {
   readonly apparatusExists?: boolean;
   readonly onTransact?: (command: TransactWriteCommand) => Promise<unknown>;
-  readonly existingIdempotency?: { defectId: string };
+  readonly existingIdempotency?: { defectId: string; photoS3Key?: string };
 }): DynamoDBDocumentClient {
   const send = vi.fn(async (command: unknown) => {
     if (command instanceof QueryCommand && command.input.IndexName === 'GSI3') {
@@ -111,7 +111,7 @@ function fakeDynamoClient(options: {
             status: 'OPEN',
             reportedBy: 'MBR-0012',
             reportedAt: 1798050000,
-            photoS3Key: null,
+            photoS3Key: options.existingIdempotency.photoS3Key ?? null,
           },
         };
       }
@@ -336,5 +336,58 @@ describe('reportDefect handler', () => {
       (call) => call[0] instanceof TransactWriteCommand,
     );
     expect(transactCalls).toHaveLength(0);
+  });
+
+  // The offline outbox replays the POST when the first 10-minute link expired before the photo
+  // went up; without a fresh link the photo was dropped ("reported without its photo").
+  it('re-signs the stored photo key when a replay still carries a photo', async () => {
+    const client = fakeDynamoClient({
+      existingIdempotency: {
+        defectId: 'DEF-EXISTING',
+        photoS3Key: 'NICHOLS/defect/DEF-EXISTING/photo.jpg',
+      },
+    });
+    const { createReportDefectHandler } = await import('./reportDefectHandler.js');
+    const handler = createReportDefectHandler({ client, authzClient: fakeAuthzClient('ALLOW') });
+
+    const result = await handler(
+      buildEvent(
+        JSON.stringify({
+          description: 'ignored on replay',
+          severity: 'MINOR',
+          clientMutationId: 'offline-1',
+          // A replay names its own file; the stored key is what gets signed.
+          photo: { filename: 'other.jpg' },
+        }),
+      ),
+    );
+
+    expect(result).toMatchObject({ statusCode: 200 });
+    const body = JSON.parse((result as { body: string }).body) as {
+      photoS3Key: string;
+      uploadUrl?: string;
+    };
+    expect(body.photoS3Key).toBe('NICHOLS/defect/DEF-EXISTING/photo.jpg');
+    expect(body.uploadUrl).toContain('NICHOLS/defect/DEF-EXISTING/photo.jpg');
+    expect(body.uploadUrl).toContain('X-Amz-Expires=600');
+  });
+
+  it('does not sign anything on a replay without a photo', async () => {
+    const client = fakeDynamoClient({
+      existingIdempotency: {
+        defectId: 'DEF-EXISTING',
+        photoS3Key: 'NICHOLS/defect/DEF-EXISTING/photo.jpg',
+      },
+    });
+    const { createReportDefectHandler } = await import('./reportDefectHandler.js');
+    const handler = createReportDefectHandler({ client, authzClient: fakeAuthzClient('ALLOW') });
+
+    const result = await handler(
+      buildEvent(
+        JSON.stringify({ description: 'x', severity: 'MINOR', clientMutationId: 'offline-1' }),
+      ),
+    );
+
+    expect(JSON.parse((result as { body: string }).body)).not.toHaveProperty('uploadUrl');
   });
 });

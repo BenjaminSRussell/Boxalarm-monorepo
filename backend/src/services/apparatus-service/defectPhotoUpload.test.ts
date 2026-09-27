@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { toVerifiedDeptId } from '@boxalarm/dept-scope';
-import { createDefectPhotoUploadUrl, readDefectPhotoUploadConfig } from './defectPhotoUpload.js';
+import {
+  createDefectPhotoUploadUrl,
+  readDefectPhotoUploadConfig,
+  resignDefectPhotoUploadUrl,
+} from './defectPhotoUpload.js';
 
 const deptId = toVerifiedDeptId({ deptId: 'NICHOLS' });
 const config = { bucketName: 'boxalarm-dev-platform-assets' };
@@ -78,4 +82,25 @@ describe('createDefectPhotoUploadUrl', () => {
       ).resolves.toMatchObject({ photoS3Key: `NICHOLS/defect/DEF-0033/${filename}` });
     },
   );
+});
+
+describe('resignDefectPhotoUploadUrl', () => {
+  it('refuses a stored key outside the department defect prefix', async () => {
+    const presign = vi.fn().mockResolvedValue('https://signed');
+
+    await expect(
+      resignDefectPhotoUploadUrl(config, deptId, 'OTHER/defect/D-1/p.jpg', presign),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      resignDefectPhotoUploadUrl(config, deptId, 'NICHOLS/defect/../CERTIFICATION/x', presign),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      resignDefectPhotoUploadUrl(config, deptId, 'NICHOLS/defect/D-1/p.jpg', presign),
+    ).resolves.toBe('https://signed');
+    expect(presign).toHaveBeenCalledWith(
+      'boxalarm-dev-platform-assets',
+      'NICHOLS/defect/D-1/p.jpg',
+      600,
+    );
+  });
 });

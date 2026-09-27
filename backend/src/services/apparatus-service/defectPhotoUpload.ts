@@ -88,3 +88,21 @@ export async function createDefectPhotoUploadUrl(
   const uploadUrl = await presign(config.bucketName, photoS3Key, UPLOAD_URL_EXPIRY_SECONDS);
   return { photoS3Key, uploadUrl };
 }
+
+/**
+ * A fresh upload URL for a defect's stored photo key, for a replayed report whose first link
+ * expired before the photo went up - the mobile outbox replays the POST to get one, as it
+ * does for field capture. The key comes from the stored defect, never from the request, and
+ * must sit under this department's defect prefix (the only prefix the role may write).
+ */
+export async function resignDefectPhotoUploadUrl(
+  config: DefectPhotoUploadConfig,
+  deptId: VerifiedDeptId,
+  photoS3Key: string,
+  presign: PresignPutFn = presignPut,
+): Promise<string> {
+  if (!photoS3Key.startsWith(`${deptId}/defect/`) || photoS3Key.includes('..')) {
+    throw new TypeError(`stored photo key is outside ${deptId}/defect/: ${photoS3Key}`);
+  }
+  return presign(config.bucketName, photoS3Key, UPLOAD_URL_EXPIRY_SECONDS);
+}

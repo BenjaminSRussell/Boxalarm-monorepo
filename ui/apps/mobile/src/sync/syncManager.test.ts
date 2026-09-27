@@ -325,21 +325,46 @@ async function enqueuePhotoDefect(id: string, uploadUrl: string, putStatus: numb
   return fetchSpy;
 }
 
-test('an already-expired signed upload URL is not PUT; the item is REJECTED with a clear reason', async () => {
+// The defect was reported, then the link expired before its photo went up. It used to be
+// REJECTED as "reported without its photo"; the defect POST's replay now re-signs the link.
+test('an already-expired defect upload link is not PUT; an idempotent replay re-signs it', async () => {
   // Signed 2023-11-14T22:13:20Z for 600 s: long past.
   const expiredUrl =
     'https://assets.s3.us-east-1.amazonaws.com/dept/defect/1/x.jpg?X-Amz-Date=20231114T221320Z&X-Amz-Expires=600&X-Amz-Signature=s';
-  const fetchSpy = await enqueuePhotoDefect('defect-expired', expiredUrl, 200);
+  const freshUrl = `https://assets.s3.us-east-1.amazonaws.com/dept/defect/1/x.jpg?X-Amz-Date=${amzDate(new Date())}&X-Amz-Expires=600&X-Amz-Signature=s`;
+  mockApiRequest.mockResolvedValueOnce({ json: async () => ({ uploadUrl: expiredUrl }) });
+  mockApiRequest.mockResolvedValueOnce({
+    json: async () => ({ uploadUrl: freshUrl, photoS3Key: 'dept/defect/1/x.jpg' }),
+  });
+  const fetchSpy = jest
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(async (input: RequestInfo | URL) =>
+      input === 'file:///tmp/defect.jpg'
+        ? ({ blob: async () => new Blob(['x']) } as Response)
+        : ({ ok: true, status: 200 } as Response),
+    );
+  await syncManager.enqueueDefect(
+    'ENGINE-2',
+    'defect-expired',
+    {
+      description: 'x',
+      severity: 'MINOR',
+      idempotencyKey: 'defect-expired',
+      photo: { filename: 'x.jpg' },
+    },
+    'file:///tmp/defect.jpg',
+  );
+  await flush();
 
+  expect(mockApiRequest).toHaveBeenCalledTimes(2);
+  expect(mockApiRequest.mock.calls[1][2].body).toContain('"idempotencyKey":"defect-expired"');
   expect(fetchSpy).not.toHaveBeenCalledWith(expiredUrl, expect.anything());
-  const row = await store.find('defect-expired');
-  expect(row?.status).toBe('REJECTED');
-  expect(row?.stage).toBe('UPLOAD_PHOTO');
-  expect(row?.lastError).toMatch(/upload link expired/i);
+  expect(fetchSpy).toHaveBeenCalledWith(freshUrl, expect.objectContaining({ method: 'PUT' }));
+  await expect(store.find('defect-expired')).resolves.toBeUndefined();
   fetchSpy.mockRestore();
 });
 
-test('a 403 from the signed upload URL (expired/invalid signature) is REJECTED, not retried forever', async () => {
+test('a 403 from the defect upload URL is REJECTED and rewound, so Retry fetches a new link', async () => {
   const fetchSpy = await enqueuePhotoDefect(
     'defect-403',
     `https://assets.s3.us-east-1.amazonaws.com/dept/defect/1/x.jpg?X-Amz-Date=${amzDate(new Date())}&X-Amz-Expires=600&X-Amz-Signature=s`,
@@ -348,7 +373,8 @@ test('a 403 from the signed upload URL (expired/invalid signature) is REJECTED, 
 
   const row = await store.find('defect-403');
   expect(row?.status).toBe('REJECTED');
-  expect(row?.lastError).toMatch(/upload link expired/i);
+  expect(row?.stage).toBe('CREATE');
+  expect(row?.lastError).toMatch(/retry to request a new upload link/i);
   fetchSpy.mockRestore();
 });
 

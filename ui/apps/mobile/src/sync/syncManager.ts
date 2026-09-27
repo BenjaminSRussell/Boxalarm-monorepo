@@ -152,19 +152,20 @@ export async function discard(id: string): Promise<void> {
   await notify();
 }
 
-// A signed photo URL is short-lived (an S3 presigned PUT, 10 min). The defect API has no way to
-// re-issue one: an idempotent replay of the POST returns the existing defect without an
-// uploadUrl, so an expired defect URL can never succeed - the defect itself is saved, only its
-// photo is lost - and is surfaced to the user instead of retried forever. Field capture differs:
-// its replay re-signs the upload URLs (RESIGNS_ON_REPLAY), so an expired link is recoverable.
-const RESIGNS_ON_REPLAY: ReadonlySet<OutboxKind> = new Set(['FIELD_CAPTURE']);
+// A signed photo URL is short-lived (an S3 presigned PUT, 10 min) - shorter than a phone can
+// easily spend without signal between the create and the upload. Both photo-carrying creates
+// answer an idempotent replay with a freshly signed link for the stored photo (field capture's
+// photoUploadUrls, the defect's uploadUrl), so an expired link is recovered by replaying the
+// POST rather than losing the photo. A kind added here later without that server support
+// would be rejected with a clear reason instead of retried forever.
+const RESIGNS_ON_REPLAY: ReadonlySet<OutboxKind> = new Set(['FIELD_CAPTURE', 'DEFECT']);
 
 class PhotoUploadUrlExpiredError extends Error {
   constructor(kind: OutboxKind) {
     super(
       RESIGNS_ON_REPLAY.has(kind)
         ? 'Photo upload was refused - retry to request a new upload link'
-        : 'Photo upload link expired - the defect was reported without its photo',
+        : 'Photo upload link expired - the report was saved without its photo',
     );
   }
 }
