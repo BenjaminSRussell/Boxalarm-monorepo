@@ -107,7 +107,7 @@ export async function discard(id: string): Promise<void> {
 export async function advanceStage(
   id: string,
   patch: {
-    readonly stage: 'UPLOAD_PHOTO' | 'DONE';
+    readonly stage: 'CREATE' | 'UPLOAD_PHOTO' | 'DONE';
     readonly photoUploadUrl?: string | null;
     readonly photoS3Key?: string | null;
   },

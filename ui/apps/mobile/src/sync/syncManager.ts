@@ -95,6 +95,25 @@ export async function enqueueDefect(
   );
 }
 
+// POST /api/v1/inspections/field-capture (inspections-service fieldCapture/handler.ts). The body
+// carries its own idempotencyKey, so a replay after a lost response is answered 200 "duplicate"
+// with the original inspection and freshly signed photo upload URLs.
+export async function enqueueFieldCapture(
+  idempotencyKey: string,
+  occupancyId: string,
+  body: Record<string, unknown>,
+  photoLocalUri?: string,
+): Promise<void> {
+  await enqueueAndDrain(
+    'FIELD_CAPTURE',
+    idempotencyKey,
+    `Field capture — ${occupancyId}`,
+    'inspections/field-capture',
+    body,
+    photoLocalUri,
+  );
+}
+
 export async function retry(id: string): Promise<void> {
   await outbox.retry(id);
   await notify();
@@ -106,14 +125,26 @@ export async function discard(id: string): Promise<void> {
   await notify();
 }
 
-// The defect POST's signed photo URL is short-lived (an S3 presigned PUT, 10 min), and the
-// API has no way to re-issue one: an idempotent replay of the POST returns the existing defect
-// without an uploadUrl. So an expired URL can never succeed - the defect itself is already
-// saved, only its photo is lost - and is surfaced to the user instead of retried forever.
+// A signed photo URL is short-lived (an S3 presigned PUT, 10 min). The defect API has no way to
+// re-issue one: an idempotent replay of the POST returns the existing defect without an
+// uploadUrl, so an expired defect URL can never succeed - the defect itself is saved, only its
+// photo is lost - and is surfaced to the user instead of retried forever. Field capture differs:
+// its replay re-signs the upload URLs (RESIGNS_ON_REPLAY), so an expired link is recoverable.
+const RESIGNS_ON_REPLAY: ReadonlySet<OutboxKind> = new Set(['FIELD_CAPTURE']);
+
 class PhotoUploadUrlExpiredError extends Error {
-  constructor() {
-    super('Photo upload link expired - the defect was reported without its photo');
+  constructor(kind: OutboxKind) {
+    super(
+      RESIGNS_ON_REPLAY.has(kind)
+        ? 'Photo upload was refused - retry to request a new upload link'
+        : 'Photo upload link expired - the defect was reported without its photo',
+    );
   }
+}
+
+function isExpired(url: string): boolean {
+  const expiresAtMs = signedUrlExpiresAtMs(url);
+  return expiresAtMs !== null && Date.now() >= expiresAtMs;
 }
 
 // S3 SigV4 presigned URLs carry X-Amz-Date (YYYYMMDDTHHMMSSZ) and X-Amz-Expires (seconds).
@@ -159,8 +190,7 @@ function guessPhotoContentType(uri: string): string {
 
 async function uploadPhoto(row: OutboxRow): Promise<void> {
   if (!row.photoLocalUri || !row.photoUploadUrl) return;
-  const expiresAtMs = signedUrlExpiresAtMs(row.photoUploadUrl);
-  if (expiresAtMs !== null && Date.now() >= expiresAtMs) throw new PhotoUploadUrlExpiredError();
+  if (isExpired(row.photoUploadUrl)) throw new PhotoUploadUrlExpiredError(row.kind);
   const fileResponse = await fetch(row.photoLocalUri);
   const blob = await fileResponse.blob();
   const uploadResponse = await fetch(row.photoUploadUrl, {
@@ -169,40 +199,83 @@ async function uploadPhoto(row: OutboxRow): Promise<void> {
     headers: { 'Content-Type': guessPhotoContentType(row.photoLocalUri) },
   });
   // S3 answers an expired or otherwise invalid signature with 403.
-  if (uploadResponse.status === 403) throw new PhotoUploadUrlExpiredError();
+  if (uploadResponse.status === 403) throw new PhotoUploadUrlExpiredError(row.kind);
   if (!uploadResponse.ok) {
     throw new Error(`Photo upload failed with status ${uploadResponse.status}`);
   }
 }
 
-async function processEntry(id: string): Promise<void> {
+interface UploadTarget {
+  readonly uploadUrl: string | null;
+  readonly photoS3Key: string | null;
+}
+
+// Each create endpoint names its photo upload URL differently: the defect POST returns a single
+// { uploadUrl, photoS3Key }; field capture returns photoUploadUrls: [{ filename, uploadUrl }] for
+// the photoFilenames it was sent (the outbox row carries one photo, the first filename).
+function readUploadTarget(row: OutboxRow, parsed: Record<string, unknown>): UploadTarget {
+  if (row.kind === 'FIELD_CAPTURE') {
+    const sent = (JSON.parse(row.body) as { photoFilenames?: string[] }).photoFilenames?.[0];
+    const urls = Array.isArray(parsed.photoUploadUrls)
+      ? (parsed.photoUploadUrls as { filename?: unknown; uploadUrl?: unknown }[])
+      : [];
+    const match = urls.find((entry) => entry.filename === sent);
+    const inspection = parsed.inspection as { photoS3Keys?: unknown } | undefined;
+    const keys = Array.isArray(inspection?.photoS3Keys) ? (inspection.photoS3Keys as string[]) : [];
+    return {
+      uploadUrl: typeof match?.uploadUrl === 'string' ? match.uploadUrl : null,
+      photoS3Key: (sent && keys.find((key) => key.endsWith(`/${sent}`))) || null,
+    };
+  }
+  return {
+    uploadUrl: typeof parsed.uploadUrl === 'string' ? parsed.uploadUrl : null,
+    photoS3Key: typeof parsed.photoS3Key === 'string' ? parsed.photoS3Key : null,
+  };
+}
+
+async function create(row: OutboxRow): Promise<OutboxRow | undefined> {
   if (!tokens || !apiBaseUrl) throw new Error('Sync is not configured yet');
+  const response = await apiRequest(row.path, tokens, {
+    apiBaseUrl,
+    method: row.method,
+    headers: { 'Content-Type': 'application/json' },
+    body: row.body,
+  });
+  const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  const target = readUploadTarget(row, parsed);
+  await outbox.advanceStage(row.id, {
+    stage: target.uploadUrl && row.photoLocalUri ? 'UPLOAD_PHOTO' : 'DONE',
+    photoUploadUrl: target.uploadUrl,
+    photoS3Key: target.photoS3Key,
+  });
+  return outbox.find(row.id);
+}
+
+async function processEntry(id: string): Promise<void> {
   let row = await outbox.find(id);
   if (!row) return;
 
   if (row.stage === 'CREATE') {
-    const response = await apiRequest(row.path, tokens, {
-      apiBaseUrl,
-      method: row.method,
-      headers: { 'Content-Type': 'application/json' },
-      body: row.body,
-    });
-    const parsed = (await response.json().catch(() => ({}))) as {
-      uploadUrl?: string;
-      photoS3Key?: string;
-    };
-    const nextStage = parsed.uploadUrl && row.photoLocalUri ? 'UPLOAD_PHOTO' : 'DONE';
-    await outbox.advanceStage(row.id, {
-      stage: nextStage,
-      photoUploadUrl: parsed.uploadUrl ?? null,
-      photoS3Key: parsed.photoS3Key ?? null,
-    });
-    row = await outbox.find(row.id);
+    row = await create(row);
     if (!row) return;
   }
 
   if (row.stage === 'UPLOAD_PHOTO') {
-    await uploadPhoto(row);
+    // A kind whose replay re-signs gets a fresh link instead of a doomed PUT. The replay is safe:
+    // the body's idempotencyKey makes the server answer "duplicate" without writing twice.
+    if (row.photoUploadUrl && isExpired(row.photoUploadUrl) && RESIGNS_ON_REPLAY.has(row.kind)) {
+      row = await create(row);
+      if (!row || row.stage !== 'UPLOAD_PHOTO') return;
+    }
+    try {
+      await uploadPhoto(row);
+    } catch (error) {
+      // Rewind to CREATE so the user's Retry replays the POST and fetches a new signed link.
+      if (error instanceof PhotoUploadUrlExpiredError && RESIGNS_ON_REPLAY.has(row.kind)) {
+        await outbox.advanceStage(row.id, { stage: 'CREATE', photoUploadUrl: null });
+      }
+      throw error;
+    }
     await outbox.advanceStage(row.id, { stage: 'DONE' });
   }
 }
