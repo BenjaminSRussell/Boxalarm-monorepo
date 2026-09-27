@@ -410,7 +410,11 @@ describe("reporting Lambdas: env and IAM match their handlers", { timeout: 30_00
     const { LAMBDA_ENTRIES } = (await import(pathToFileURL(manifestPath).href)) as {
       LAMBDA_ENTRIES: { service: string; function: string }[];
     };
-    const manifest = LAMBDA_ENTRIES.filter((e) => e.service === "reporting-service")
+    // reporting-service/health is wired by components/api/service-health.ts, not Reporting;
+    // test/api/service-health.test.ts covers it for every service.
+    const manifest = LAMBDA_ENTRIES.filter(
+      (e) => e.service === "reporting-service" && e.function !== "health",
+    )
       .map((e) => `${e.service}/${e.function}`)
       .sort();
     const wired = [...lambdaCodeCalls].filter((k) => k.startsWith("reporting-service/")).sort();

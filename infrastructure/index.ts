@@ -11,6 +11,7 @@ import { SERVICES, ServiceName } from "./components/observability/services";
 import { BoxalarmUserPool } from "./components/identity/user-pool";
 import { BoxalarmUserPoolClient } from "./components/identity/user-pool-client";
 import { HttpApi } from "./components/api/http-api";
+import { ServiceHealth } from "./components/api/service-health";
 import { PlatformTable } from "./components/data/platform-table";
 import { IncidentTable } from "./components/data/incident-table";
 import { AlertingTable } from "./components/data/alerting-table";
@@ -732,6 +733,61 @@ export const alertingOutboxDrain = new AlertingOutboxDrain("alerting-outbox-drai
   logGroup: alertingLogGroup,
   permissionsBoundaryArn: alertingBoundaryArn,
 });
+
+// architecture.md §2/§4.3: GET health/liveness + health/readiness for every service, one
+// unauthenticated Lambda per service. Per service rather than one shared Lambda: Lambda has
+// no idle cost, so ten cost the same as one per request, and a shared one would have to
+// read both planes' tables across the alerting IAM boundary. Readiness reads each service's
+// own table only. Alerting's also carries the N1.6 canary signal.
+const LOB_HEALTH_ROUTE_PREFIXES: Record<Exclude<ServiceName, "alerting-service">, string> = {
+  "platform-service": "/api/v1/platform",
+  "personnel-service": "/api/v1/personnel",
+  "apparatus-service": "/api/v1/apparatus",
+  "incident-service": "/api/v1/incidents",
+  "training-service": "/api/v1/training",
+  "reporting-service": "/api/v1/reporting",
+  "inspections-service": "/api/v1/inspections",
+  "inventory-service": "/api/v1/inventory",
+  // architecture.md lists a bare /notifications prefix; the deployed inbox lives under
+  // /api/v1/notifications (api-gap P1 #11), so its health pair does too.
+  "notification-service": "/api/v1/notifications",
+};
+
+export const serviceHealth: ServiceHealth[] = [
+  new ServiceHealth("alerting-health", {
+    env,
+    serviceName: "alerting-service",
+    routePrefix: "/api/v1/alerting",
+    httpApi,
+    logGroup: alertingLogGroup,
+    tableName: alertingTable.tableName,
+    tableArn: alertingTable.tableArn,
+    tableCmkArn: alertingTable.cmkArn,
+    queryLeadingKeys: [`DEPT#${deptId}#CANARY#*`],
+    environment: {
+      CANARY_ENABLED: String(alertingCanary.enabled),
+      CANARY_DEPT_ID: deptId,
+      CANARY_MAX_AGE_SECONDS: String(alertingCanary.maxRunAgeSeconds),
+    },
+    permissionsBoundaryArn: alertingBoundaryArn,
+  }),
+  ...(Object.keys(LOB_HEALTH_ROUTE_PREFIXES) as (keyof typeof LOB_HEALTH_ROUTE_PREFIXES)[]).map(
+    (serviceName) => {
+      const table = serviceName === "incident-service" ? incidentTable : platformTable;
+      return new ServiceHealth(`${serviceName.replace(/-service$/, "")}-health`, {
+        env,
+        serviceName,
+        routePrefix: LOB_HEALTH_ROUTE_PREFIXES[serviceName],
+        httpApi,
+        logGroup: serviceLogGroupByName[serviceName],
+        tableName: table.tableName,
+        tableArn: table.tableArn,
+        tableCmkArn: serviceName === "incident-service" ? incidentTable.cmkArn : undefined,
+        eventBus: { name: platformBus.busName, arn: platformBus.busArn },
+      });
+    },
+  ),
+];
 
 // Stack outputs for boxalarm-ui / later children.
 export const COGNITO_ISSUER = cognitoIssuer;
