@@ -183,6 +183,57 @@ async function promptOfficer(
   return 'SENT';
 }
 
+/**
+ * Emits alerting.mutual_aid.triggered to the LOB bridge exactly once per dispatch, on
+ * whichever pass gets there first. Only the attempt that created the singleton used to write
+ * it, after prompting - so an attempt that died first, or whose outbox write failed, lost the
+ * event for good, since every retry saw "already requested" (review MINOR-7). The singleton's
+ * eventRecorded flag and the outbox row are now written together, and every pass tries.
+ * Audit, not delivery (architecture: it never blocks a send), so a failure is only logged.
+ */
+async function recordMutualAidEvent(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  pk: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: tableName,
+              Key: { pk, sk: 'MUTUALAID#SINGLETON' },
+              UpdateExpression: 'SET eventRecorded = :recorded',
+              ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(eventRecorded)',
+              ExpressionAttributeValues: { ':recorded': true },
+            },
+          },
+          {
+            Put: {
+              TableName: tableName,
+              Item: buildBridgeOutboxRecord(
+                deptId,
+                'alerting.mutual_aid.triggered',
+                dispatchId,
+                payload,
+              ),
+            },
+          },
+        ],
+      }),
+    );
+  } catch (error) {
+    if (cancellationCode(error, SINGLETON_ITEM_INDEX) === 'ConditionalCheckFailed') {
+      return;
+    }
+    logError('alerting.mutualAid.bridgeOutboxWriteFailed', error, { deptId, dispatchId });
+  }
+}
+
 export async function requestMutualAid(input: MutualAidRequestInput): Promise<MutualAidResult> {
   const { ddb, sns, tableName, topicArn, deptId, dispatchId, dispatch, reason, triggeredBy } =
     input;
@@ -295,25 +346,14 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
     });
   });
 
-  if (created) {
-    try {
-      await ddb.send(
-        new PutCommand({
-          TableName: tableName,
-          Item: buildBridgeOutboxRecord(deptId, 'alerting.mutual_aid.triggered', dispatchId, {
-            dispatchId,
-            triggeredAt,
-            reason,
-            predicateSnapshot: { officerCount: officers.length },
-            adapterUsed: ADAPTER_NAME,
-            officersNotified,
-          }),
-        }),
-      );
-    } catch (error) {
-      logError('alerting.mutualAid.bridgeOutboxWriteFailed', error, { deptId, dispatchId });
-    }
-  }
+  await recordMutualAidEvent(ddb, tableName, pk, deptId, dispatchId, {
+    dispatchId,
+    triggeredAt,
+    reason,
+    predicateSnapshot: { officerCount: officers.length },
+    adapterUsed: ADAPTER_NAME,
+    officersNotified,
+  });
 
   if (created && officers.every((o) => resolvePushTarget(o.contactChannels).skipped)) {
     // Recorded, but no officer can be prompted: the mutual-aid call depends on someone

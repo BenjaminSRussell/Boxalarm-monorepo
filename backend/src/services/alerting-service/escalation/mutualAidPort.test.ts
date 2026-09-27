@@ -15,6 +15,8 @@ function createFakeDdb(
   options: {
     readonly failPromptForMemberId?: string;
     readonly failOutboxWrite?: boolean;
+    /** Fails the outbox write this many times, then lets it through. */
+    readonly failOutboxWriteTimes?: number;
   } = {},
 ): {
   send: DynamoDBDocumentClient['send'];
@@ -24,6 +26,9 @@ function createFakeDdb(
   for (const item of seed) {
     items.set(`${item.pk}#${item.sk}`, item);
   }
+  let outboxFailuresLeft = options.failOutboxWrite
+    ? Number.POSITIVE_INFINITY
+    : (options.failOutboxWriteTimes ?? 0);
   const send = vi.fn((command: unknown) => {
     const name = (command as { constructor: { name: string } }).constructor.name;
     const input = (command as { input: Record<string, unknown> }).input;
@@ -42,9 +47,6 @@ function createFakeDdb(
       ) {
         throw new Error('ddb unavailable');
       }
-      if (options.failOutboxWrite && put.Item.entityType === 'OUTBOX_ENTRY') {
-        throw new Error('ddb unavailable');
-      }
       if (put.ConditionExpression && items.has(key)) {
         const error = new Error('conditional check failed');
         error.name = 'ConditionalCheckFailedException';
@@ -55,6 +57,32 @@ function createFakeDdb(
     }
     if (name === 'TransactWriteCommand') {
       const transactItems = input.TransactItems as ReadonlyArray<Record<string, unknown>>;
+      const writesOutbox = transactItems.some(
+        (txItem) =>
+          (txItem.Put as { Item: FakeItem } | undefined)?.Item.entityType === 'OUTBOX_ENTRY',
+      );
+      if (writesOutbox && outboxFailuresLeft > 0) {
+        outboxFailuresLeft -= 1;
+        return Promise.reject(new Error('ddb unavailable'));
+      }
+      const eventRecordedUpdate = transactItems.find(
+        (txItem) =>
+          (txItem.Update as { ConditionExpression?: string } | undefined)?.ConditionExpression ===
+          'attribute_exists(pk) AND attribute_not_exists(eventRecorded)',
+      )?.Update as { Key: { pk: string; sk: string } } | undefined;
+      if (eventRecordedUpdate) {
+        const key = `${eventRecordedUpdate.Key.pk}#${eventRecordedUpdate.Key.sk}`;
+        const singleton = items.get(key);
+        if (!singleton || singleton.eventRecorded === true) {
+          return Promise.reject(
+            Object.assign(new Error('conditional check failed'), {
+              name: 'TransactionCanceledException',
+              CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+            }),
+          );
+        }
+        items.set(key, { ...singleton, eventRecorded: true });
+      }
       const failedIndex = transactItems.findIndex((txItem) => {
         const put = txItem.Put as { Item: FakeItem; ConditionExpression?: string } | undefined;
         return (
@@ -199,6 +227,48 @@ describe('requestMutualAid', () => {
       officersNotified: 1,
       adapterUsed: 'OFFICER_MANUAL_PROMPT',
     });
+  });
+
+  // Review MINOR-7: only the creating attempt wrote the event, so a failed write was lost -
+  // every later pass saw "already requested".
+  it('a later pass records the LOB event the first pass failed to write, exactly once', async () => {
+    const officer: FakeItem = {
+      pk: ELIGIBILITY_PK,
+      sk: 'MEMBER#officer-1',
+      entityType: 'MEMBER_ELIGIBILITY_SNAPSHOT',
+      memberId: 'officer-1',
+      active: true,
+      quals: [],
+      roles: ['OFFICER'],
+      contactChannels: [{ channel: 'PUSH', token: 'tok', platform: 'ios', valid: true }],
+      availabilityState: 'AVAILABLE',
+      snapshotUpdatedAt: 0,
+    };
+    const { send, items } = createFakeDdb([officer], { failOutboxWriteTimes: 1 });
+    const input = {
+      ddb: { send } as unknown as DynamoDBDocumentClient,
+      sns: { send: vi.fn().mockResolvedValue({}) } as unknown as SNSClient,
+      tableName: 'alerting-table',
+      topicArn: 'arn:aws:sns:us-east-1:1:alerting-topic.fifo',
+      deptId: DEPT_ID,
+      dispatchId: 'dispatch-1',
+      dispatch: DISPATCH_TEXT,
+      reason: 'TONE_3_PREDICATE_UNMET' as const,
+    };
+    const outboxRows = () =>
+      [...items.values()].filter((item) => item.entityType === 'OUTBOX_ENTRY');
+
+    await requestMutualAid(input);
+    expect(outboxRows()).toHaveLength(0);
+
+    await requestMutualAid(input);
+    expect(outboxRows()).toHaveLength(1);
+    expect(items.get('DEPT#NICHOLS#DISPATCH#dispatch-1#MUTUALAID#SINGLETON')?.eventRecorded).toBe(
+      true,
+    );
+
+    await requestMutualAid(input);
+    expect(outboxRows()).toHaveLength(1);
   });
 
   it('still notifies every other officer when one officer prompt fails (MAJOR #2 regression)', async () => {
