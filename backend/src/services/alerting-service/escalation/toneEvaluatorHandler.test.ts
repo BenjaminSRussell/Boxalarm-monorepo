@@ -471,6 +471,70 @@ describe('toneEvaluatorHandler', () => {
     expect(publishedMemberIds(sns)).toEqual(['mbr-1', 'mbr-fail']);
   });
 
+  // Review MINOR-R2: a member who responds between a partly failed tone and its retry must
+  // not turn the retry into a predicate-met skip that abandons the unsent pages.
+  it('a retry finishes a partly fired tone even after a member has responded', async () => {
+    const failingMember: FakeItem = {
+      ...ELIGIBLE_MEMBER,
+      sk: 'MEMBER#mbr-fail',
+      memberId: 'mbr-fail',
+    };
+    const { send, sns, items } = createFakeDdb(
+      [{ ...METADATA_ITEM, currentToneSequence: 2 }, ELIGIBLE_MEMBER, failingMember],
+      { failReceiptForMemberId: 'mbr-fail', failReceiptTimes: 1 },
+    );
+    const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+    const { createSnsClient } = await import('../fanout/snsClient.js');
+    vi.mocked(createDynamoClient).mockReturnValue({ send } as unknown as DynamoDBDocumentClient);
+    vi.mocked(createSnsClient).mockReturnValue(sns as never);
+
+    const { handler } = await import('./toneEvaluatorHandler.js');
+    const payload = { deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 3 };
+
+    await expect(handler(payload)).rejects.toThrow('ddb unavailable');
+    expect(items.get(`${PK}#FIRING#TONE#3`)).toMatchObject({ mutualAidDue: true });
+    // mbr-1 was paged by tone 3 and responds before the retry.
+    items.set(`${PK}#ROSTER#mbr-1`, {
+      pk: PK,
+      sk: 'ROSTER#mbr-1',
+      entityType: 'DISPATCH_ROSTER_ENTRY',
+      memberId: 'mbr-1',
+      ackStatus: 'RESPONDING',
+      quals: [],
+    });
+
+    await expect(handler(payload)).resolves.toEqual({ outcome: 'FIRED' });
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1', 'mbr-fail']);
+    expect(items.get(`${PK}#TONE#3`)?.skipped).toBe(false);
+    expect(items.get(`${PK}#METADATA`)).toMatchObject({
+      currentToneSequence: 3,
+      toneLadderStatus: 'COMPLETED',
+    });
+    // Mutual aid follows the first attempt's decision (tone 3, predicate unmet), both times.
+    expect(requestMutualAid).toHaveBeenCalledTimes(2);
+  });
+
+  it('a skipped tone writes no firing marker, so a later manual advance decides afresh', async () => {
+    const roster: FakeItem = {
+      pk: PK,
+      sk: 'ROSTER#mbr-1',
+      entityType: 'DISPATCH_ROSTER_ENTRY',
+      memberId: 'mbr-1',
+      ackStatus: 'RESPONDING',
+      quals: [],
+    };
+    const { send, sns, items } = createFakeDdb([METADATA_ITEM, ELIGIBLE_MEMBER, roster]);
+    const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+    const { createSnsClient } = await import('../fanout/snsClient.js');
+    vi.mocked(createDynamoClient).mockReturnValue({ send } as unknown as DynamoDBDocumentClient);
+    vi.mocked(createSnsClient).mockReturnValue(sns as never);
+
+    const { handler } = await import('./toneEvaluatorHandler.js');
+    await handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 });
+
+    expect(items.get(`${PK}#FIRING#TONE#2`)).toBeUndefined();
+  });
+
   // A claim written by an attempt whose publish then failed must not suppress the page.
   it('re-publishes a receipt that was claimed but never marked sent', async () => {
     const unsentClaim: FakeItem = {

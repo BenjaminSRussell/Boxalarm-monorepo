@@ -250,6 +250,48 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error('non-Error thrown', { cause: error });
 }
 
+function firingMarkerSk(toneSequence: number): string {
+  return `FIRING#TONE#${toneSequence}`;
+}
+
+/**
+ * Records that this tone has started firing, before its first page is published, so a retry
+ * resumes the fire instead of re-deciding it (see the marker read in the handler). Written
+ * once; a twin that lost the race to write it is firing the same tone and needs nothing more.
+ */
+async function writeFiringMarker(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  pk: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+  toneSequence: number,
+  mutualAidDue: boolean,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          pk,
+          sk: firingMarkerSk(toneSequence),
+          entityType: 'TONE_FIRE_STARTED',
+          dispatchId,
+          deptId,
+          toneSequence,
+          mutualAidDue,
+          startedAt: Math.floor(Date.now() / 1000),
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== 'ConditionalCheckFailedException') {
+      throw error;
+    }
+  }
+}
+
 async function fireToneForMember(
   ddb: DynamoDBDocumentClient,
   sns: SNSClient,
@@ -582,9 +624,22 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     return { outcome: 'SKIPPED_ALREADY_FIRED' };
   }
 
+  // An earlier attempt that started firing this tone and failed part-way left a marker. Its
+  // retry must finish the fire, not re-check the predicate: members paged by that attempt may
+  // have responded since, and a skip now would abandon the pages and officer prompts it left
+  // unsent while recording the tone as skipped.
+  const firingMarker = await ddb.send(
+    new GetCommand({
+      TableName: tableName,
+      Key: { pk, sk: firingMarkerSk(toneSequence) },
+      ConsistentRead: true,
+    }),
+  );
+  const resumingFire = firingMarker.Item !== undefined;
+
   const roster = await queryRoster(ddb, tableName, deptId, dispatchId);
   const toneConfig = await readDepartmentToneConfig(ddb, tableName, deptId);
-  const predicateMet = isPredicateMet(roster, toneConfig);
+  const predicateMet = !resumingFire && isPredicateMet(roster, toneConfig);
   const outcome: ToneOutcome = manualOverride
     ? 'FIRED_MANUAL_OVERRIDE'
     : predicateMet
@@ -623,6 +678,17 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     return { outcome };
   }
 
+  // A manual advance bypasses the predicate to fire, but mutual aid still follows the
+  // architecture's rule - tone 3 fired with the predicate unmet - so an officer advancing a
+  // department that is already staffed does not also page the mutual-aid prompt. A resumed
+  // fire keeps the decision its first attempt recorded.
+  const mutualAidDue = resumingFire
+    ? firingMarker.Item?.mutualAidDue === true
+    : toneSequence === TONE_SEQUENCE_THREE && !isPredicateMet(roster, toneConfig);
+  if (!resumingFire) {
+    await writeFiringMarker(ddb, tableName, pk, deptId, dispatchId, toneSequence, mutualAidDue);
+  }
+
   const eligibleMembers = await queryEligibleMembers(ddb, tableName, deptId);
   // A failure paging some member must not also block mutual aid for tone 3: it is recorded,
   // mutual aid is still requested, and the first failure is rethrown so the evaluation
@@ -645,16 +711,12 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     evaluationFailure = asError(error);
   }
 
-  // A manual advance bypasses the predicate to fire, but mutual aid still follows the
-  // architecture's rule — tone 3 fired with the predicate unmet — so an officer advancing a
-  // department that is already staffed does not also page the mutual-aid prompt.
-  //
   // Requested BEFORE the fire-guard commit, and a failure propagates: once TONE#3 is
   // committed a retry returns SKIPPED_ALREADY_FIRED and never reaches this line, so a
   // mutual-aid request that failed after the commit (and was only logged) was lost for
   // good. Retrying the whole evaluation is safe - tone-3 receipts already marked sent are
   // skipped, the MUTUALAID singleton is written once, and only unsent prompts go out again.
-  if (toneSequence === TONE_SEQUENCE_THREE && !predicateMet) {
+  if (mutualAidDue) {
     try {
       await requestMutualAid({
         ddb,
