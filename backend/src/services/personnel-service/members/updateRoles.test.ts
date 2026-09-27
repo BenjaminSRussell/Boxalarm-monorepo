@@ -286,6 +286,57 @@ describe('members/updateRoles handler (entrypoint test)', () => {
     expect(cognitoWrites()).toEqual([{ kind: 'add', group: 'OFFICER' }]);
   });
 
+  // Review MINOR-1: admins A and B edit at once; B's row write lands first, so A's guarded
+  // write fails. A had already moved the groups - they must go back to what the row holds.
+  describe('when another admin changed the roles first', () => {
+    /** Stateful: adds and removes change what the next list returns. */
+    function cognitoStarts(initial: string[]): Set<string> {
+      const groups = new Set(initial);
+      cognitoSend.mockImplementation((command: unknown) => {
+        if (command instanceof AdminListGroupsForUserCommand) {
+          return Promise.resolve({ Groups: [...groups].map((GroupName) => ({ GroupName })) });
+        }
+        if (command instanceof AdminAddUserToGroupCommand) groups.add(command.input.GroupName!);
+        if (command instanceof AdminRemoveUserFromGroupCommand) {
+          groups.delete(command.input.GroupName!);
+        }
+        return Promise.resolve({});
+      });
+      return groups;
+    }
+    const conflict = Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    });
+
+    it('answers 409 and puts Cognito back to the roles the row now holds', async () => {
+      getMemberMock
+        .mockResolvedValueOnce({ memberId: 'm1', roles: ['MEMBER'] })
+        .mockResolvedValueOnce({ memberId: 'm1', roles: ['MEMBER', 'TRAINING'] });
+      const groups = cognitoStarts(['MEMBER', 'TRAINING']);
+      updateMemberRolesMock.mockRejectedValueOnce(conflict);
+
+      const result = await put(['OFFICER']);
+
+      expect(result.statusCode).toBe(409);
+      expect(bodyOf(result).detail).toMatch(/changed by someone else/);
+      expect([...groups].sort()).toEqual(['MEMBER', 'TRAINING']);
+    });
+
+    it('answers 404 and removes the granted groups when the member is gone', async () => {
+      getMemberMock
+        .mockResolvedValueOnce({ memberId: 'm1', roles: ['MEMBER'] })
+        .mockResolvedValueOnce(undefined);
+      const groups = cognitoStarts(['MEMBER']);
+      updateMemberRolesMock.mockRejectedValueOnce(conflict);
+
+      const result = await put(['ADMIN']);
+
+      expect(result.statusCode).toBe(404);
+      expect(groups.has('ADMIN')).toBe(false);
+    });
+  });
+
   it('converges on retry after a partial failure: groups already right, row still written', async () => {
     getMemberMock.mockResolvedValueOnce({ memberId: 'm1', roles: ['MEMBER'] });
     cognitoHas(['MEMBER', 'OFFICER']);

@@ -39,6 +39,19 @@ function parseRolesBody(body: string | undefined): MemberRole[] {
   return MEMBER_ROLES.filter((role) => role === 'MEMBER' || roles.includes(role));
 }
 
+interface TransactionCancellationReason {
+  readonly Code?: string;
+}
+
+function isConditionalCheckFailure(error: unknown): boolean {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') {
+    return false;
+  }
+  const reasons = (error as { CancellationReasons?: readonly TransactionCancellationReason[] })
+    .CancellationReasons;
+  return (reasons ?? []).some((reason) => reason.Code === 'ConditionalCheckFailed');
+}
+
 function sameRoles(a: readonly MemberRole[], b: readonly MemberRole[]): boolean {
   return a.length === b.length && a.every((role) => b.includes(role));
 }
@@ -59,6 +72,40 @@ function emitRolesMetric(outcome: 'MemberRolesUpdated' | 'MemberRolesUpdateFaile
       [outcome]: 1,
     }),
   );
+}
+
+async function reconcileAfterConflict(
+  traceId: string,
+  tableName: string,
+  loginConfig: ReturnType<typeof readMemberLoginConfig>,
+  ctx: VerifiedAccessToken,
+  memberId: string,
+) {
+  try {
+    const current = await getMember(tableName, ctx, memberId);
+    await syncRoleGroups(getCognitoClient(), loginConfig, memberId, current?.roles ?? []);
+    logError('member.roles.update.conflict', traceId, new Error('roles changed concurrently'), {
+      memberId,
+      restoredTo: current?.roles ?? [],
+    });
+    return current
+      ? problemResponse(
+          409,
+          'Conflict',
+          'these roles were changed by someone else while you were editing; reload and try again',
+          traceId,
+        )
+      : problemResponse(404, 'Not Found', `no member found with id ${memberId}`, traceId);
+  } catch (error) {
+    logError('member.roles.update.reconcile_failed', traceId, error, { memberId });
+    emitRolesMetric('MemberRolesUpdateFailed');
+    return problemResponse(
+      503,
+      'Service Unavailable',
+      'member roles were only partly saved; reload and retry the request to finish',
+      traceId,
+    );
+  }
 }
 
 /**
@@ -149,6 +196,12 @@ export const handler: APIGatewayProxyHandlerV2WithLambdaAuthorizer<VerifiedAcces
     try {
       await updateMemberRoles(config.tableName, ctx, memberId, previousRoles, roles, ctx.sub);
     } catch (error) {
+      if (isConditionalCheckFailure(error)) {
+        // Another admin changed the roles since this request read them, or the member is
+        // gone. Cognito is what grants access, so it must never stay ahead of the row: put
+        // the groups back to whatever the row now holds (none if the member is gone).
+        return reconcileAfterConflict(traceId, config.tableName, loginConfig, ctx, memberId);
+      }
       // The groups already hold the new roles; the row and the alerting snapshot do not.
       logError('member.roles.update.partial', traceId, error, {
         memberId,
