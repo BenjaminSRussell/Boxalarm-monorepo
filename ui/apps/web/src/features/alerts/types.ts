@@ -134,6 +134,7 @@ export interface DiagnosticsTimelineEntry {
   sentAt?: number;
   deliveredAt?: number | null;
   openedAt?: number | null;
+  failureReason?: string | null;
   escalatedAt?: number;
   reason?: string;
   answeredAt?: number;

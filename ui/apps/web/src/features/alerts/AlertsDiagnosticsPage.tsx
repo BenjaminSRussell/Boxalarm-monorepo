@@ -14,9 +14,15 @@ const CANARY_STALE_AFTER_MS = 240_000;
 
 function timelineLabel(entry: DiagnosticsTimelineEntry): string {
   if (entry.entityType === 'DELIVERY_RECEIPT') {
-    if (entry.status === 'OPENED') return 'Opened';
-    if (entry.status === 'DELIVERED') return 'Delivered';
-    if (entry.status === 'FAILED') return 'Failed';
+    // The diagnostics route returns raw DELIVERY_RECEIPT items, which have no status field:
+    // the provider callbacks set failureReason / deliveredAt / openedAt
+    // (receipts/deliveryReceiptRepository.ts). Keying on `status` alone labelled every
+    // delivered page "Sent, not confirmed delivered".
+    if (entry.failureReason || entry.status === 'FAILED') {
+      return `Failed${entry.failureReason ? ` — ${entry.failureReason}` : ''}`;
+    }
+    if (entry.openedAt || entry.status === 'OPENED') return 'Opened';
+    if (entry.deliveredAt || entry.status === 'DELIVERED') return 'Delivered';
     return 'Sent, not confirmed delivered';
   }
   if (entry.entityType === 'ESCALATION_EVENT')
