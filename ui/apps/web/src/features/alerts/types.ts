@@ -76,7 +76,10 @@ export interface HaltToneLadderResult {
 export interface TriggerMutualAidResult {
   dispatchId: string;
   created: boolean;
-  /** Officers pushed by this request; null when mutual aid had already been requested. */
+  /**
+   * Officers pushed by this request. On a repeat (created=false) these are re-sends to
+   * officers an earlier attempt missed. null only from a server that predates re-sends.
+   */
   officersNotified: number | null;
   mutualAid: MutualAid | null;
 }

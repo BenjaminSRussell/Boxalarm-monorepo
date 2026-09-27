@@ -100,9 +100,11 @@ async function trigger(
     return jsonResponse(200, {
       dispatchId,
       created: result.requested,
-      // Only meaningful for this request's own trigger; 0 with created=true means no officer
-      // had a registered push target and the call must be made without a prompt.
-      officersNotified: result.requested ? result.officersNotified : null,
+      // Prompts this request sent. On a repeat (created=false) these are re-sends to officers
+      // an earlier attempt missed - the port skips anyone already prompted. 0 with
+      // created=true means no officer had a registered push target and the call must be made
+      // without a prompt.
+      officersNotified: result.officersNotified,
       adapterUsed: result.adapterUsed,
       mutualAid,
     });

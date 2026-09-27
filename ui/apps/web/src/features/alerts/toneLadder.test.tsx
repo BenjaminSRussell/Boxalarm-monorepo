@@ -306,7 +306,7 @@ test('triggering mutual aid reports how many officers were prompted, then offers
   expect(screen.getByRole('button', { name: 'Confirm mutual-aid call made' })).toBeTruthy();
 });
 
-test('a repeat trigger says no second prompt was sent; zero officers reached is called out', async () => {
+test('a repeat trigger says every officer was already prompted; zero officers reached is called out', async () => {
   usePage(() => dispatch());
   let calls = 0;
   server.use(
@@ -315,7 +315,7 @@ test('a repeat trigger says no second prompt was sent; zero officers reached is 
       return HttpResponse.json(
         calls === 1
           ? { dispatchId: 'D-1', created: true, officersNotified: 0, mutualAid: null }
-          : { dispatchId: 'D-1', created: false, officersNotified: null, mutualAid: null },
+          : { dispatchId: 'D-1', created: false, officersNotified: 0, mutualAid: null },
       );
     }),
   );
@@ -335,8 +335,48 @@ test('a repeat trigger says no second prompt was sent; zero officers reached is 
     within(await screen.findByRole('dialog')).getByRole('button', { name: 'Request mutual aid' }),
   );
   expect(
-    await screen.findByText('Mutual aid had already been requested. No second prompt was sent.'),
+    await screen.findByText(
+      'Mutual aid was already requested, and every reachable officer has already been prompted.',
+    ),
   ).toBeTruthy();
+});
+
+// The trigger's 502 tells the officer to trigger again to reach missed officers, so the
+// control must still be there once mutual aid is recorded.
+test('an unconfirmed request offers re-sending prompts, and reports who was re-prompted', async () => {
+  const requested = {
+    triggeredAt: 1798000100,
+    reason: 'TONE_3_PREDICATE_UNMET',
+    triggeredBy: null,
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    notes: null,
+  };
+  usePage(() => dispatch({ mutualAid: requested }));
+  server.use(
+    http.post('/api/v1/alerting/dispatches/D-1/mutual-aid/trigger', () =>
+      HttpResponse.json({
+        dispatchId: 'D-1',
+        created: false,
+        officersNotified: 1,
+        mutualAid: requested,
+      }),
+    ),
+  );
+  const user = userEvent.setup();
+  renderPage();
+
+  await user.click(await screen.findByRole('button', { name: 'Re-send officer prompts' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Re-send the mutual-aid prompt?' });
+  expect(dialog.textContent).toMatch(/not prompted twice/);
+  await user.click(within(dialog).getByRole('button', { name: 'Re-send prompts' }));
+
+  expect(
+    await screen.findByText(
+      'Mutual aid was already requested. The prompt was re-sent to 1 officer(s) who had not received it.',
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Trigger mutual aid' })).toBeNull();
 });
 
 test('acknowledging the mutual-aid call sends the officer’s notes', async () => {

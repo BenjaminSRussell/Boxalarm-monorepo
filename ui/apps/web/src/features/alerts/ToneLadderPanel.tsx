@@ -11,13 +11,13 @@ import {
   haltToneLadder,
   triggerMutualAid,
 } from './api';
-import type { MutualAid, ToneLadder } from './types';
+import type { MutualAid, ToneLadder, TriggerMutualAidResult } from './types';
 
 const REFETCH_INTERVAL_MS = 10_000;
 const FINAL_TONE = 3;
 const MAX_NOTES_LENGTH = 1000;
 
-type Control = 'advance' | 'halt' | 'trigger' | 'acknowledge';
+type Control = 'advance' | 'halt' | 'trigger' | 'resend' | 'acknowledge';
 
 function formatTime(epochSeconds: number | null): string {
   return epochSeconds === null
@@ -54,6 +54,20 @@ function ladderSummary(ladder: ToneLadder): string {
     return `Tone ${ladder.currentToneSequence} of ${FINAL_TONE} has fired. No further tone is scheduled to fire automatically - advance by hand if more members are needed.`;
   }
   return `Tone ${ladder.currentToneSequence} of ${FINAL_TONE} has fired. The next tone fires automatically if too few members respond.`;
+}
+
+/** What a trigger did - the first request, or a repeat that re-sends only missed prompts. */
+function triggerResultMessage(triggered: TriggerMutualAidResult): string {
+  const notified = triggered.officersNotified ?? 0;
+  if (!triggered.created) {
+    return notified > 0
+      ? `Mutual aid was already requested. The prompt was re-sent to ${notified} officer(s) who had not received it.`
+      : 'Mutual aid was already requested, and every reachable officer has already been prompted.';
+  }
+  if (notified === 0) {
+    return 'Mutual aid recorded, but no officer has a push device registered - make the call now.';
+  }
+  return `Mutual aid requested. ${notified} officer(s) prompted to make the call.`;
 }
 
 function mutualAidReason(reason: string | null): string {
@@ -174,6 +188,13 @@ export function ToneLadderPanel({ dispatchId }: { dispatchId: string }) {
               </Button>
             ) : null}
             {canAcknowledge ? (
+              // The request is recorded, but an officer's prompt may have failed - a repeat
+              // trigger re-sends only to officers who did not receive it.
+              <Button variant="secondary" onClick={() => setOpen('resend')}>
+                Re-send officer prompts
+              </Button>
+            ) : null}
+            {canAcknowledge ? (
               <Button
                 variant="secondary"
                 onClick={() => {
@@ -235,16 +256,18 @@ export function ToneLadderPanel({ dispatchId }: { dispatchId: string }) {
         consequence="Records a mutual-aid request for this dispatch and pushes a prompt to the department's officers. It does not page the neighboring department - an officer must make that call."
         confirmLabel="Request mutual aid"
         onConfirm={() =>
-          run(async () => {
-            const triggered = await triggerMutualAid(auth, dispatchId);
-            if (!triggered.created) {
-              return 'Mutual aid had already been requested. No second prompt was sent.';
-            }
-            if (triggered.officersNotified === 0) {
-              return 'Mutual aid recorded, but no officer has a push device registered - make the call now.';
-            }
-            return `Mutual aid requested. ${triggered.officersNotified ?? 0} officer(s) prompted to make the call.`;
-          })
+          run(async () => triggerResultMessage(await triggerMutualAid(auth, dispatchId)))
+        }
+      />
+
+      <ConfirmDialog
+        open={open === 'resend'}
+        onOpenChange={(next) => setOpen(next ? 'resend' : null)}
+        title="Re-send the mutual-aid prompt?"
+        consequence="Pushes the prompt again to any officer who did not receive it. Officers who already received it are not prompted twice."
+        confirmLabel="Re-send prompts"
+        onConfirm={() =>
+          run(async () => triggerResultMessage(await triggerMutualAid(auth, dispatchId)))
         }
       />
 

@@ -280,7 +280,7 @@ function demoLadderControl(
       return json({
         dispatchId,
         created: false,
-        officersNotified: null,
+        officersNotified: 0,
         adapterUsed: 'OFFICER_MANUAL_PROMPT',
         mutualAid: dispatch.mutualAid,
       });

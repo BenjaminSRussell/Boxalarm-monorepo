@@ -522,6 +522,22 @@ describe('POST /mutual-aid/trigger', () => {
     return { handler, ddb, snsSend, vp };
   }
 
+  // Review MINOR-R9: the partial-prompt branch had no test.
+  it('answers 502 with the counts when an officer prompt fails, and a retry prompts only the missed officer', async () => {
+    const { handler, snsSend } = await build([metadata(), officerSnapshot]);
+    snsSend.mockRejectedValueOnce(new Error('sns unavailable'));
+
+    const first = parse(await handler(buildEvent('mutual-aid/trigger')));
+
+    expect(first.statusCode).toBe(502);
+    expect(first.body.detail).toMatch(/Mutual aid is recorded, but 1 of 1 officers could not be/);
+
+    const retry = parse(await handler(buildEvent('mutual-aid/trigger')));
+
+    expect(retry).toMatchObject({ statusCode: 200, body: { created: false, officersNotified: 1 } });
+    expect(snsSend).toHaveBeenCalledTimes(2);
+  });
+
   it('records a MANUAL trigger through the mutual-aid port and prompts officers', async () => {
     const { handler, ddb, snsSend, vp } = await build([metadata(), officerSnapshot]);
 
@@ -595,7 +611,7 @@ describe('POST /mutual-aid/trigger', () => {
       statusCode: 200,
       body: {
         created: false,
-        officersNotified: null,
+        officersNotified: 0,
         mutualAid: { reason: 'TONE_3_PREDICATE_UNMET', triggeredAt: 1798000360 },
       },
     });
