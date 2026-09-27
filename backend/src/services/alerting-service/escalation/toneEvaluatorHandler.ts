@@ -3,6 +3,7 @@ import {
   GetCommand,
   PutCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type DynamoDBDocumentClient,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
@@ -163,7 +164,27 @@ async function publishToneChannel(
       }),
     );
   } catch (error) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+    if (!(error instanceof Error) || error.name !== 'ConditionalCheckFailedException') {
+      logError('alerting.toneLadder.receiptWriteFailed', error, {
+        deptId,
+        dispatchId,
+        memberId,
+        channel,
+      });
+      throw error;
+    }
+    // The receipt already exists. It only proves an earlier attempt claimed this
+    // {dispatch, tone, member, channel} - not that the page was published: the claim is
+    // written before the publish, and a publish that failed after it left the receipt
+    // behind. Skipping on the claim alone meant a retry (Scheduler, or an officer's manual
+    // advance) silently never paged that member on that channel. Skip only once sentAt
+    // shows the publish succeeded - the same rule fan-out applies to tone 1. Re-publishing
+    // is safe: the deterministic MessageDeduplicationId dedupes within SNS FIFO's window,
+    // and the channel worker's own send guard dedupes after it.
+    const existing = await ddb.send(
+      new GetCommand({ TableName: tableName, Key: { pk, sk }, ConsistentRead: true }),
+    );
+    if (existing.Item?.sentAt) {
       logInfo('alerting.toneLadder.duplicateReceipt', {
         deptId,
         dispatchId,
@@ -173,15 +194,14 @@ async function publishToneChannel(
       });
       return;
     }
-    logError('alerting.toneLadder.receiptWriteFailed', error, {
+    logInfo('alerting.toneLadder.republishUnsentReceipt', {
       deptId,
       dispatchId,
       memberId,
       channel,
+      toneSequence,
     });
-    throw error;
   }
-
   await sns.send(
     new PublishCommand({
       TopicArn: topicArn,
@@ -212,6 +232,16 @@ async function publishToneChannel(
         channelTier: { DataType: 'String', StringValue: CHANNEL_TIER },
         toneSequence: { DataType: 'Number', StringValue: String(toneSequence) },
       },
+    }),
+  );
+
+  // Marks the claim as published, so a later retry skips it instead of re-publishing.
+  await ddb.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: { pk, sk },
+      UpdateExpression: 'SET sentAt = :sentAt',
+      ExpressionAttributeValues: { ':sentAt': Math.floor(Date.now() / 1000) },
     }),
   );
 }

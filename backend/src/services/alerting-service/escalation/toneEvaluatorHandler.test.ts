@@ -161,6 +161,17 @@ function createFakeDdb(
       return Promise.resolve({});
     }
     if (name === 'UpdateCommand') {
+      const update = input as {
+        Key: { pk: string; sk: string };
+        ExpressionAttributeValues: Record<string, unknown>;
+      };
+      if (':sentAt' in update.ExpressionAttributeValues) {
+        const key = `${update.Key.pk}#${update.Key.sk}`;
+        const receipt = items.get(key);
+        if (receipt)
+          items.set(key, { ...receipt, sentAt: update.ExpressionAttributeValues[':sentAt'] });
+        return Promise.resolve({});
+      }
       applyMetadataUpdate(
         items,
         input as {
@@ -454,6 +465,49 @@ describe('toneEvaluatorHandler', () => {
     expect(publishedMemberIds(sns)).toEqual(['mbr-1', 'mbr-fail']);
   });
 
+  // A claim written by an attempt whose publish then failed must not suppress the page.
+  it('re-publishes a receipt that was claimed but never marked sent', async () => {
+    const unsentClaim: FakeItem = {
+      pk: PK,
+      sk: 'RECEIPT#mbr-1#push#2',
+      entityType: 'DELIVERY_RECEIPT',
+      memberId: 'mbr-1',
+      idempotencyKey: 'dispatch-1#2#mbr-1#push',
+    };
+    const { send, sns, items } = createFakeDdb([METADATA_ITEM, ELIGIBLE_MEMBER, unsentClaim]);
+    const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+    const { createSnsClient } = await import('../fanout/snsClient.js');
+    vi.mocked(createDynamoClient).mockReturnValue({ send } as unknown as DynamoDBDocumentClient);
+    vi.mocked(createSnsClient).mockReturnValue(sns as never);
+
+    const { handler } = await import('./toneEvaluatorHandler.js');
+    await handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 });
+
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+    expect(items.get(`${PK}#RECEIPT#mbr-1#push#2`)?.sentAt).toEqual(expect.any(Number));
+  });
+
+  it('does not re-publish a receipt already marked sent', async () => {
+    const sentClaim: FakeItem = {
+      pk: PK,
+      sk: 'RECEIPT#mbr-1#push#2',
+      entityType: 'DELIVERY_RECEIPT',
+      memberId: 'mbr-1',
+      idempotencyKey: 'dispatch-1#2#mbr-1#push',
+      sentAt: 1_700_000_000,
+    };
+    const { send, sns } = createFakeDdb([METADATA_ITEM, ELIGIBLE_MEMBER, sentClaim]);
+    const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+    const { createSnsClient } = await import('../fanout/snsClient.js');
+    vi.mocked(createDynamoClient).mockReturnValue({ send } as unknown as DynamoDBDocumentClient);
+    vi.mocked(createSnsClient).mockReturnValue(sns as never);
+
+    const { handler } = await import('./toneEvaluatorHandler.js');
+    await handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 });
+
+    expect(publishedMemberIds(sns)).toEqual([]);
+  });
+
   it('returns SKIPPED_ALREADY_FIRED on a second successful evaluation of the same tone', async () => {
     const { send, sns, items } = createFakeDdb([METADATA_ITEM, ELIGIBLE_MEMBER]);
     const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
@@ -662,7 +716,17 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
       'FIRED_MANUAL_OVERRIDE',
       'SKIPPED_ALREADY_FIRED',
     ]);
-    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+    // A concurrent twin may see the first's claim before it is marked sent and re-publish
+    // (an unsent claim is never trusted - see publishToneChannel). Both publishes carry
+    // the same deterministic MessageDeduplicationId, so SNS FIFO delivers the page once.
+    const dedupIds = new Set(
+      sns.send.mock.calls.map(
+        (call) =>
+          (call[0] as { input: { MessageDeduplicationId: string } }).input.MessageDeduplicationId,
+      ),
+    );
+    expect(dedupIds.size).toBe(1);
+    expect(new Set(publishedMemberIds(sns))).toEqual(new Set(['mbr-1']));
   });
 
   it('does not fire on a halted ladder', async () => {
