@@ -476,8 +476,8 @@ async function fireTone(
 type ToneCommitResult = 'committed' | 'already_exists';
 
 /**
- * Commits the singleton fire-guard `TONE#{toneSequence}` (and optional METADATA
- * advance) only after paging has succeeded — or when the evaluator is skipping
+ * Commits the singleton fire-guard `TONE#{toneSequence}` (and the METADATA
+ * advance or, for a skip, its `nextToneAt`) only after paging has succeeded — or when the evaluator is skipping
  * because the responder predicate is already met. Writing the guard before
  * `fireTone` made Scheduler retries return SKIPPED_ALREADY_FIRED and silently
  * suppressed unpublished members / tones 2 and 3.
@@ -536,6 +536,8 @@ async function commitToneEvaluation(
     readonly upgradeSkippedGuard?: boolean;
     /** Every member was paged but a tone-3 mutual-aid prompt was not; a retry re-prompts. */
     readonly mutualAidPending?: boolean;
+    /** When the next automatic tone fires; null once none is left. */
+    readonly nextToneAt: number | null;
   },
 ): Promise<ToneCommitResult> {
   const correlationId = `${dispatchId}#${toneSequence}`;
@@ -595,30 +597,38 @@ async function commitToneEvaluation(
       },
     },
   ];
-  if (!options.advanceMetadata) {
-    return writeToneGuardItems(ddb, guardAndAudit, correlationId);
-  }
+  // Fired or skipped, this tone has been evaluated, so the ladder's next automatic tone is the
+  // next schedule's - null after tone 3, which the officer sees as "no further tone".
+  const metadataUpdate: NonNullable<TransactWriteCommandInput['TransactItems']>[number] = {
+    Update: options.advanceMetadata
+      ? {
+          TableName: tableName,
+          Key: { pk, sk: 'METADATA' },
+          UpdateExpression:
+            'SET currentToneSequence = :tone, toneLadderStatus = :status, nextToneAt = :next',
+          ConditionExpression:
+            'currentToneSequence < :tone AND toneLadderStatus <> :completed AND toneLadderStatus <> :halted',
+          ExpressionAttributeValues: {
+            ':tone': toneSequence,
+            ':status': toneSequence >= MUTUAL_AID_AFTER_TONE ? 'COMPLETED' : 'ACTIVE',
+            ':next': options.nextToneAt,
+            ':completed': 'COMPLETED',
+            ':halted': 'HALTED_MANUAL',
+          },
+        }
+      : {
+          TableName: tableName,
+          Key: { pk, sk: 'METADATA' },
+          UpdateExpression: 'SET nextToneAt = :next',
+          ConditionExpression:
+            'attribute_exists(pk) AND (attribute_not_exists(toneLadderStatus) OR toneLadderStatus = :active)',
+          ExpressionAttributeValues: { ':next': options.nextToneAt, ':active': 'ACTIVE' },
+        },
+  };
   try {
     await ddb.send(
       new TransactWriteCommand({
-        TransactItems: [
-          ...guardAndAudit,
-          {
-            Update: {
-              TableName: tableName,
-              Key: { pk, sk: 'METADATA' },
-              UpdateExpression: 'SET currentToneSequence = :tone, toneLadderStatus = :status',
-              ConditionExpression:
-                'currentToneSequence < :tone AND toneLadderStatus <> :completed AND toneLadderStatus <> :halted',
-              ExpressionAttributeValues: {
-                ':tone': toneSequence,
-                ':status': toneSequence >= MUTUAL_AID_AFTER_TONE ? 'COMPLETED' : 'ACTIVE',
-                ':completed': 'COMPLETED',
-                ':halted': 'HALTED_MANUAL',
-              },
-            },
-          },
-        ],
+        TransactItems: [...guardAndAudit, metadataUpdate],
       }),
     );
     return 'committed';
@@ -735,6 +745,11 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       ? 'SKIPPED_PREDICATE_MET'
       : 'FIRED';
   const evaluatedAt = Math.floor(Date.now() / 1000);
+  // Tone 3's time was recorded at fan-out (toneLadder.ts recordToneTimes); nothing follows it.
+  const nextToneAt =
+    toneSequence === TONE_SEQUENCE_TWO && typeof metadataItem.tone3At === 'number'
+      ? metadataItem.tone3At
+      : null;
   const respondingCount = roster.filter(
     (entry) => entry.ackStatus === 'RESPONDING' || entry.ackStatus === 'DIRECT_TO_SCENE',
   ).length;
@@ -756,7 +771,7 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
       outcome,
       roster.length,
       predicateSnapshot,
-      { advanceMetadata: false },
+      { advanceMetadata: false, nextToneAt },
     );
     if (skipCommit === 'already_exists') {
       logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });
@@ -833,6 +848,7 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     // has already paged everyone - must still claim the tone rather than report 'not sent'.
     {
       advanceMetadata: true,
+      nextToneAt,
       triggeredBy: manualOverride?.triggeredBy,
       upgradeSkippedGuard: manualOverride !== undefined,
       mutualAidPending: mutualAidFailure !== undefined,

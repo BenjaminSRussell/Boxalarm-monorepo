@@ -240,6 +240,31 @@ test('a completed ladder offers no advance or halt', async () => {
   expect(screen.queryByRole('button', { name: 'Halt tone ladder' })).toBeNull();
 });
 
+test('an active ladder with a scheduled tone says it is waiting on it', async () => {
+  usePage(() =>
+    dispatch({ toneLadder: { status: 'ACTIVE', currentToneSequence: 1, nextToneAt: 1798000180 } }),
+  );
+  renderPage();
+
+  expect(await screen.findByText(/The next tone fires automatically/)).toBeTruthy();
+  expect(screen.getByText(/Next tone check at/)).toBeTruthy();
+});
+
+// Review MINOR-R6: tone 3 was skipped because enough members responded - nothing is pending,
+// but the officer can still page again by hand.
+test('an active ladder with no tone left says so and still offers a manual advance', async () => {
+  usePage(() =>
+    dispatch({ toneLadder: { status: 'ACTIVE', currentToneSequence: 2, nextToneAt: null } }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByText(/No further tone is scheduled to fire automatically/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/The next tone fires automatically/)).toBeNull();
+  expect(screen.getByRole('button', { name: 'Advance to tone 3' })).toBeTruthy();
+});
+
 test('triggering mutual aid reports how many officers were prompted, then offers acknowledgement', async () => {
   let state = dispatch();
   usePage(() => state);

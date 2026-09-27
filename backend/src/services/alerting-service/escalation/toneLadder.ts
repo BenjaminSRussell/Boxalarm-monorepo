@@ -3,9 +3,10 @@ import {
   CreateScheduleCommand,
   FlexibleTimeWindowMode,
 } from '@aws-sdk/client-scheduler';
-import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { createHash } from 'node:crypto';
+import { logError } from '../dispatches/logger.js';
 import { readScheduleGroupName } from './scheduleEscalation.js';
 
 export const TONE_SEQUENCE_TWO = 2;
@@ -100,7 +101,7 @@ async function createToneSchedule(
   dispatchId: string,
   toneSequence: number,
   delaySeconds: number,
-): Promise<void> {
+): Promise<number> {
   const fireAt = Math.floor(Date.now() / 1000) + delaySeconds;
   const scheduleName = toneScheduleName(deptId, dispatchId, toneSequence);
   try {
@@ -118,10 +119,50 @@ async function createToneSchedule(
       }),
     );
   } catch (error) {
-    if (error instanceof Error && error.name === 'ConflictException') {
+    if (!(error instanceof Error) || error.name !== 'ConflictException') {
+      throw error;
+    }
+  }
+  return fireAt;
+}
+
+/**
+ * Records when the ladder's automatic tones fire (architecture `nextToneAt`, B6): the tone-2
+ * time now, and the tone-3 time for the Tone Evaluator to move `nextToneAt` to once tone 2 is
+ * evaluated. Display-only - the schedules drive the firing - so a failure is logged, never
+ * thrown into the paging path. Written once, and only while tone 2 is still to come on an
+ * active ladder: a retried fan-out, or one racing a halt or an early manual advance, must not
+ * re-open a ladder that has already moved on.
+ */
+async function recordToneTimes(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  deptId: VerifiedDeptId,
+  dispatchId: string,
+  tone2At: number,
+  tone3At: number,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId), sk: 'METADATA' },
+        UpdateExpression: 'SET nextToneAt = :tone2At, tone3At = :tone3At',
+        ConditionExpression:
+          'attribute_exists(pk) AND attribute_not_exists(tone3At) AND (attribute_not_exists(toneLadderStatus) OR toneLadderStatus = :active) AND (attribute_not_exists(currentToneSequence) OR currentToneSequence < :two)',
+        ExpressionAttributeValues: {
+          ':tone2At': tone2At,
+          ':tone3At': tone3At,
+          ':active': 'ACTIVE',
+          ':two': TONE_SEQUENCE_TWO,
+        },
+      }),
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       return;
     }
-    throw error;
+    logError('alerting.toneLadder.toneTimesWriteFailed', error, { deptId, dispatchId });
   }
 }
 
@@ -134,7 +175,7 @@ export async function scheduleDepartmentToneLadder(
 ): Promise<void> {
   const config = readToneEvaluatorSchedulerConfig(process.env);
   const toneConfig = await readDepartmentToneConfig(ddb, tableName, deptId);
-  await createToneSchedule(
+  const tone2At = await createToneSchedule(
     scheduler,
     config,
     deptId,
@@ -142,7 +183,7 @@ export async function scheduleDepartmentToneLadder(
     TONE_SEQUENCE_TWO,
     toneConfig.tone2AtSeconds,
   );
-  await createToneSchedule(
+  const tone3At = await createToneSchedule(
     scheduler,
     config,
     deptId,
@@ -150,6 +191,7 @@ export async function scheduleDepartmentToneLadder(
     TONE_SEQUENCE_THREE,
     toneConfig.tone3AtSeconds,
   );
+  await recordToneTimes(ddb, tableName, deptId, dispatchId, tone2At, tone3At);
 }
 
 export interface RosterAckLike {

@@ -929,6 +929,12 @@ describe('fanout/handler', () => {
     const roster = ddb.items.get('DEPT#NICHOLS#DISPATCH#NICHOLS-1-1798000000#ROSTER#mbr-1');
     expect(roster?.entityType).toBe('DISPATCH_ROSTER_ENTRY');
     expect(roster?.ackStatus).toBe('NONE');
+
+    // The officer's "next tone at" (architecture nextToneAt): tone 2's time, with tone 3's kept
+    // for the Tone Evaluator to move to - the default T+180s / T+360s ladder.
+    const metadata = ddb.items.get('DEPT#NICHOLS#DISPATCH#NICHOLS-1-1798000000#METADATA');
+    expect(metadata?.nextToneAt).toEqual(expect.any(Number));
+    expect(Number(metadata?.tone3At) - Number(metadata?.nextToneAt)).toBe(180);
   });
 
   it('still sends both tone-1 channel publishes when the escalation schedule create fails, then fails the batch item so Streams retries (core-harm, not silently swallowed)', async () => {

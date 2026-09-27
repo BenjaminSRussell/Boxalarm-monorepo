@@ -48,6 +48,11 @@ function ladderSummary(ladder: ToneLadder): string {
   if (ladder.status === 'COMPLETED' || ladder.currentToneSequence >= FINAL_TONE) {
     return `All ${FINAL_TONE} tones have fired.`;
   }
+  // nextToneAt is null once no automatic tone is left - e.g. tone 3 was skipped because enough
+  // members responded - so the ladder is not waiting on anything.
+  if (ladder.nextToneAt === null) {
+    return `Tone ${ladder.currentToneSequence} of ${FINAL_TONE} has fired. No further tone is scheduled to fire automatically - advance by hand if more members are needed.`;
+  }
   return `Tone ${ladder.currentToneSequence} of ${FINAL_TONE} has fired. The next tone fires automatically if too few members respond.`;
 }
 

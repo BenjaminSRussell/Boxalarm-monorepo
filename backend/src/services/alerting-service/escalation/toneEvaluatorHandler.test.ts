@@ -38,20 +38,22 @@ interface FakeItem {
   [key: string]: unknown;
 }
 
+/** Applies a `SET a = :x, b = :y` update expression. */
 function applyMetadataUpdate(
   items: Map<string, FakeItem>,
   update: {
     Key: { pk: string; sk: string };
+    UpdateExpression: string;
     ExpressionAttributeValues: Record<string, unknown>;
   },
 ): void {
   const key = `${update.Key.pk}#${update.Key.sk}`;
-  const existing = items.get(key) ?? { pk: update.Key.pk, sk: update.Key.sk };
-  items.set(key, {
-    ...existing,
-    currentToneSequence: update.ExpressionAttributeValues[':tone'],
-    toneLadderStatus: update.ExpressionAttributeValues[':status'],
-  });
+  const next: FakeItem = { ...(items.get(key) ?? { pk: update.Key.pk, sk: update.Key.sk }) };
+  for (const assignment of update.UpdateExpression.replace(/^SET /, '').split(',')) {
+    const [attr, placeholder] = assignment.split('=').map((part) => part.trim());
+    next[attr!] = update.ExpressionAttributeValues[placeholder!];
+  }
+  items.set(key, next);
 }
 
 function evaluateMetadataCondition(
@@ -63,6 +65,14 @@ function evaluateMetadataCondition(
 ): boolean {
   if (!update.ConditionExpression) {
     return true;
+  }
+  if (!(':tone' in update.ExpressionAttributeValues)) {
+    // A skip's nextToneAt update: the dispatch exists and its ladder is still ACTIVE.
+    return (
+      item !== undefined &&
+      (item.toneLadderStatus === undefined ||
+        item.toneLadderStatus === update.ExpressionAttributeValues[':active'])
+    );
   }
   const current = item?.currentToneSequence;
   const status = item?.toneLadderStatus;
@@ -188,6 +198,7 @@ function createFakeDdb(
         items,
         input as {
           Key: { pk: string; sk: string };
+          UpdateExpression: string;
           ExpressionAttributeValues: Record<string, unknown>;
         },
       );
@@ -253,6 +264,7 @@ function createFakeDdb(
             items,
             txItem.Update as {
               Key: { pk: string; sk: string };
+              UpdateExpression: string;
               ExpressionAttributeValues: Record<string, unknown>;
             },
           );
@@ -482,6 +494,56 @@ describe('toneEvaluatorHandler', () => {
     expect(items.get(`${PK}#METADATA`)?.currentToneSequence).toBe(2);
     expect(publishedMemberIds(sns)).toEqual(['mbr-1', 'mbr-fail']);
   });
+
+  // Architecture nextToneAt (B6): moved to tone 3's time once tone 2 is evaluated, cleared
+  // after tone 3. Review MINOR-R6: a skipped tone 3 left the ladder looking like it was still
+  // waiting on an automatic tone that would never come.
+  it.each([
+    ['fires', [] as FakeItem[], 'FIRED'],
+    [
+      'skips',
+      [
+        {
+          pk: PK,
+          sk: 'ROSTER#mbr-1',
+          entityType: 'DISPATCH_ROSTER_ENTRY',
+          memberId: 'mbr-1',
+          ackStatus: 'RESPONDING',
+          quals: [],
+        },
+      ],
+      'SKIPPED_PREDICATE_MET',
+    ],
+  ])(
+    'moves nextToneAt to tone 3 when tone 2 %s, and clears it when tone 3 does',
+    async (_label, roster, outcome) => {
+      const { send, sns, items } = createFakeDdb([
+        { ...METADATA_ITEM, nextToneAt: 1_798_000_180, tone3At: 1_798_000_360 },
+        ELIGIBLE_MEMBER,
+        ...roster,
+      ]);
+      const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+      const { createSnsClient } = await import('../fanout/snsClient.js');
+      vi.mocked(createDynamoClient).mockReturnValue({
+        send,
+      } as unknown as DynamoDBDocumentClient);
+      vi.mocked(createSnsClient).mockReturnValue(sns as never);
+      const { handler } = await import('./toneEvaluatorHandler.js');
+
+      await expect(
+        handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 2 }),
+      ).resolves.toEqual({ outcome });
+      expect(items.get(`${PK}#METADATA`)?.nextToneAt).toBe(1_798_000_360);
+
+      await expect(
+        handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', toneSequence: 3 }),
+      ).resolves.toEqual({ outcome });
+      expect(items.get(`${PK}#METADATA`)).toMatchObject({
+        nextToneAt: null,
+        toneLadderStatus: outcome === 'FIRED' ? 'COMPLETED' : 'ACTIVE',
+      });
+    },
+  );
 
   // Review MINOR-R2: a member who responds between a partly failed tone and its retry must
   // not turn the retry into a predicate-met skip that abandons the unsent pages.

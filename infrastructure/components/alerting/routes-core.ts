@@ -47,6 +47,9 @@ export class RoutesCore extends pulumi.ComponentResource {
           Effect: "Allow" as const,
           Action: [
             "dynamodb:PutItem",
+            // scheduleDepartmentToneLadder records the ladder's nextToneAt/tone3At on the
+            // dispatch METADATA (escalation/toneLadder.ts recordToneTimes).
+            "dynamodb:UpdateItem",
             "dynamodb:ConditionCheckItem",
             "dynamodb:TransactWriteItems",
           ],

@@ -25,6 +25,8 @@ describe(
       "dynamodb:GetItem",
       "dynamodb:TransactWriteItems",
       "dynamodb:PutItem",
+      // The tone-ladder times (nextToneAt) written after the tone-2/3 schedules.
+      "dynamodb:UpdateItem",
     ])("grants %s on the alerting table", async (action) => {
       await buildSchedulingChain();
       expect(isGranted(statementsForRole(INGRESS), action, TABLE_ARN)).toBe(true);
