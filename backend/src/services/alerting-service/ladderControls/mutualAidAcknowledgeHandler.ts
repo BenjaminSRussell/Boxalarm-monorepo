@@ -7,7 +7,7 @@ import {
   type CedarPrincipalContext,
   type GuardEvent,
 } from '@boxalarm/authz';
-import { toVerifiedDeptId } from '@boxalarm/dept-scope';
+import { buildDeptScopedPk, toVerifiedDeptId } from '@boxalarm/dept-scope';
 import { emitOutcomeMetric } from '@boxalarm/metrics';
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import { createDynamoClient, readAlertingConfig } from '../eligibility/dynamoClient.js';
@@ -17,7 +17,6 @@ import {
   LADDER_CONTROL_METRIC_NAMESPACE,
   conflictProblem,
   dataUnavailableProblem,
-  dispatchPk,
   getMutualAidEvent,
   isConditionalCheckFailed,
   jsonResponse,
@@ -83,7 +82,7 @@ async function acknowledge(
       const result = await ddb.send(
         new UpdateCommand({
           TableName: tableName,
-          Key: { pk: dispatchPk(deptId, dispatchId), sk: 'MUTUALAID#SINGLETON' },
+          Key: { pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId), sk: 'MUTUALAID#SINGLETON' },
           UpdateExpression: 'SET acknowledgedBy = :member, acknowledgedAt = :now, notes = :notes',
           ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(acknowledgedAt)',
           ExpressionAttributeValues: {

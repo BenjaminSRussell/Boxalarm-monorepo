@@ -123,10 +123,6 @@ export function parseJsonObjectBody(event: GuardEvent, traceId: string): ParsedB
   return { ok: false, problem: badRequestProblem(traceId, 'request body must be a JSON object') };
 }
 
-export function dispatchPk(deptId: VerifiedDeptId, dispatchId: string): string {
-  return buildDeptScopedPk(deptId, 'DISPATCH', dispatchId);
-}
-
 /**
  * The ladder fields of DISPATCH_ALERT METADATA, with the same defaults the detail route and
  * the Tone Evaluator apply to a record written before these fields existed.
@@ -154,7 +150,7 @@ export async function getDispatchMetadata(
   const result = await ddb.send(
     new GetCommand({
       TableName: tableName,
-      Key: { pk: dispatchPk(deptId, dispatchId), sk: 'METADATA' },
+      Key: { pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId), sk: 'METADATA' },
       ConsistentRead: true,
     }),
   );
@@ -170,7 +166,7 @@ export async function getMutualAidEvent(
   const result = await ddb.send(
     new GetCommand({
       TableName: tableName,
-      Key: { pk: dispatchPk(deptId, dispatchId), sk: 'MUTUALAID#SINGLETON' },
+      Key: { pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId), sk: 'MUTUALAID#SINGLETON' },
       ConsistentRead: true,
     }),
   );

@@ -7,7 +7,7 @@ import {
   type CedarPrincipalContext,
   type GuardEvent,
 } from '@boxalarm/authz';
-import { toVerifiedDeptId, type VerifiedDeptId } from '@boxalarm/dept-scope';
+import { buildDeptScopedPk, toVerifiedDeptId, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { emitOutcomeMetric } from '@boxalarm/metrics';
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 import { createDynamoClient, readAlertingConfig } from '../eligibility/dynamoClient.js';
@@ -21,7 +21,6 @@ import {
   TONE_LADDER_HALTED,
   conflictProblem,
   dataUnavailableProblem,
-  dispatchPk,
   getDispatchMetadata,
   jsonResponse,
   parseDispatchId,
@@ -61,7 +60,7 @@ async function attemptHalt(
   ladder: LadderState,
   memberId: string,
 ): Promise<HaltAttempt> {
-  const pk = dispatchPk(deptId, dispatchId);
+  const pk = buildDeptScopedPk(deptId, 'DISPATCH', dispatchId);
   const haltedAt = Math.floor(Date.now() / 1000);
   const suppressedTone = ladder.currentToneSequence + 1;
   try {
