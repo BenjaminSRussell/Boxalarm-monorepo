@@ -237,20 +237,42 @@ export type ResolveChannelTargetResult =
   | { readonly skipped: true; readonly reason: string }
   | { readonly skipped: false; readonly target: string };
 
-const CONTACT_CHANNEL_KEY: Record<ChannelName, string> = {
-  push: 'PUSH',
-  sms: 'SMS',
-  voice: 'VOICE',
-};
+function findContact(
+  contactChannels: readonly ContactChannelSnapshot[] | undefined,
+  key: string,
+): ContactChannelSnapshot | undefined {
+  return (contactChannels ?? []).find(
+    (candidate) => candidate.channel.toUpperCase() === key && candidate.valid !== false,
+  );
+}
 
+function phoneOf(entry: ContactChannelSnapshot | undefined): string | undefined {
+  return entry?.phoneNumber ?? entry?.token;
+}
+
+/**
+ * Resolves the worker's send target from the eligibility snapshot's contact channels. The
+ * producers (fanout/handler.ts, toneEvaluatorHandler.ts via eligibility/resolvePushTarget.ts)
+ * decide which channels to publish from the same snapshot, so both sides must accept the
+ * same shapes - a mismatch means the producer publishes and the worker silently finds no
+ * target (the recurring SMS-never-sends defect, #12). Accepted, case-insensitively:
+ *  - push: a PUSH entry's token (registerToken.ts);
+ *  - sms: an SMS entry's phone, as phoneNumber or token (maintainMemberSnapshot.ts writes
+ *    { channel: 'sms', token: phone });
+ *  - voice: a VOICE entry's phone, else the member's SMS phone - voice escalation dials the
+ *    same number, and nothing writes a separate VOICE entry.
+ */
 export function resolveChannelTarget(
   channel: ChannelName,
   contactChannels: readonly ContactChannelSnapshot[] | undefined,
 ): ResolveChannelTargetResult {
-  const entry = (contactChannels ?? []).find(
-    (candidate) => candidate.channel === CONTACT_CHANNEL_KEY[channel] && candidate.valid !== false,
-  );
-  const target = channel === 'push' ? entry?.token : entry?.phoneNumber;
+  const target =
+    channel === 'push'
+      ? findContact(contactChannels, 'PUSH')?.token
+      : channel === 'sms'
+        ? phoneOf(findContact(contactChannels, 'SMS'))
+        : (phoneOf(findContact(contactChannels, 'VOICE')) ??
+          phoneOf(findContact(contactChannels, 'SMS')));
   if (!target) {
     return { skipped: true, reason: noTargetReason(channel) };
   }

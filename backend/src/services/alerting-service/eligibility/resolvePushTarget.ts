@@ -4,6 +4,7 @@ export interface ContactChannelSnapshot {
   readonly channel: string;
   readonly platform?: string;
   readonly token?: string;
+  readonly phoneNumber?: string;
   readonly valid?: boolean;
 }
 
@@ -29,14 +30,16 @@ export type ResolveSmsTargetResult =
   | { readonly skipped: true; readonly reason: string }
   | { readonly skipped: false; readonly number: string };
 
+/** Same shapes the channel worker accepts (channels/channelEnvelope.ts resolveChannelTarget). */
 export function resolveSmsTarget(
   contactChannels: readonly ContactChannelSnapshot[] | undefined,
 ): ResolveSmsTargetResult {
   const entry = (contactChannels ?? []).find(
-    (channel) => channel.channel === 'sms' && channel.valid !== false,
+    (channel) => channel.channel.toUpperCase() === 'SMS' && channel.valid !== false,
   );
-  if (!entry?.token) {
+  const number = entry?.phoneNumber ?? entry?.token;
+  if (!number) {
     return { skipped: true, reason: NO_SMS_NUMBER_REASON };
   }
-  return { skipped: false, number: entry.token };
+  return { skipped: false, number };
 }
