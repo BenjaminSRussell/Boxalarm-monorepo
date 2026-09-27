@@ -7,7 +7,9 @@ import { useOptionalAuth } from '../../auth/AuthContext';
 import { getNotificationPreferences, putNotificationPreference } from '../../features/training/api';
 import type { NotificationPreference } from '../../features/training/types';
 
-const CERT_EXPIRY_CATEGORY = 'CERT_EXPIRY';
+// notification-service's category key (repository.ts CERT_EXPIRY_CATEGORY). Its stored
+// channels are MUTES - true means that channel is muted - so the switch shows the inverse.
+const CERT_EXPIRY_CATEGORY = 'cert-expiry';
 
 export function NotificationPreferencesScreen() {
   const scheme = useColorScheme();
@@ -40,13 +42,15 @@ export function NotificationPreferencesScreen() {
 
   const certExpiry = preferences.find((p) => p.category === CERT_EXPIRY_CATEGORY) ?? {
     category: CERT_EXPIRY_CATEGORY,
-    channels: { push: true, email: true },
+    // No stored preference means nothing is muted.
+    channels: { push: false, email: false },
   };
+  const pushEnabled = !certExpiry.channels.push;
 
-  const togglePush = async (value: boolean) => {
+  const togglePush = async (enabled: boolean) => {
     if (!auth || !apiBaseUrl) return;
     const previous = certExpiry.channels;
-    const next = { ...previous, push: value };
+    const next = { ...previous, push: !enabled };
     const withChannels = (channels: NotificationPreference['channels']) =>
       setPreferences((prev) => [
         ...prev.filter((p) => p.category !== CERT_EXPIRY_CATEGORY),
@@ -104,7 +108,7 @@ export function NotificationPreferencesScreen() {
           </Text>
           <Switch
             accessibilityLabel="Certification expiry push notifications"
-            value={certExpiry.channels.push}
+            value={pushEnabled}
             onValueChange={(value) => void togglePush(value)}
           />
         </View>

@@ -37,7 +37,7 @@ test('renders the certification expiry preference from the API', async () => {
     if (path === 'notifications/preferences') {
       return {
         json: async () => ({
-          preferences: [{ category: 'CERT_EXPIRY', channels: { push: false, email: true } }],
+          preferences: [{ category: 'cert-expiry', channels: { push: true, email: false } }],
         }),
       };
     }
@@ -46,8 +46,42 @@ test('renders the certification expiry preference from the API', async () => {
 
   const { findByLabelText } = await render(<NotificationPreferencesScreen />);
 
+  // push: true is a MUTE, so the "notifications on" switch is off.
   const toggle = await findByLabelText('Certification expiry push notifications');
   expect(toggle.props.value).toBe(false);
+});
+
+test('with no stored preference nothing is muted, so the switch starts on', async () => {
+  mockApiRequest.mockImplementation(async () => ({ json: async () => ({ preferences: [] }) }));
+
+  const { findByLabelText } = await render(<NotificationPreferencesScreen />);
+
+  const toggle = await findByLabelText('Certification expiry push notifications');
+  await waitFor(() => expect(toggle.props.value).toBe(true));
+});
+
+test('turning the switch off saves a push mute under the cert-expiry category', async () => {
+  let saved: unknown;
+  mockApiRequest.mockImplementation(async (path: string, _tokens: unknown, init?: RequestInit) => {
+    if (path === 'notifications/preferences' && init?.method === 'PUT') {
+      saved = JSON.parse(String(init.body));
+      return { json: async () => ({}) };
+    }
+    return { json: async () => ({ preferences: [] }) };
+  });
+
+  const { findByLabelText } = await render(<NotificationPreferencesScreen />);
+  const toggle = await findByLabelText('Certification expiry push notifications');
+  await waitFor(() => expect(toggle.props.value).toBe(true));
+
+  await act(async () => {
+    fireEvent(toggle, 'valueChange', false);
+  });
+
+  expect(saved).toEqual({ category: 'cert-expiry', channels: { push: true, email: false } });
+  expect((await findByLabelText('Certification expiry push notifications')).props.value).toBe(
+    false,
+  );
 });
 
 test('shows an error message instead of hanging when the preferences fetch fails', async () => {
@@ -68,7 +102,7 @@ test('a failed save reverts the optimistic toggle and tells the member (M11)', a
     }
     return {
       json: async () => ({
-        preferences: [{ category: 'CERT_EXPIRY', channels: { push: true, email: true } }],
+        preferences: [{ category: 'cert-expiry', channels: { push: false, email: false } }],
       }),
     };
   });
