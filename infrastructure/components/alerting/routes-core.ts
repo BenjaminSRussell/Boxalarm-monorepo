@@ -25,13 +25,15 @@ export interface RoutesCoreArgs {
 /**
  * Core alerting-service routes, each with its own reserved concurrency separate from
  * fan-out and the channel workers (E1-S1/S5/S6-INFRA): manual dispatch ingress
- * (degraded-mode fallback), response confirmation, live roster, and dispatch detail.
+ * (degraded-mode fallback), response confirmation, live roster, dispatch detail, and the
+ * active-dispatch list.
  */
 export class RoutesCore extends pulumi.ComponentResource {
   public readonly dispatchIngress: AlertingRoute;
   public readonly responses: AlertingRoute;
   public readonly roster: AlertingRoute;
   public readonly detail: AlertingRoute;
+  public readonly listActive: AlertingRoute;
 
   constructor(name: string, args: RoutesCoreArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("RoutesCore", args.env);
@@ -224,6 +226,39 @@ export class RoutesCore extends pulumi.ComponentResource {
       { parent: this },
     );
 
+    // src/services/alerting-service/dispatches/list/handler.handler — dashboard active-call
+    // tile. Reads only GSI2 of the alerting table (architecture.md AP 7), never a Scan and never
+    // the base table, so the grant is Query on that one index.
+    this.listActive = new AlertingRoute(
+      `${name}-list-active`,
+      {
+        env,
+        httpApi: args.httpApi,
+        logGroup: args.logGroup,
+        serviceName: "alerting-service",
+        functionName: `boxalarm-${env}-alerting-dispatches-list-active`,
+        handler: LAMBDA_HANDLER,
+        code: lambdaCode("alerting-service", "dispatches-list-active"),
+        routeKey: "GET /api/v1/alerting/dispatches",
+        environment: {
+          ALERTING_TABLE_NAME: args.alertingTableName,
+          VERIFIED_PERMISSIONS_POLICY_STORE_ID: args.policyStoreId,
+        },
+        additionalPolicyStatements: pulumi.output(args.alertingTableArn).apply((tableArn) => [
+          {
+            Sid: "AlertingDispatchIndexQueryOnly",
+            Effect: "Allow" as const,
+            Action: ["dynamodb:Query"],
+            Resource: `${tableArn}/index/GSI2`,
+          },
+          verifiedPermissionsStatement(),
+        ]),
+        reservedConcurrentExecutions: 3,
+        permissionsBoundaryArn: args.permissionsBoundaryArn,
+      },
+      { parent: this },
+    );
+
     grantAlertingCmk(
       name,
       {
@@ -231,6 +266,7 @@ export class RoutesCore extends pulumi.ComponentResource {
         responses: this.responses.lambda.role,
         roster: this.roster.lambda.role,
         detail: this.detail.lambda.role,
+        listActive: this.listActive.lambda.role,
       },
       args.alertingCmkArn,
       { parent: this },
@@ -241,6 +277,7 @@ export class RoutesCore extends pulumi.ComponentResource {
       responses: this.responses,
       roster: this.roster,
       detail: this.detail,
+      listActive: this.listActive,
     });
   }
 }

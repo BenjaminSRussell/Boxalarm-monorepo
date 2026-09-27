@@ -289,6 +289,11 @@ export const LAMBDA_ENTRIES = [
   },
   {
     service: 'alerting-service',
+    function: 'dispatches-list-active',
+    entry: 'src/services/alerting-service/dispatches/list/handler.ts',
+  },
+  {
+    service: 'alerting-service',
     function: 'self-test-post',
     entry: 'src/services/alerting-service/selfTest/postHandler.ts',
   },
