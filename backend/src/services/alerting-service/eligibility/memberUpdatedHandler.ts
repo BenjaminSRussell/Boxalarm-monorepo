@@ -66,6 +66,35 @@ function parseEnvelope(body: string): MemberUpdatedEnvelope {
   return { eventTime: envelope.eventTime, eventType: envelope.eventType ?? '', payload };
 }
 
+/**
+ * The fields the eligibility selector requires, seeded only where absent, so the first event
+ * for a member (a role change for a brand-new chief, say) creates a snapshot the selector can
+ * read instead of one it rejects on shape. Defaults match eligibilityChangedConsumer.
+ */
+const SNAPSHOT_DEFAULTS: ReadonlyArray<readonly [string, string, unknown]> = [
+  ['active', ':defaultActive', true],
+  ['availabilityState', ':defaultAvailability', 'AVAILABLE'],
+  ['quals', ':emptyQuals', []],
+  ['roles', ':emptyRoles', []],
+];
+
+function seedDefaults(
+  setClauses: string[],
+  values: Record<string, unknown>,
+  alreadySet: ReadonlySet<string>,
+): void {
+  for (const [field, placeholder, value] of SNAPSHOT_DEFAULTS) {
+    if (!alreadySet.has(field)) {
+      setClauses.push(`${field} = if_not_exists(${field}, ${placeholder})`);
+      values[placeholder] = value;
+    }
+  }
+}
+
+/**
+ * Every field except roles, guarded on the snapshot-wide snapshotUpdatedAt. Undefined when
+ * the event carries nothing but roles.
+ */
 function buildMergeExpression(payload: MemberUpdatedPayload, snapshotUpdatedAt: number) {
   const setClauses = [
     'entityType = :entityType',
@@ -77,29 +106,57 @@ function buildMergeExpression(payload: MemberUpdatedPayload, snapshotUpdatedAt: 
     ':memberId': payload.memberId,
     ':snapshotUpdatedAt': snapshotUpdatedAt,
   };
+  const set = new Set<string>();
+  const assign = (field: keyof MemberUpdatedPayload, value: unknown) => {
+    if (value !== undefined) {
+      setClauses.push(`${field} = :${field}`);
+      values[`:${field}`] = value;
+      set.add(field);
+    }
+  };
+  assign('active', payload.active);
+  assign('quals', payload.quals);
+  assign('contactChannels', payload.contactChannels);
+  assign('availabilityState', payload.availabilityState);
+  if (set.size === 0) {
+    return undefined;
+  }
+  seedDefaults(setClauses, values, set);
+  return {
+    UpdateExpression: `SET ${setClauses.join(', ')}`,
+    ConditionExpression:
+      'attribute_not_exists(snapshotUpdatedAt) OR snapshotUpdatedAt < :snapshotUpdatedAt',
+    ExpressionAttributeValues: values,
+  };
+}
 
-  if (payload.active !== undefined) {
-    setClauses.push('active = :active');
-    values[':active'] = payload.active;
-  }
-  if (payload.quals !== undefined) {
-    setClauses.push('quals = :quals');
-    values[':quals'] = payload.quals;
-  }
-  if (payload.roles !== undefined) {
-    setClauses.push('roles = :roles');
-    values[':roles'] = payload.roles;
-  }
-  if (payload.contactChannels !== undefined) {
-    setClauses.push('contactChannels = :contactChannels');
-    values[':contactChannels'] = payload.contactChannels;
-  }
-  if (payload.availabilityState !== undefined) {
-    setClauses.push('availabilityState = :availabilityState');
-    values[':availabilityState'] = payload.availabilityState;
-  }
-
-  return { UpdateExpression: `SET ${setClauses.join(', ')}`, ExpressionAttributeValues: values };
+/**
+ * Roles carry their own rolesUpdatedAt, as quals carry qualsUpdatedAt: availability, push-token
+ * and status events advance snapshotUpdatedAt on their own schedule, and guarding roles on it
+ * silently discarded a role change whenever any newer unrelated event landed first - the new
+ * officer was then never prompted for mutual aid, and re-saving the (unchanged) roles emitted
+ * nothing that could repair it.
+ */
+function buildRolesExpression(roles: readonly string[], memberId: string, eventTime: number) {
+  const setClauses = [
+    'entityType = :entityType',
+    'memberId = :memberId',
+    'roles = :roles',
+    'rolesUpdatedAt = :rolesUpdatedAt',
+    'snapshotUpdatedAt = if_not_exists(snapshotUpdatedAt, :rolesUpdatedAt)',
+  ];
+  const values: Record<string, unknown> = {
+    ':entityType': 'MEMBER_ELIGIBILITY_SNAPSHOT',
+    ':memberId': memberId,
+    ':roles': roles,
+    ':rolesUpdatedAt': eventTime,
+  };
+  seedDefaults(setClauses, values, new Set(['roles']));
+  return {
+    UpdateExpression: `SET ${setClauses.join(', ')}`,
+    ConditionExpression: 'attribute_not_exists(rolesUpdatedAt) OR rolesUpdatedAt < :rolesUpdatedAt',
+    ExpressionAttributeValues: values,
+  };
 }
 
 export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
@@ -112,64 +169,65 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
     const deptId = toVerifiedDeptId({ deptId: payload.deptId });
     const pk = buildDeptScopedPk(deptId, 'ELIGIBILITY');
     const snapshotUpdatedAt = Date.parse(envelope.eventTime);
-    const { UpdateExpression, ExpressionAttributeValues } = buildMergeExpression(
-      payload,
-      snapshotUpdatedAt,
-    );
+    const updates = [
+      buildMergeExpression(payload, snapshotUpdatedAt),
+      payload.roles !== undefined
+        ? buildRolesExpression(payload.roles, payload.memberId, snapshotUpdatedAt)
+        : undefined,
+    ].filter((update) => update !== undefined);
 
-    try {
-      await client.send(
-        new UpdateCommand({
-          TableName: tableName,
-          Key: { pk, sk: `MEMBER#${payload.memberId}` },
-          UpdateExpression,
-          ConditionExpression:
-            'attribute_not_exists(snapshotUpdatedAt) OR snapshotUpdatedAt < :snapshotUpdatedAt',
-          ExpressionAttributeValues,
-        }),
-      );
-      emitSnapshotMetric('Updated');
+    for (const update of updates) {
+      try {
+        await client.send(
+          new UpdateCommand({
+            TableName: tableName,
+            Key: { pk, sk: `MEMBER#${payload.memberId}` },
+            ...update,
+          }),
+        );
+        emitSnapshotMetric('Updated');
 
-      const latencyMs = Date.now() - snapshotUpdatedAt;
-      if (latencyMs < 0) {
-        console.warn(
+        const latencyMs = Date.now() - snapshotUpdatedAt;
+        if (latencyMs < 0) {
+          console.warn(
+            JSON.stringify({
+              event: 'alerting.eligibility.snapshot_propagation.future_event_time',
+              service: 'alerting-service',
+              correlationId: payload.memberId,
+              memberId: payload.memberId,
+              latencyMs,
+            }),
+          );
+        }
+        emitEmf(LATENCY_METRIC_NAMESPACE, 'SnapshotPropagationLatencyMs', Math.max(latencyMs, 0), [
+          [],
+        ]);
+      } catch (error) {
+        if (error instanceof ConditionalCheckFailedException) {
+          console.log(
+            JSON.stringify({
+              event: 'alerting.eligibility.snapshot.stale_discarded',
+              service: 'alerting-service',
+              correlationId: payload.memberId,
+              memberId: payload.memberId,
+            }),
+          );
+          emitSnapshotMetric('Stale');
+          continue;
+        }
+        console.error(
           JSON.stringify({
-            event: 'alerting.eligibility.snapshot_propagation.future_event_time',
+            event: 'alerting.eligibility.snapshot.update.failed',
             service: 'alerting-service',
             correlationId: payload.memberId,
             memberId: payload.memberId,
-            latencyMs,
+            reason: error instanceof Error ? error.constructor.name : 'UnknownError',
+            message: error instanceof Error ? error.message : String(error),
           }),
         );
+        emitSnapshotMetric('Failed');
+        throw error;
       }
-      emitEmf(LATENCY_METRIC_NAMESPACE, 'SnapshotPropagationLatencyMs', Math.max(latencyMs, 0), [
-        [],
-      ]);
-    } catch (error) {
-      if (error instanceof ConditionalCheckFailedException) {
-        console.log(
-          JSON.stringify({
-            event: 'alerting.eligibility.snapshot.stale_discarded',
-            service: 'alerting-service',
-            correlationId: payload.memberId,
-            memberId: payload.memberId,
-          }),
-        );
-        emitSnapshotMetric('Stale');
-        continue;
-      }
-      console.error(
-        JSON.stringify({
-          event: 'alerting.eligibility.snapshot.update.failed',
-          service: 'alerting-service',
-          correlationId: payload.memberId,
-          memberId: payload.memberId,
-          reason: error instanceof Error ? error.constructor.name : 'UnknownError',
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      emitSnapshotMetric('Failed');
-      throw error;
     }
   }
 

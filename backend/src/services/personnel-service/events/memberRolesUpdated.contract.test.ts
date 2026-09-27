@@ -128,7 +128,8 @@ describe('personnel.member.updated (roles) producer -> alerting consumer contrac
     expect(update.Key).toEqual({ pk: 'DEPT#NICHOLS#ELIGIBILITY', sk: 'MEMBER#mbr-7' });
     expect(update.UpdateExpression).toContain('roles = :roles');
     expect(update.ExpressionAttributeValues[':roles']).toEqual(['MEMBER', 'OFFICER', 'CHIEF']);
-    expect(update.ExpressionAttributeValues[':snapshotUpdatedAt']).toBe(
+    // Roles are guarded by their own timestamp, not the snapshot-wide one.
+    expect(update.ExpressionAttributeValues[':rolesUpdatedAt']).toBe(
       Date.parse(item.eventTime as string),
     );
   });

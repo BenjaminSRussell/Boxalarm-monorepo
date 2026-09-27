@@ -142,11 +142,71 @@ describe('memberUpdatedHandler', () => {
     const updateCall = send.mock.calls[0]?.[0] as {
       input: { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
     };
-    expect(updateCall.input.UpdateExpression).not.toContain('quals');
-    expect(updateCall.input.UpdateExpression).not.toContain('roles');
-    expect(updateCall.input.UpdateExpression).not.toContain('active');
+    // Absent fields are only seeded where the snapshot has none (if_not_exists), never
+    // overwritten - so a stored quals/roles/active survives a register-only event.
+    for (const field of ['quals', 'roles', 'active', 'availabilityState']) {
+      expect(updateCall.input.UpdateExpression).not.toMatch(new RegExp(`${field} = :${field}\\b`));
+      expect(updateCall.input.UpdateExpression).toContain(`${field} = if_not_exists(${field},`);
+    }
     expect(updateCall.input.ExpressionAttributeValues[':quals']).toBeUndefined();
     expect(updateCall.input.ExpressionAttributeValues[':active']).toBeUndefined();
+  });
+
+  // Review MAJOR-2: a role change was guarded on the snapshot-wide snapshotUpdatedAt, so any
+  // newer availability/push-token/status event applied first made it "stale" - the promoted
+  // officer never reached mutual aid.
+  it('guards a role change on rolesUpdatedAt alone, so a newer unrelated event cannot drop it', async () => {
+    const send = vi.fn().mockResolvedValue({});
+    vi.doMock('./dynamoClient.js', () => ({
+      createDynamoClient: () => ({ send }),
+      readAlertingConfig: () => ({ tableName: 'alerting-table' }),
+    }));
+    const { handler } = await import('./memberUpdatedHandler.js');
+    await handler(
+      buildSqsEvent({
+        ...VALID_ENVELOPE,
+        payload: { deptId: 'NICHOLS', memberId: 'mbr-102', roles: ['MEMBER', 'OFFICER'] },
+      }),
+    );
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const input = (
+      send.mock.calls[0]?.[0] as {
+        input: { ConditionExpression: string; UpdateExpression: string };
+      }
+    ).input;
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(rolesUpdatedAt) OR rolesUpdatedAt < :rolesUpdatedAt',
+    );
+    // Only seeds snapshotUpdatedAt; never moves it, so it cannot make other events stale.
+    expect(input.UpdateExpression).toContain(
+      'snapshotUpdatedAt = if_not_exists(snapshotUpdatedAt, :rolesUpdatedAt)',
+    );
+    // A first-ever event (a brand-new chief) still yields a snapshot the selector accepts.
+    expect(input.UpdateExpression).toContain('active = if_not_exists(active, :defaultActive)');
+  });
+
+  it('applies roles and other fields as two independently guarded updates', async () => {
+    const send = vi.fn().mockResolvedValue({});
+    vi.doMock('./dynamoClient.js', () => ({
+      createDynamoClient: () => ({ send }),
+      readAlertingConfig: () => ({ tableName: 'alerting-table' }),
+    }));
+    const { handler } = await import('./memberUpdatedHandler.js');
+    await handler(
+      buildSqsEvent({
+        ...VALID_ENVELOPE,
+        payload: { deptId: 'NICHOLS', memberId: 'mbr-102', active: false, roles: ['MEMBER'] },
+      }),
+    );
+
+    const conditions = send.mock.calls.map(
+      (call) => (call[0] as { input: { ConditionExpression: string } }).input.ConditionExpression,
+    );
+    expect(conditions).toEqual([
+      'attribute_not_exists(snapshotUpdatedAt) OR snapshotUpdatedAt < :snapshotUpdatedAt',
+      'attribute_not_exists(rolesUpdatedAt) OR rolesUpdatedAt < :rolesUpdatedAt',
+    ]);
   });
 
   it('a status->ACTIVE event with no contactChannels field does not clear the stored contactChannels (P7 regression)', async () => {
