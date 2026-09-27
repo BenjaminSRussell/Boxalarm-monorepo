@@ -65,6 +65,8 @@ describe("Certifications — certExpiredReactor stream consumer (#221)", () => {
       platformTableStreamArn: pulumi.output(
         "arn:aws:dynamodb:us-east-1:123456789012:table/platform/stream/2026-01-01T00:00:00.000",
       ),
+      assetsBucketName: pulumi.output("boxalarm-dev-platform-assets"),
+      assetsBucketArn: pulumi.output("arn:aws:s3:::boxalarm-dev-platform-assets"),
       logGroup,
       httpApi,
     });
@@ -149,5 +151,19 @@ describe("Certifications — certExpiredReactor stream consumer (#221)", () => {
       "dynamodb:UpdateItem",
       "dynamodb:PutItem",
     ]);
+  });
+
+  it("lets the create role presign attachment PUTs only under {deptId}/CERTIFICATION/", async () => {
+    const certs = await build();
+    const [policyJson, env] = await Promise.all([
+      resolve(certs.createLambda.rolePolicy.policy),
+      resolve(certs.createLambda.function.environment),
+    ]);
+    const put = (
+      JSON.parse(policyJson) as { Statement: Array<{ Sid: string; Resource: string[] }> }
+    ).Statement.find((s) => s.Sid === "CertificationAttachmentPut");
+    expect(put?.Resource).toEqual(["arn:aws:s3:::boxalarm-dev-platform-assets/*/CERTIFICATION/*"]);
+    expect(env?.variables?.PLATFORM_ASSETS_BUCKET_NAME).toBe("boxalarm-dev-platform-assets");
+    expect(policyJson).not.toContain("cloudfront");
   });
 });

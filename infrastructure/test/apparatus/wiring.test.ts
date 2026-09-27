@@ -99,6 +99,8 @@ async function build() {
     platformTableArn: pulumi.output(TABLE),
     policyStoreArn: pulumi.output(POLICY_STORE),
     policyStoreId: "ps-1",
+    assetsBucketName: "boxalarm-dev-platform-assets",
+    assetsBucketArn: "arn:aws:s3:::boxalarm-dev-platform-assets",
     logGroup,
     httpApi,
   };
@@ -164,6 +166,26 @@ describe("apparatus Lambdas: env and IAM match their handlers", { timeout: 30_00
       );
     },
   );
+
+  // Defect photos: a presigned S3 PUT into platform-assets, never CloudFront (N6.1).
+  it("only defects-report may write assets, and only under {deptId}/defect/", async () => {
+    await build();
+    for (const key of Object.keys(EXPECTED)) {
+      const s = statementsForRole(fnName(key));
+      const put = s.filter((st) => st.Sid === "AssetsPresignedPut");
+      if (key === "defects-report") {
+        expect(put.map((st) => st.Resource)).toEqual([
+          ["arn:aws:s3:::boxalarm-dev-platform-assets/*/defect/*"],
+        ]);
+        expect(lambdaEnv(fnName(key)).PLATFORM_ASSETS_BUCKET_NAME).toBe(
+          "boxalarm-dev-platform-assets",
+        );
+      } else {
+        expect(put, key).toEqual([]);
+        expect(lambdaEnv(fnName(key)).PLATFORM_ASSETS_BUCKET_NAME, key).toBeUndefined();
+      }
+    }
+  });
 
   it("every role holding UpdateItem on the platform table carries the audit-row deny", async () => {
     await build();

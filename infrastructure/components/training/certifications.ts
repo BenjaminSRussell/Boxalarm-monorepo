@@ -18,6 +18,9 @@ export interface CertificationsArgs {
   platformBusName: pulumi.Input<string>;
   platformBusArn: pulumi.Input<string>;
   platformTableStreamArn: pulumi.Input<string>;
+  /** platform-assets bucket the create route presigns attachment PUTs into. */
+  assetsBucketName: pulumi.Input<string>;
+  assetsBucketArn: pulumi.Input<string>;
   logGroup: ServiceLogGroup;
   httpApi: HttpApi;
 }
@@ -42,14 +45,10 @@ export interface CertificationsArgs {
  * TRAINING_TABLE_NAME (client.ts) and TRAINING_DYNAMO_TABLE_NAME (dynamoClient.ts) point
  * at it, and PLATFORM_CONFIG_DYNAMO_TABLE_NAME (per-dept CONFIG#ALERT_RULES lead-time) too.
  *
- * NOT wired here: attachmentUpload.ts's CloudFront signed-URL upload path
- * (CLOUDFRONT_DISTRIBUTION_DOMAIN / _KEY_PAIR_ID / _PRIVATE_KEY_SECRET_ID). CloudFront is a
- * global-edge service and residency-encryption.test.ts enforces N6.1 (U.S.-only, no global
- * edge) repo-wide — provisioning it here would fail that gate. createCertification without
- * an attachmentFilename works; a request that includes one reaches
- * readAttachmentUploadConfig() and fails closed with a 503, since none of those three env
- * vars are set. Fixing this needs a region-pinned replacement (e.g. S3 presigned PutObject)
- * in attachmentUpload.ts itself — backend work outside this infra ticket's footprint.
+ * Attachments: createCertification with an attachmentFilename returns a presigned S3 PUT
+ * (attachmentUpload.ts) into the platform-assets bucket under {deptId}/CERTIFICATION/ -
+ * regional, as N6.1 requires, instead of the CloudFront URL it used to sign, which could
+ * never be configured here. The create role may write only that prefix.
  */
 export class Certifications extends pulumi.ComponentResource {
   public readonly createLambda: ServiceLambda;
@@ -120,10 +119,19 @@ export class Certifications extends pulumi.ComponentResource {
         handler: LAMBDA_HANDLER,
         code: lambdaCode("training-service", "certifications-create"),
         logGroup: args.logGroup,
-        environment: baseEnvironment,
+        environment: { ...baseEnvironment, PLATFORM_ASSETS_BUCKET_NAME: args.assetsBucketName },
         additionalPolicyStatements: pulumi
-          .all([createStatement, vpStatement])
-          .apply(([table, vp]) => [...table, ...vp]),
+          .all([createStatement, vpStatement, args.assetsBucketArn])
+          .apply(([table, vp, bucketArn]) => [
+            ...table,
+            ...vp,
+            {
+              Sid: "CertificationAttachmentPut" as const,
+              Effect: "Allow" as const,
+              Action: ["s3:PutObject"],
+              Resource: [`${bucketArn}/*/CERTIFICATION/*`],
+            },
+          ]),
       },
       { parent: this },
     );

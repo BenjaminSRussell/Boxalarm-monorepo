@@ -322,6 +322,8 @@ export const trainingCertifications = new Certifications("training-certification
   platformBusName: platformBus.busName,
   platformBusArn: platformBus.busArn,
   platformTableStreamArn: platformTable.streamArn,
+  assetsBucketName: platformAssets.bucketName,
+  assetsBucketArn: platformAssets.bucketArn,
   logGroup: trainingLogGroup,
   httpApi,
 });
@@ -375,6 +377,8 @@ const apparatusArgs = {
   platformTableArn: platformTable.tableArn,
   policyStoreArn: policyStore.policyStoreArn,
   policyStoreId: policyStore.policyStoreId,
+  assetsBucketName: platformAssets.bucketName,
+  assetsBucketArn: platformAssets.bucketArn,
   logGroup: apparatusLogGroup,
   httpApi,
 };

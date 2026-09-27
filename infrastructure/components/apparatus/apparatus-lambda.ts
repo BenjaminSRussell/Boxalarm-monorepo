@@ -14,6 +14,9 @@ export interface ApparatusArgs {
   platformTableArn: pulumi.Input<string>;
   policyStoreArn: pulumi.Input<string>;
   policyStoreId: pulumi.Input<string>;
+  /** platform-assets bucket; required by any route with `assetsPutPrefix`. */
+  assetsBucketName?: pulumi.Input<string>;
+  assetsBucketArn?: pulumi.Input<string>;
   logGroup: ServiceLogGroup;
   httpApi: HttpApi;
 }
@@ -32,6 +35,11 @@ export interface ApparatusRouteSpec {
   grants: TableGrant[];
   /** Handler is wrapped in @boxalarm/authz withAuthorization (needs the policy store). */
   cedar: boolean;
+  /**
+   * The handler presigns S3 PUTs into the platform-assets bucket under
+   * {deptId}/{assetsPutPrefix}/...; the role gets s3:PutObject on exactly that prefix.
+   */
+  assetsPutPrefix?: string;
 }
 
 /**
@@ -48,9 +56,12 @@ export function apparatusRoute(
   args: ApparatusArgs,
   spec: ApparatusRouteSpec,
 ): ServiceLambda {
+  if (spec.assetsPutPrefix && (!args.assetsBucketName || !args.assetsBucketArn)) {
+    throw new Error(`${spec.functionKey}: assetsPutPrefix needs assetsBucketName/assetsBucketArn`);
+  }
   const statements = pulumi
-    .all([args.platformTableArn, args.policyStoreArn])
-    .apply(([tableArn, policyStoreArn]) => {
+    .all([args.platformTableArn, args.policyStoreArn, args.assetsBucketArn ?? ""])
+    .apply(([tableArn, policyStoreArn, bucketArn]) => {
       const resolved: IamPolicyStatement[] = spec.grants.map((grant) => ({
         Sid: grant.sid,
         Effect: "Allow" as const,
@@ -71,6 +82,14 @@ export function apparatusRoute(
       if (spec.cedar) {
         resolved.push(verifiedPermissionsPolicyStatement(policyStoreArn));
       }
+      if (spec.assetsPutPrefix) {
+        resolved.push({
+          Sid: "AssetsPresignedPut",
+          Effect: "Allow" as const,
+          Action: ["s3:PutObject"],
+          Resource: [`${bucketArn}/*/${spec.assetsPutPrefix}/*`],
+        });
+      }
       return resolved;
     });
 
@@ -86,6 +105,9 @@ export function apparatusRoute(
       environment: {
         PLATFORM_TABLE_NAME: args.platformTableName,
         ...(spec.cedar ? { VERIFIED_PERMISSIONS_POLICY_STORE_ID: args.policyStoreId } : {}),
+        ...(spec.assetsPutPrefix && args.assetsBucketName
+          ? { PLATFORM_ASSETS_BUCKET_NAME: args.assetsBucketName }
+          : {}),
       },
       additionalPolicyStatements: statements,
     },

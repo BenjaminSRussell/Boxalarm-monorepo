@@ -40,6 +40,8 @@ async function build() {
     platformTableArn: pulumi.output(TABLE),
     policyStoreArn: `arn:aws:verifiedpermissions::${ACCOUNT_ID}:policy-store/ps-1`,
     policyStoreId: "ps-1",
+    assetsBucketName: "boxalarm-dev-platform-assets",
+    assetsBucketArn: "arn:aws:s3:::boxalarm-dev-platform-assets",
     logGroup,
     httpApi,
   };
@@ -184,6 +186,8 @@ describe("apparatus-service routes", { timeout: 30_000 }, () => {
       platformTableArn: TABLE,
       policyStoreArn: "arn:ps",
       policyStoreId: "ps-1",
+      assetsBucketName: "b",
+      assetsBucketArn: "arn:aws:s3:::b",
       logGroup,
       httpApi,
     };

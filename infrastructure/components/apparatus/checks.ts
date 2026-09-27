@@ -12,12 +12,8 @@ import { ApparatusArgs, apparatusRoute } from "./apparatus-lambda";
  * both Lambdas carry an Errors alarm, and the defect path's business-failure metrics
  * are alarmed too.
  *
- * NOT wired: the defect photo upload URL. reportDefectHandler.ts signs a CloudFront URL
- * (CLOUDFRONT_DISTRIBUTION_DOMAIN / _KEY_PAIR_ID / _PRIVATE_KEY_SECRET_ID), and CloudFront
- * is a global-edge service that residency-encryption.test.ts forbids (N6.1) — the same
- * gap certifications.ts documents for attachments. A defect without a photo works; one
- * that names a photo reaches readDefectPhotoUploadConfig() and fails with a 5xx before
- * the defect is written. The region-pinned replacement is api-gap P1 #13.
+ * A defect that names a photo gets a presigned S3 PUT (defectPhotoUpload.ts) into the
+ * platform-assets bucket under {deptId}/defect/, the only prefix its role may write.
  */
 export class Checks extends pulumi.ComponentResource {
   public readonly checklistLambda: ServiceLambda;
@@ -71,6 +67,7 @@ export class Checks extends pulumi.ComponentResource {
       functionKey: "defects-report",
       routeKey: "POST /api/v1/apparatus/{unitId}/defects",
       cedar: true,
+      assetsPutPrefix: "defect",
       grants: [
         { sid: "ReportDefectQuery", actions: ["dynamodb:Query"], on: ["table", "GSI3"] },
         {

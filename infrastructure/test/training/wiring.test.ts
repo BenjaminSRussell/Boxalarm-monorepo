@@ -57,6 +57,8 @@ async function build() {
   };
   new Certifications("certifications", {
     ...common,
+    assetsBucketName: "boxalarm-dev-platform-assets",
+    assetsBucketArn: "arn:aws:s3:::boxalarm-dev-platform-assets",
     deptId: "nichols-fd",
     platformBusName: "boxalarm-dev-platform-bus",
     platformBusArn: `arn:aws:events:${REGION}:${ACCOUNT_ID}:event-bus/boxalarm-dev-platform-bus`,
