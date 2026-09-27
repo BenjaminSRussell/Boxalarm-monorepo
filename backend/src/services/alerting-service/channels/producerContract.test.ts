@@ -522,6 +522,137 @@ describe('alerting topic producer -> channel worker contract', () => {
     expect(sendViaHttpProvider).toHaveBeenCalledTimes(3);
   });
 
+  // POST /tone-ladder/advance (F1.14) must reach the channel workers exactly like a
+  // scheduled tone: it invokes the Tone Evaluator Lambda rather than fanning out itself, so
+  // a manually advanced tone 2 must publish byte-for-byte the routing and dedup inputs a
+  // scheduled tone 2 does, and be delivered and redelivery-guarded by the same workers.
+  it('chain: a manually advanced tone reaches the workers exactly like the scheduled tone 2', async () => {
+    type Capture = {
+      readonly routing: unknown[];
+      readonly envelopes: unknown[];
+      readonly provider: ProviderSpy;
+    };
+    const summarize = async (published: PublishInput[]): Promise<Capture> => {
+      const provider = providerSpy();
+      for (const publish of published) {
+        expect(await deliverThroughWorker(publish, provider)).toEqual({ batchItemFailures: [] });
+      }
+      // Redelivery of every message is absorbed by the worker's per-tone receipt guard.
+      for (const publish of published) {
+        await deliverThroughWorker(publish, provider);
+      }
+      const sorted = [...published].sort((a, b) =>
+        a.MessageDeduplicationId.localeCompare(b.MessageDeduplicationId),
+      );
+      return {
+        routing: sorted.map((publish) => ({
+          group: publish.MessageGroupId,
+          dedup: publish.MessageDeduplicationId,
+          attributes: publish.MessageAttributes,
+        })),
+        envelopes: sorted.map((publish) => {
+          const { payload, eventType } = JSON.parse(publish.Message) as {
+            eventType: string;
+            payload: unknown;
+          };
+          return { eventType, payload };
+        }),
+        provider,
+      };
+    };
+
+    // Scheduled tone 2 (the T+180s EventBridge Scheduler payload).
+    const scheduledDdb = createFakeDdb([METADATA_ITEM, memberSnapshot('mbr-1')]);
+    const scheduledSns = createFakeSns();
+    mockAwsClients(scheduledDdb.client, scheduledSns.client);
+    const scheduledEvaluator = await import('../escalation/toneEvaluatorHandler.js');
+    expect(
+      await scheduledEvaluator.handler({
+        deptId: 'NICHOLS',
+        dispatchId: DISPATCH_ID,
+        toneSequence: 2,
+      }),
+    ).toEqual({ outcome: 'FIRED' });
+    const scheduled = await summarize(scheduledSns.published);
+
+    // Manual advance from tone 1, on an identical fresh table.
+    vi.resetModules();
+    const manualDdb = createFakeDdb([METADATA_ITEM, memberSnapshot('mbr-1')]);
+    const manualSns = createFakeSns();
+    mockAwsClients(manualDdb.client, manualSns.client);
+    process.env.VERIFIED_PERMISSIONS_POLICY_STORE_ID = 'store-1';
+    process.env.TONE_EVALUATOR_HANDLER_ARN = 'arn:aws:lambda:us-east-1:1:function:tone-evaluator';
+    const evaluator = await import('../escalation/toneEvaluatorHandler.js');
+    // Stands in for the Lambda runtime: the route's InvokeCommand runs the real evaluator.
+    const lambdaClient = {
+      send: vi.fn(async (command: { input: { Payload: Uint8Array } }) => {
+        const payload: unknown = JSON.parse(Buffer.from(command.input.Payload).toString('utf8'));
+        const output = await evaluator.handler(payload);
+        return { Payload: Buffer.from(JSON.stringify(output)) };
+      }),
+    };
+    const { createHandler } = await import('../ladderControls/advanceHandler.js');
+    const advance = createHandler({
+      authzClient: {
+        send: vi.fn().mockResolvedValue({ decision: 'ALLOW' }),
+      } as unknown as import('@aws-sdk/client-verifiedpermissions').VerifiedPermissionsClient,
+      lambdaClient: lambdaClient as unknown as import('@aws-sdk/client-lambda').LambdaClient,
+    });
+    const response = (await advance({
+      version: '2.0',
+      routeKey: 'POST /api/v1/alerting/dispatches/{dispatchId}/tone-ladder/advance',
+      headers: { authorization: 'Bearer token-1' },
+      pathParameters: { dispatchId: DISPATCH_ID },
+      body: JSON.stringify({ expectedCurrentToneSequence: 1 }),
+      isBase64Encoded: false,
+      requestContext: {
+        authorizer: {
+          lambda: { sub: 'officer-7', deptId: 'NICHOLS', 'cognito:groups': 'OFFICER' },
+        },
+      },
+    } as unknown as import('@boxalarm/authz').GuardEvent)) as { statusCode: number; body: string };
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({
+      toneSequence: 2,
+      outcome: 'FIRED_MANUAL_OVERRIDE',
+    });
+    const manual = await summarize(manualSns.published);
+
+    // Push and SMS each get their own publish, routed on `channel`, dedup-keyed on
+    // {dispatchId, toneSequence, memberId, channel} — identical to the scheduled tone.
+    expect(manualSns.published.map(routedChannel).sort()).toEqual(['push', 'sms']);
+    expect(new Set(manual.routing.map((r) => (r as { dedup: string }).dedup)).size).toBe(2);
+    expect(manual.routing).toEqual(scheduled.routing);
+    for (const publish of manualSns.published) {
+      expect(parseChannelEnvelope(publish.Message, routedChannel(publish))).toMatchObject({
+        memberId: 'mbr-1',
+        toneSequence: 2,
+      });
+    }
+    // eventId/eventTime differ per publish by design; the page itself does not.
+    expect(manual.envelopes).toEqual(scheduled.envelopes);
+    // Both reach the provider once per channel through the real workers, and no more.
+    expect(manual.provider.mock.calls.map((call) => call.slice(0, 3)).sort()).toEqual([
+      ['push', 'tok-mbr-1', 'STRUCTURE_FIRE — 123 Main St'],
+      ['sms', '+15551234567', 'STRUCTURE_FIRE — 123 Main St'],
+    ]);
+    expect(manual.provider.mock.calls.map((call) => call.slice(0, 3))).toEqual(
+      scheduled.provider.mock.calls.map((call) => call.slice(0, 3)),
+    );
+    // Same producer-side receipt rows (the tone-2 keys), and the fire-guard is committed so
+    // the later T+180s schedule self-skips instead of paging tone 2 a second time.
+    const receiptKeys = (items: Map<string, FakeItem>) =>
+      [...items.values()]
+        .filter((item) => item.entityType === 'DELIVERY_RECEIPT')
+        .map((item) => `${item.sk}|${String(item.idempotencyKey)}`)
+        .sort();
+    expect(receiptKeys(manualDdb.items)).toEqual(receiptKeys(scheduledDdb.items));
+    expect(
+      await evaluator.handler({ deptId: 'NICHOLS', dispatchId: DISPATCH_ID, toneSequence: 2 }),
+    ).toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+    expect(manualSns.published).toHaveLength(2);
+  });
+
   it('a published Message with deptId stripped is still rejected by the parser (negative control)', async () => {
     const ddb = createFakeDdb([memberSnapshot('mbr-1')]);
     const sns = createFakeSns();

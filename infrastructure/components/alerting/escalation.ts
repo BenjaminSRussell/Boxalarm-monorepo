@@ -147,11 +147,15 @@ export class Escalation extends pulumi.ComponentResource {
             {
               Sid: "AlertingTableReadWrite",
               Effect: "Allow" as const,
+              // ConditionCheckItem: the automatic mutual-aid trigger checks, in the same
+              // transaction as its singleton put, that the ladder was not halted
+              // (escalation/mutualAidPort.ts). TransactWriteItems alone authorizes nothing.
               Action: [
                 "dynamodb:GetItem",
                 "dynamodb:Query",
                 "dynamodb:PutItem",
                 "dynamodb:UpdateItem",
+                "dynamodb:ConditionCheckItem",
                 "dynamodb:TransactWriteItems",
               ],
               Resource: tableArn,

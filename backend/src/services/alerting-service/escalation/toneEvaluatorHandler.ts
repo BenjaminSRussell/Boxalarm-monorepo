@@ -34,6 +34,7 @@ import {
   readDepartmentToneConfig,
   MUTUAL_AID_AFTER_TONE,
   TONE_SEQUENCE_THREE,
+  TONE_SEQUENCE_TWO,
 } from './toneLadder.js';
 
 const METRIC_NAMESPACE = 'Boxalarm/Alerting';
@@ -70,14 +71,26 @@ function isMetadataAdvanceRejected(error: unknown): boolean {
   );
 }
 
+/**
+ * Present only on the synchronous invocation from POST /tone-ladder/advance (F1.14). It
+ * bypasses the responder predicate for this one tone; the halt/completed/fire-guard checks
+ * and the fan-out below are the same code the scheduled evaluation runs. Scheduler payloads
+ * never carry it (toneLadder.ts builds them as {deptId, dispatchId, toneSequence}).
+ */
+export interface ManualOverride {
+  readonly triggeredBy: string;
+}
+
 export interface ToneEvaluatorPayload {
   readonly deptId: string;
   readonly dispatchId: string;
   readonly toneSequence: number;
+  readonly manualOverride?: ManualOverride;
 }
 
 export type ToneOutcome =
   | 'FIRED'
+  | 'FIRED_MANUAL_OVERRIDE'
   | 'SKIPPED_PREDICATE_MET'
   | 'SKIPPED_ALREADY_FIRED'
   | 'SKIPPED_MANUALLY_HALTED'
@@ -94,8 +107,20 @@ function isToneEvaluatorPayload(value: unknown): value is ToneEvaluatorPayload {
     candidate.deptId.length > 0 &&
     typeof candidate.dispatchId === 'string' &&
     candidate.dispatchId.length > 0 &&
-    typeof candidate.toneSequence === 'number'
+    typeof candidate.toneSequence === 'number' &&
+    (candidate.manualOverride === undefined ||
+      (isManualOverride(candidate.manualOverride) &&
+        (candidate.toneSequence === TONE_SEQUENCE_TWO ||
+          candidate.toneSequence === TONE_SEQUENCE_THREE)))
   );
+}
+
+function isManualOverride(value: unknown): value is ManualOverride {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const triggeredBy = (value as Record<string, unknown>).triggeredBy;
+  return typeof triggeredBy === 'string' && triggeredBy.trim().length > 0;
 }
 
 interface DispatchMetadata extends DispatchAlertText {
@@ -347,7 +372,7 @@ async function commitToneEvaluation(
     readonly requiredQuals: readonly string[];
     readonly respondingCount: number;
   },
-  options: { readonly advanceMetadata: boolean },
+  options: { readonly advanceMetadata: boolean; readonly triggeredBy?: string | undefined },
 ): Promise<ToneCommitResult> {
   const correlationId = `${dispatchId}#${toneSequence}`;
   const guardAndAudit: NonNullable<TransactWriteCommandInput['TransactItems']> = [
@@ -378,6 +403,7 @@ async function commitToneEvaluation(
           evaluatedAt,
           outcome,
           eligibleMemberCount,
+          ...(options.triggeredBy ? { triggeredBy: options.triggeredBy } : {}),
         },
       },
     },
@@ -447,7 +473,7 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     logError('alerting.toneLadder.malformedPayload', error, {});
     throw error;
   }
-  const { dispatchId, toneSequence } = payload;
+  const { dispatchId, toneSequence, manualOverride } = payload;
   const deptId = toVerifiedDeptId({ deptId: payload.deptId });
   const correlationId = `${dispatchId}#${toneSequence}`;
   const { tableName } = readAlertingConfig(process.env);
@@ -457,8 +483,10 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
   const scheduler = getSchedulerClient();
   const pk = buildDeptScopedPk(deptId, 'DISPATCH', dispatchId);
 
+  // Strongly consistent: a halt committed by POST /tone-ladder/halt must be seen by every
+  // evaluation that starts after it, not a replica that has not caught up yet.
   const metadataResult = await ddb.send(
-    new GetCommand({ TableName: tableName, Key: { pk, sk: 'METADATA' } }),
+    new GetCommand({ TableName: tableName, Key: { pk, sk: 'METADATA' }, ConsistentRead: true }),
   );
   const metadataItem = metadataResult.Item;
   if (!metadataItem) {
@@ -495,7 +523,11 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
   const roster = await queryRoster(ddb, tableName, deptId, dispatchId);
   const toneConfig = await readDepartmentToneConfig(ddb, tableName, deptId);
   const predicateMet = isPredicateMet(roster, toneConfig);
-  const outcome: ToneOutcome = predicateMet ? 'SKIPPED_PREDICATE_MET' : 'FIRED';
+  const outcome: ToneOutcome = manualOverride
+    ? 'FIRED_MANUAL_OVERRIDE'
+    : predicateMet
+      ? 'SKIPPED_PREDICATE_MET'
+      : 'FIRED';
   const evaluatedAt = Math.floor(Date.now() / 1000);
   const respondingCount = roster.filter(
     (entry) => entry.ackStatus === 'RESPONDING' || entry.ackStatus === 'DIRECT_TO_SCENE',
@@ -506,7 +538,7 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     respondingCount,
   };
 
-  if (predicateMet) {
+  if (predicateMet && !manualOverride) {
     const skipCommit = await commitToneEvaluation(
       ddb,
       tableName,
@@ -554,14 +586,17 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     outcome,
     eligibleMembers.length,
     predicateSnapshot,
-    { advanceMetadata: true },
+    { advanceMetadata: true, triggeredBy: manualOverride?.triggeredBy },
   );
   if (fireCommit === 'already_exists') {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });
     return { outcome: 'SKIPPED_ALREADY_FIRED' };
   }
 
-  if (toneSequence === TONE_SEQUENCE_THREE) {
+  // A manual advance bypasses the predicate to fire, but mutual aid still follows the
+  // architecture's rule — tone 3 fired with the predicate unmet — so an officer advancing a
+  // department that is already staffed does not also page the mutual-aid prompt.
+  if (toneSequence === TONE_SEQUENCE_THREE && !predicateMet) {
     try {
       await requestMutualAid({
         ddb,
@@ -578,10 +613,12 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     }
   }
 
-  emitOutcomeMetric(METRIC_NAMESPACE, 'ToneFired');
+  emitOutcomeMetric(METRIC_NAMESPACE, manualOverride ? 'ToneFiredManualOverride' : 'ToneFired');
   logInfo('alerting.toneLadder.fired', {
     correlationId,
     toneSequence,
+    outcome,
+    triggeredBy: manualOverride?.triggeredBy,
     eligibleMemberCount: eligibleMembers.length,
   });
   return { outcome };

@@ -64,6 +64,7 @@ import { FanOut } from "./components/alerting/fan-out";
 import { ChannelWorkers } from "./components/alerting/channel-workers";
 import { RoutesCore } from "./components/alerting/routes-core";
 import { RoutesOps } from "./components/alerting/routes-ops";
+import { RoutesLadderControls } from "./components/alerting/routes-ladder-controls";
 import { PushTokens } from "./components/alerting/push-tokens";
 import { RidingBoard } from "./components/alerting/riding-board";
 import { AlertingAlarms } from "./components/alerting/alarms";
@@ -693,6 +694,22 @@ export const alertingAlarms = new AlertingAlarms("alerting-alarms", {
   toneEvaluatorFunctionName: escalation.toneEvaluatorLambda.function.name,
   memberUpdatedDlq: pushTokens.memberUpdatedDlq,
   memberUpdatedFunctionName: pushTokens.memberUpdatedConsumer.function.name,
+});
+
+// F1.13/F1.14: officer tone-ladder advance/halt and mutual-aid trigger/acknowledge.
+// Declared after alertingAlarms so a failed control pages through the alerting-page topic.
+export const routesLadderControls = new RoutesLadderControls("routes-ladder-controls", {
+  env,
+  httpApi,
+  alertingTableArn: alertingTable.tableArn,
+  alertingCmkArn: alertingTable.cmkArn,
+  alertingTableName: alertingTable.tableName,
+  alertingTopicArn: messagingAlerting.topic.arn,
+  escalation,
+  logGroup: alertingLogGroup,
+  policyStoreId: policyStore.policyStoreId,
+  pageTopicArn: alertingAlarms.pageTopic.arn,
+  permissionsBoundaryArn: alertingBoundaryArn,
 });
 
 // E1-S13-INFRA #38: eligibility-snapshot staleness schedule + alarm.

@@ -151,3 +151,55 @@ test('queues a demo report export and polls it to COMPLETED with a download link
   expect(job.status).toBe('COMPLETED');
   expect(job.downloadUrl).toBeTruthy();
 });
+
+test('demo tone ladder: advance is guarded by the observed tone, halt then blocks advance', async () => {
+  const detail = async () =>
+    (await (await apiRequest('alerting/dispatches/DEMO-LADDER', tokens)).json()) as {
+      toneLadder: { status: string; currentToneSequence: number };
+    };
+  const post = (control: string, body?: unknown) =>
+    apiRequest(`alerting/dispatches/DEMO-LADDER/${control}`, tokens, {
+      method: 'POST',
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  expect((await detail()).toneLadder).toMatchObject({ status: 'ACTIVE', currentToneSequence: 1 });
+  const fired = (await (
+    await post('tone-ladder/advance', { expectedCurrentToneSequence: 1 })
+  ).json()) as { toneSequence: number };
+  expect(fired.toneSequence).toBe(2);
+  // A double-submit of the same observed tone never fires a further tone.
+  await expect(
+    post('tone-ladder/advance', { expectedCurrentToneSequence: 1 }),
+  ).rejects.toMatchObject({ problem: { status: 409 } });
+
+  expect(await (await post('tone-ladder/halt')).json()).toMatchObject({ changed: true });
+  expect(await (await post('tone-ladder/halt')).json()).toMatchObject({ changed: false });
+  await expect(
+    post('tone-ladder/advance', { expectedCurrentToneSequence: 2 }),
+  ).rejects.toMatchObject({ problem: { status: 409 } });
+  expect((await detail()).toneLadder).toMatchObject({
+    status: 'HALTED_MANUAL',
+    currentToneSequence: 2,
+  });
+});
+
+test('demo mutual aid: trigger once, acknowledge once, and acknowledge before trigger is a 409', async () => {
+  const post = (control: string, body?: unknown) =>
+    apiRequest(`alerting/dispatches/DEMO-MA/${control}`, tokens, {
+      method: 'POST',
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  await expect(post('mutual-aid/acknowledge')).rejects.toMatchObject({ problem: { status: 409 } });
+  expect(await (await post('mutual-aid/trigger')).json()).toMatchObject({ created: true });
+  expect(await (await post('mutual-aid/trigger')).json()).toMatchObject({ created: false });
+  expect(
+    await (await post('mutual-aid/acknowledge', { notes: 'Called Trumbull Center' })).json(),
+  ).toMatchObject({ changed: true, mutualAid: { notes: 'Called Trumbull Center' } });
+  const detail = (await (await apiRequest('alerting/dispatches/DEMO-MA', tokens)).json()) as {
+    mutualAid: { reason: string; acknowledgedAt: number | null };
+  };
+  expect(detail.mutualAid.reason).toBe('MANUAL');
+  expect(detail.mutualAid.acknowledgedAt).not.toBeNull();
+});

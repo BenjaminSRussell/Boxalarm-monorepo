@@ -29,6 +29,25 @@ export interface PrePlanEnrichment {
   nearestHydrants: NearestHydrant[];
 }
 
+export type ToneLadderStatus = 'ACTIVE' | 'HALTED_MANUAL' | 'COMPLETED';
+
+/** GET /alerting/dispatches/{id} `toneLadder` (F1.14). */
+export interface ToneLadder {
+  status: ToneLadderStatus | string;
+  currentToneSequence: number;
+  nextToneAt: number | null;
+}
+
+/** The MUTUAL_AID_EVENT projection (F1.13). */
+export interface MutualAid {
+  triggeredAt: number | null;
+  reason: string | null;
+  triggeredBy: string | null;
+  acknowledgedBy: string | null;
+  acknowledgedAt: number | null;
+  notes: string | null;
+}
+
 export interface DispatchAlert {
   dispatchId: string;
   incidentType: string;
@@ -37,6 +56,35 @@ export interface DispatchAlert {
   mapLink: string | null;
   narrative: string;
   prePlan?: PrePlanEnrichment | null;
+  toneLadder?: ToneLadder;
+  /** null = not requested; absent = the server could not read it (state unknown). */
+  mutualAid?: MutualAid | null;
+}
+
+export interface AdvanceToneResult {
+  dispatchId: string;
+  toneSequence: number;
+  outcome: string;
+}
+
+export interface HaltToneLadderResult {
+  dispatchId: string;
+  toneLadder: { status: string; currentToneSequence: number };
+  changed: boolean;
+}
+
+export interface TriggerMutualAidResult {
+  dispatchId: string;
+  created: boolean;
+  /** Officers pushed by this request; null when mutual aid had already been requested. */
+  officersNotified: number | null;
+  mutualAid: MutualAid | null;
+}
+
+export interface AcknowledgeMutualAidResult {
+  dispatchId: string;
+  changed: boolean;
+  mutualAid: MutualAid;
 }
 
 /** One row of GET alerting/dispatches?status=active (dispatches/list/handler.ts). */

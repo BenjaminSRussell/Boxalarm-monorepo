@@ -558,3 +558,155 @@ describe('toneEvaluatorHandler', () => {
     expect(items.get(`${PK}#METADATA`)?.toneLadderStatus).toBe('COMPLETED');
   });
 });
+
+// POST /tone-ladder/advance (F1.14) invokes this same handler with `manualOverride`: the only
+// difference from a scheduled evaluation is that the responder predicate does not gate the
+// fire. Everything else — halt/completed checks, the TONE#{n} fire-guard, receipts, publishes
+// and the METADATA advance — is the scheduled path.
+describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () => {
+  const originalEnv = { ...process.env };
+  const RESPONDING: FakeItem = {
+    pk: PK,
+    sk: 'ROSTER#mbr-1',
+    entityType: 'DISPATCH_ROSTER_ENTRY',
+    memberId: 'mbr-1',
+    ackStatus: 'RESPONDING',
+    quals: [],
+  };
+  const manual = (toneSequence: number) => ({
+    deptId: 'NICHOLS',
+    dispatchId: 'dispatch-1',
+    toneSequence,
+    manualOverride: { triggeredBy: 'officer-7' },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requestMutualAid.mockClear();
+    process.env.ESCALATION_HANDLER_ARN = 'arn:aws:lambda:us-east-1:1:function:escalation';
+    process.env.ESCALATION_SCHEDULER_ROLE_ARN = 'arn:aws:iam::1:role/scheduler';
+    process.env.ESCALATION_SCHEDULE_GROUP_NAME = 'boxalarm-dev-alerting-escalation';
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  async function load(seed: readonly FakeItem[]) {
+    const fake = createFakeDdb(seed);
+    const { createDynamoClient } = await import('../eligibility/dynamoClient.js');
+    const { createSnsClient } = await import('../fanout/snsClient.js');
+    vi.mocked(createDynamoClient).mockReturnValue({
+      send: fake.send,
+    } as unknown as DynamoDBDocumentClient);
+    vi.mocked(createSnsClient).mockReturnValue(fake.sns as never);
+    const { handler } = await import('./toneEvaluatorHandler.js');
+    return { ...fake, handler };
+  }
+
+  it('fires the tone even though the responder predicate is met, and records who advanced it', async () => {
+    const { handler, sns, items, send } = await load([METADATA_ITEM, ELIGIBLE_MEMBER, RESPONDING]);
+
+    await expect(handler(manual(2))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+
+    // Same page a scheduled tone 2 publishes: one push, toneSequence 2 on the dedup key.
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+    const publish = (sns.send.mock.calls[0]![0] as { input: Record<string, unknown> }).input;
+    expect(JSON.parse(publish.Message as string)).toMatchObject({
+      eventType: 'alerting.dispatch.normalized',
+      payload: { toneSequence: 2, channel: 'push' },
+    });
+    expect(items.get(`${PK}#RECEIPT#mbr-1#push#2`)).toMatchObject({
+      idempotencyKey: 'dispatch-1#2#mbr-1#push',
+      toneSequence: 2,
+    });
+    expect(items.get(`${PK}#TONE#2`)).toBeDefined();
+    expect(items.get(`${PK}#METADATA`)?.currentToneSequence).toBe(2);
+    const audit = [...items.values()].find(
+      (item) => item.entityType === 'TONE_EVENT' && item.sk.startsWith('TONE#2#'),
+    );
+    expect(audit).toMatchObject({ outcome: 'FIRED_MANUAL_OVERRIDE', triggeredBy: 'officer-7' });
+    const outbox = [...items.values()].find((item) => item.entityType === 'OUTBOX_ENTRY');
+    expect(outbox).toMatchObject({
+      eventType: 'alerting.tone.escalated',
+      payload: { toneSequence: 2, outcome: 'FIRED_MANUAL_OVERRIDE' },
+    });
+    // The halt check reads committed state, never a lagging replica.
+    const metadataRead = vi
+      .mocked(send)
+      .mock.calls.map((call) => call[0] as unknown as { input: { Key?: { sk: string } } })
+      .find((command) => command.input.Key?.sk === 'METADATA');
+    expect(metadataRead?.input).toMatchObject({ ConsistentRead: true });
+  });
+
+  it('lets the later scheduled evaluation of the same tone self-skip (AP 5d: no double tone)', async () => {
+    const { handler, sns } = await load([METADATA_ITEM, ELIGIBLE_MEMBER]);
+
+    await handler(manual(2));
+    const scheduled = await handler({
+      deptId: 'NICHOLS',
+      dispatchId: 'dispatch-1',
+      toneSequence: 2,
+    });
+
+    expect(scheduled).toEqual({ outcome: 'SKIPPED_ALREADY_FIRED' });
+    expect(sns.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('a double-submitted advance of the same tone pages once', async () => {
+    const { handler, sns } = await load([METADATA_ITEM, ELIGIBLE_MEMBER]);
+
+    const [first, second] = await Promise.all([handler(manual(2)), handler(manual(2))]);
+
+    expect([first.outcome, second.outcome].sort()).toEqual([
+      'FIRED_MANUAL_OVERRIDE',
+      'SKIPPED_ALREADY_FIRED',
+    ]);
+    expect(publishedMemberIds(sns)).toEqual(['mbr-1']);
+  });
+
+  it('does not fire on a halted ladder', async () => {
+    const { handler, sns } = await load([
+      { ...METADATA_ITEM, toneLadderStatus: 'HALTED_MANUAL' },
+      ELIGIBLE_MEMBER,
+    ]);
+
+    await expect(handler(manual(2))).resolves.toEqual({ outcome: 'SKIPPED_MANUALLY_HALTED' });
+    expect(sns.send).not.toHaveBeenCalled();
+  });
+
+  it('advancing to tone 3 with the predicate unmet requests mutual aid like the scheduled tone 3', async () => {
+    const { handler } = await load([{ ...METADATA_ITEM, currentToneSequence: 2 }, ELIGIBLE_MEMBER]);
+
+    await expect(handler(manual(3))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+    expect(requestMutualAid).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'TONE_3_PREDICATE_UNMET' }),
+    );
+  });
+
+  it('advancing to tone 3 with the predicate met pages tone 3 but does not request mutual aid', async () => {
+    const { handler, sns } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+      RESPONDING,
+    ]);
+
+    await expect(handler(manual(3))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+    expect(sns.send).toHaveBeenCalledTimes(1);
+    expect(requestMutualAid).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['tone 1', { toneSequence: 1, manualOverride: { triggeredBy: 'officer-7' } }],
+    ['tone 4', { toneSequence: 4, manualOverride: { triggeredBy: 'officer-7' } }],
+    ['no triggeredBy', { toneSequence: 2, manualOverride: { triggeredBy: ' ' } }],
+    ['non-object override', { toneSequence: 2, manualOverride: 'officer-7' }],
+  ])('rejects a malformed manual payload (%s) without paging', async (_label, extra) => {
+    const { handler, sns } = await load([METADATA_ITEM, ELIGIBLE_MEMBER]);
+
+    await expect(
+      handler({ deptId: 'NICHOLS', dispatchId: 'dispatch-1', ...extra }),
+    ).rejects.toThrow('tone evaluator payload failed shape validation');
+    expect(sns.send).not.toHaveBeenCalled();
+  });
+});

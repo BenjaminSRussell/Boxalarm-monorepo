@@ -103,6 +103,12 @@ function seedDispatch(dispatchId: string, input?: Partial<DispatchAlert>): Dispa
     crossStreets: input?.crossStreets ?? 'Main St & Nichols Ave',
     mapLink: input?.mapLink ?? null,
     narrative: input?.narrative ?? 'Smoke showing from the second floor.',
+    toneLadder: {
+      status: 'ACTIVE',
+      currentToneSequence: 1,
+      nextToneAt: Math.floor(Date.now() / 1000) + 180,
+    },
+    mutualAid: null,
     prePlan: {
       summary: 'Two-story wood-frame occupancy, residential above commercial.',
       hazards: ['Rooftop solar array'],
@@ -191,6 +197,136 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function conflict(detail: string): Response {
+  return new Response(
+    JSON.stringify({
+      type: 'https://boxalarm.dev/problems/conflict',
+      title: 'Conflict',
+      status: 409,
+      detail,
+      traceId: 'demo',
+    }),
+    { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+  );
+}
+
+const FINAL_TONE = 3;
+
+/** Mirrors alerting-service/ladderControls: same preconditions, same 409s, same bodies. */
+function demoLadderControl(
+  dispatchId: string,
+  control: string,
+  body: Record<string, unknown>,
+): Response | null {
+  ensureSeeded(dispatchId);
+  const dispatch = DISPATCHES.get(dispatchId)!;
+  const ladder = dispatch.toneLadder!;
+  const now = Math.floor(Date.now() / 1000);
+
+  if (control === 'tone-ladder/advance') {
+    if (ladder.status === 'HALTED_MANUAL') {
+      return conflict('The tone ladder is halted. No tone was sent.');
+    }
+    if (ladder.status === 'COMPLETED' || ladder.currentToneSequence >= FINAL_TONE) {
+      return conflict('Every tone has already fired. No tone was sent.');
+    }
+    if (body.expectedCurrentToneSequence !== ladder.currentToneSequence) {
+      return conflict(
+        `The ladder is now at tone ${ladder.currentToneSequence}, not tone ${String(body.expectedCurrentToneSequence)}. No tone was sent; refresh before advancing again.`,
+      );
+    }
+    const toneSequence = ladder.currentToneSequence + 1;
+    dispatch.toneLadder = {
+      status: toneSequence >= FINAL_TONE ? 'COMPLETED' : 'ACTIVE',
+      currentToneSequence: toneSequence,
+      nextToneAt: toneSequence >= FINAL_TONE ? null : now + 180,
+    };
+    const roster = ROSTERS.get(dispatchId) ?? [];
+    RECEIPTS.set(dispatchId, [
+      ...(RECEIPTS.get(dispatchId) ?? []),
+      ...roster.map((entry) => ({
+        memberId: entry.memberId,
+        channel: 'PUSH',
+        toneSequence,
+        status: 'SENT' as const,
+        sentAt: now,
+        deliveredAt: null,
+        openedAt: null,
+        failureReason: null,
+      })),
+    ]);
+    return json({ dispatchId, toneSequence, outcome: 'FIRED_MANUAL_OVERRIDE' });
+  }
+
+  if (control === 'tone-ladder/halt') {
+    if (ladder.status === 'HALTED_MANUAL') {
+      return json({ dispatchId, toneLadder: ladder, changed: false });
+    }
+    if (ladder.status === 'COMPLETED' || ladder.currentToneSequence >= FINAL_TONE) {
+      return conflict('Every tone has already fired, so there is nothing left to halt.');
+    }
+    dispatch.toneLadder = { ...ladder, status: 'HALTED_MANUAL', nextToneAt: null };
+    return json({
+      dispatchId,
+      toneLadder: { status: 'HALTED_MANUAL', currentToneSequence: ladder.currentToneSequence },
+      changed: true,
+    });
+  }
+
+  if (control === 'mutual-aid/trigger') {
+    if (dispatch.mutualAid) {
+      return json({
+        dispatchId,
+        created: false,
+        officersNotified: null,
+        adapterUsed: 'OFFICER_MANUAL_PROMPT',
+        mutualAid: dispatch.mutualAid,
+      });
+    }
+    dispatch.mutualAid = {
+      triggeredAt: now,
+      reason: 'MANUAL',
+      triggeredBy: 'demo-officer',
+      acknowledgedBy: null,
+      acknowledgedAt: null,
+      notes: null,
+    };
+    return json({
+      dispatchId,
+      created: true,
+      officersNotified: 2,
+      adapterUsed: 'OFFICER_MANUAL_PROMPT',
+      mutualAid: dispatch.mutualAid,
+    });
+  }
+
+  if (control === 'mutual-aid/acknowledge') {
+    const mutualAid = dispatch.mutualAid;
+    if (!mutualAid) {
+      return conflict(
+        'Mutual aid has not been requested for this dispatch, so there is nothing to acknowledge.',
+      );
+    }
+    if (mutualAid.acknowledgedAt !== null) {
+      return mutualAid.acknowledgedBy === 'demo-officer'
+        ? json({ dispatchId, changed: false, mutualAid })
+        : conflict(
+            'Mutual aid was already acknowledged by another officer. Your notes were not saved.',
+          );
+    }
+    const notes = typeof body.notes === 'string' && body.notes.trim() ? body.notes.trim() : null;
+    dispatch.mutualAid = {
+      ...mutualAid,
+      acknowledgedBy: 'demo-officer',
+      acknowledgedAt: now,
+      notes,
+    };
+    return json({ dispatchId, changed: true, mutualAid: dispatch.mutualAid });
+  }
+
+  return null;
 }
 
 /** Returns null when the path isn't an alerting/apparatus-riding-board route this file owns. */
@@ -303,6 +439,21 @@ export function demoAlertsRequest(
       deviceState: DEVICE_STATES.get(memberId) ?? null,
     };
     return json(result);
+  }
+
+  if (
+    parts[0] === 'alerting' &&
+    parts[1] === 'dispatches' &&
+    parts.length === 5 &&
+    (parts[3] === 'tone-ladder' || parts[3] === 'mutual-aid') &&
+    method === 'POST'
+  ) {
+    const response = demoLadderControl(
+      decodeURIComponent(parts[2] ?? ''),
+      `${parts[3]}/${parts[4] ?? ''}`,
+      body,
+    );
+    if (response) return response;
   }
 
   if (path === 'alerting/canary/status' && method === 'GET') {
