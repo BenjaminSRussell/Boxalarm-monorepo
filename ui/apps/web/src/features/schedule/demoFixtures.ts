@@ -3,8 +3,8 @@ import type { DutyShift, ShiftCoverage } from './types';
 let shifts: DutyShift[] = [
   {
     shiftId: 's-1',
-    startAt: 1758391200,
-    endAt: 1758434400,
+    startAt: 1758391200000,
+    endAt: 1758434400000,
     stationId: 'STATION-1',
     status: 'OPEN',
   },
@@ -13,8 +13,8 @@ let shifts: DutyShift[] = [
 const coverage: ShiftCoverage[] = [
   {
     shiftId: 's-1',
-    startAt: 1758391200,
-    endAt: 1758434400,
+    startAt: 1758391200000,
+    endAt: 1758434400000,
     stationId: 'STATION-1',
     status: 'short',
     positions: [

@@ -19,8 +19,11 @@ const COVERAGE_WORD: Record<CoverageStatus, string> = {
   'qual-gapped': 'Missing qual',
 };
 
-function toEpochSeconds(localDateTime: string): number {
-  return Math.floor(new Date(localDateTime).getTime() / 1000);
+// DUTY_SHIFT.startAt/endAt are epoch MILLISECONDS (personnel-service shifts/
+// completeShiftAttendance.ts; coverage and claim compare them with Date.now()). Sending
+// seconds made every web-created shift read as 1970 — never in coverage, never completable.
+function toEpochMillis(localDateTime: string): number {
+  return new Date(localDateTime).getTime();
 }
 
 const emptyPosition: CreateShiftPosition = { positionCode: '', requiredQual: '' };
@@ -38,8 +41,8 @@ function CreateShiftForm({ onCreated }: { onCreated: () => void }) {
   const createMutation = useMutation({
     mutationFn: () =>
       createShift(auth, {
-        startAt: toEpochSeconds(startAt),
-        endAt: toEpochSeconds(endAt),
+        startAt: toEpochMillis(startAt),
+        endAt: toEpochMillis(endAt),
         stationId,
         positions: positions
           .filter((position) => position.positionCode.trim().length > 0)
@@ -253,8 +256,8 @@ export function SchedulePage() {
         <ul style={{ listStyle: 'none', padding: 0 }}>
           {(shiftsQuery.data ?? []).map((shift) => (
             <li key={shift.shiftId} style={{ padding: 'var(--bx-space-sm) 0' }}>
-              <strong>{shift.stationId}</strong> — {new Date(shift.startAt * 1000).toLocaleString()}{' '}
-              — {shift.status}
+              <strong>{shift.stationId}</strong> — {new Date(shift.startAt).toLocaleString()} —{' '}
+              {shift.status}
             </li>
           ))}
         </ul>
