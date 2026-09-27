@@ -36,6 +36,14 @@ export class AlertingCanary extends pulumi.ComponentResource {
   public readonly failureAlarm: aws.cloudwatch.MetricAlarm;
   public readonly latencyAlarm: aws.cloudwatch.MetricAlarm;
   public readonly errorsAlarm: aws.cloudwatch.MetricAlarm;
+  /** Whether this stack runs the canary (`boxalarm-infra:canaryEnabled`). */
+  public readonly enabled: boolean;
+  /**
+   * How old the latest CANARY_RUN may be before alerting readiness treats the canary as
+   * stalled: three schedule ticks, and never under 10 minutes so the 60 s self-test
+   * cooldown skipping a tick cannot flap readiness.
+   */
+  public readonly maxRunAgeSeconds: number;
 
   constructor(name: string, args: AlertingCanaryArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("AlertingCanary", args.env);
@@ -50,6 +58,8 @@ export class AlertingCanary extends pulumi.ComponentResource {
     // off, its breaching-on-missing alarms must not page, so their actions are disabled too.
     const canaryEnabled = config.getBoolean("canaryEnabled") ?? false;
     const canaryMemberId = config.requireSecret("canaryMemberId");
+    this.enabled = canaryEnabled;
+    this.maxRunAgeSeconds = Math.max(rateMinutes * 60 * 3, 600);
 
     this.lambda = new ServiceLambda(
       `${name}-fn`,

@@ -702,4 +702,55 @@ export const LAMBDA_ENTRIES = [
     function: 'digest-job',
     entry: 'src/services/notification-service/digest/digestJob.ts',
   },
+  // One health Lambda per service serves GET health/liveness and health/readiness.
+  {
+    service: 'alerting-service',
+    function: 'health',
+    entry: 'src/services/alerting-service/health/handler.ts',
+  },
+  {
+    service: 'platform-service',
+    function: 'health',
+    entry: 'src/services/platform-service/health/handler.ts',
+  },
+  {
+    service: 'personnel-service',
+    function: 'health',
+    entry: 'src/services/personnel-service/health/handler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'health',
+    entry: 'src/services/apparatus-service/health/handler.ts',
+  },
+  {
+    service: 'incident-service',
+    function: 'health',
+    entry: 'src/services/incident-service/health/handler.ts',
+  },
+  {
+    service: 'training-service',
+    function: 'health',
+    entry: 'src/services/training-service/health/handler.ts',
+  },
+  {
+    service: 'reporting-service',
+    function: 'health',
+    entry: 'src/services/reporting-service/health/handler.ts',
+  },
+  {
+    service: 'inspections-service',
+    function: 'health',
+    entry: 'src/services/inspections-service/health/handler.ts',
+  },
+  {
+    service: 'inventory-service',
+    function: 'health',
+    entry: 'src/services/inventory-service/health/handler.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'health',
+    entry: 'src/services/notification-service/health/handler.ts',
+  },
 ];
