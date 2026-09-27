@@ -99,7 +99,7 @@ export async function createHydrant(
   };
 
   const listIndexItem = {
-    pk: item.pk,
+    pk: buildDeptScopedPk(deptId, 'HYDRANT', input.hydrantId),
     sk: HYDRANT_LIST_SK,
     entityType: 'HYDRANT_LIST_INDEX',
     hydrantId: input.hydrantId,
