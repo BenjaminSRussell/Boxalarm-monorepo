@@ -5,6 +5,8 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { SNSClient } from '@aws-sdk/client-sns';
 import type { SchedulerClient } from '@aws-sdk/client-scheduler';
 import type { DynamoDBStreamEvent } from 'aws-lambda';
+import { escalationScheduleName } from '../escalation/scheduleEscalation.js';
+import { toneScheduleName } from '../escalation/toneLadder.js';
 
 interface FakeItem {
   pk: string;
@@ -915,9 +917,9 @@ describe('fanout/handler', () => {
 
     expect(new Set(scheduler.attemptedNames)).toEqual(
       new Set([
-        'esc-NICHOLS-NICHOLS-1-1798000000-mbr-1-1',
-        'tone-NICHOLS-NICHOLS-1-1798000000-2',
-        'tone-NICHOLS-NICHOLS-1-1798000000-3',
+        escalationScheduleName('NICHOLS', 'NICHOLS-1-1798000000', 'mbr-1', 1),
+        toneScheduleName('NICHOLS', 'NICHOLS-1-1798000000', 2),
+        toneScheduleName('NICHOLS', 'NICHOLS-1-1798000000', 3),
       ]),
     );
     expect(scheduler.attemptedNames).toHaveLength(6);

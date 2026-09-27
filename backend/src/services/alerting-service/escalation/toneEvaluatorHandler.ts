@@ -687,7 +687,14 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     outcome,
     eligibleMembers.length,
     predicateSnapshot,
-    { advanceMetadata: true, triggeredBy: manualOverride?.triggeredBy, upgradeSkippedGuard },
+    // Always upgrade-capable for a manual advance, even when no skip guard was seen at read
+    // time: a timer evaluation can write its skip guard in between, and the advance - which
+    // has already paged everyone - must still claim the tone rather than report 'not sent'.
+    {
+      advanceMetadata: true,
+      triggeredBy: manualOverride?.triggeredBy,
+      upgradeSkippedGuard: manualOverride !== undefined,
+    },
   );
   if (fireCommit === 'already_exists') {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });

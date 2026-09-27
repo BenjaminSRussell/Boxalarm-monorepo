@@ -35,7 +35,7 @@ export function resolveSmsTarget(
   contactChannels: readonly ContactChannelSnapshot[] | undefined,
 ): ResolveSmsTargetResult {
   const entry = (contactChannels ?? []).find(
-    (channel) => channel.channel.toUpperCase() === 'SMS' && channel.valid !== false,
+    (channel) => String(channel.channel ?? '').toUpperCase() === 'SMS' && channel.valid !== false,
   );
   const number = entry?.phoneNumber ?? entry?.token;
   if (!number) {

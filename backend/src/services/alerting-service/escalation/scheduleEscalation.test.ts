@@ -77,7 +77,8 @@ describe('createEscalationSchedule', () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     const command = send.mock.calls[0]?.[0] as { input: Record<string, unknown> };
-    expect(command.input.Name).toBe('esc-NICHOLS-dispatch-1-mbr-1-1');
+    const { escalationScheduleName } = await import('./scheduleEscalation.js');
+    expect(command.input.Name).toBe(escalationScheduleName('NICHOLS', 'dispatch-1', 'mbr-1', 1));
     // IAM scopes CreateSchedule to schedule/<dedicated group>/* — omitting GroupName
     // lands the schedule in `default` and is denied.
     expect(command.input.GroupName).toBe('boxalarm-dev-alerting-escalation');

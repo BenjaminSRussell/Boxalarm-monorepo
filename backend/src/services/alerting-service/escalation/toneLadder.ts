@@ -5,6 +5,7 @@ import {
 } from '@aws-sdk/client-scheduler';
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
+import { createHash } from 'node:crypto';
 import { readScheduleGroupName } from './scheduleEscalation.js';
 
 export const TONE_SEQUENCE_TWO = 2;
@@ -79,6 +80,19 @@ export function readToneEvaluatorSchedulerConfig(
   };
 }
 
+/**
+ * Unique within 64 characters: `tone-{deptId}-{dispatchId}-{tone}`.slice(0, 64) dropped the
+ * tone for a deptId over 14 characters, merging the tone-3 schedule into tone 2's
+ * (ConflictException, treated as created) - tone 3 would silently never be evaluated.
+ */
+export function toneScheduleName(deptId: string, dispatchId: string, toneSequence: number): string {
+  const digest = createHash('sha256')
+    .update(`${deptId}#${dispatchId}#${toneSequence}`)
+    .digest('hex')
+    .slice(0, 48);
+  return `tone-${toneSequence}-${digest}`;
+}
+
 async function createToneSchedule(
   scheduler: SchedulerClient,
   config: ToneEvaluatorSchedulerConfig,
@@ -88,7 +102,7 @@ async function createToneSchedule(
   delaySeconds: number,
 ): Promise<void> {
   const fireAt = Math.floor(Date.now() / 1000) + delaySeconds;
-  const scheduleName = `tone-${deptId}-${dispatchId}-${toneSequence}`.slice(0, 64);
+  const scheduleName = toneScheduleName(deptId, dispatchId, toneSequence);
   try {
     await scheduler.send(
       new CreateScheduleCommand({

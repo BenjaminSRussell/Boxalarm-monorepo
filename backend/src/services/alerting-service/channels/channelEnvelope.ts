@@ -242,7 +242,8 @@ function findContact(
   key: string,
 ): ContactChannelSnapshot | undefined {
   return (contactChannels ?? []).find(
-    (candidate) => candidate.channel.toUpperCase() === key && candidate.valid !== false,
+    (candidate) =>
+      String(candidate.channel ?? '').toUpperCase() === key && candidate.valid !== false,
   );
 }
 

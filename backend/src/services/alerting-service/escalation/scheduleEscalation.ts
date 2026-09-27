@@ -5,6 +5,7 @@ import {
 } from '@aws-sdk/client-scheduler';
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
+import { createHash } from 'node:crypto';
 import AWSXRay from 'aws-xray-sdk-core';
 import { logInfo } from '../dispatches/logger.js';
 
@@ -72,6 +73,27 @@ export async function readEscalationThresholdSeconds(
   return threshold;
 }
 
+/**
+ * EventBridge Scheduler names are at most 64 characters. The old name
+ * `esc-{deptId}-{dispatchId}-{memberId}-{tone}`.slice(0, 64) cut the tone off for a real
+ * dispatchId + Cognito-sub memberId (85 chars), so tone-2/3 voice schedules collided with the
+ * tone-1 schedule, got ConflictException - treated as already scheduled - and were never
+ * created: members ignoring tones 2 and 3 were silently never voice-called. The identity is
+ * hashed so every {dept, dispatch, member, tone} gets its own name, tone first for reading.
+ */
+export function escalationScheduleName(
+  deptId: string,
+  dispatchId: string,
+  memberId: string,
+  toneSequence: number,
+): string {
+  const digest = createHash('sha256')
+    .update(`${deptId}#${dispatchId}#${memberId}#${toneSequence}`)
+    .digest('hex')
+    .slice(0, 48);
+  return `esc-${toneSequence}-${digest}`;
+}
+
 export interface CreateEscalationScheduleInput {
   readonly deptId: VerifiedDeptId;
   readonly dispatchId: string;
@@ -94,7 +116,7 @@ export async function createEscalationSchedule(
       ? await readEscalationThresholdSeconds(ddb, tableName, deptId)
       : DEFAULT_ESCALATION_THRESHOLD_SECONDS);
   const fireAt = Math.floor(Date.now() / 1000) + delaySeconds;
-  const scheduleName = `esc-${deptId}-${dispatchId}-${memberId}-${toneSequence}`.slice(0, 64);
+  const scheduleName = escalationScheduleName(deptId, dispatchId, memberId, toneSequence);
 
   try {
     await scheduler.send(
