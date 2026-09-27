@@ -1,4 +1,5 @@
 import { assertNoDelimiter, type VerifiedDeptId } from '@boxalarm/dept-scope';
+import { contactPhone, findContactEntry } from '../eligibility/resolvePushTarget.js';
 
 export type ChannelName = 'push' | 'sms' | 'voice';
 
@@ -237,25 +238,11 @@ export type ResolveChannelTargetResult =
   | { readonly skipped: true; readonly reason: string }
   | { readonly skipped: false; readonly target: string };
 
-function findContact(
-  contactChannels: readonly ContactChannelSnapshot[] | undefined,
-  key: string,
-): ContactChannelSnapshot | undefined {
-  return (contactChannels ?? []).find(
-    (candidate) =>
-      String(candidate.channel ?? '').toUpperCase() === key && candidate.valid !== false,
-  );
-}
-
-function phoneOf(entry: ContactChannelSnapshot | undefined): string | undefined {
-  return entry?.phoneNumber ?? entry?.token;
-}
-
 /**
  * Resolves the worker's send target from the eligibility snapshot's contact channels. The
  * producers (fanout/handler.ts, toneEvaluatorHandler.ts via eligibility/resolvePushTarget.ts)
- * decide which channels to publish from the same snapshot, so both sides must accept the
- * same shapes - a mismatch means the producer publishes and the worker silently finds no
+ * decide which channels to publish from the same snapshot with the same findContactEntry,
+ * so both sides accept the same shapes - a mismatch means the producer publishes and the worker silently finds no
  * target (the recurring SMS-never-sends defect, #12). Accepted, case-insensitively:
  *  - push: a PUSH entry's token (registerToken.ts);
  *  - sms: an SMS entry's phone, as phoneNumber or token (maintainMemberSnapshot.ts writes
@@ -269,11 +256,11 @@ export function resolveChannelTarget(
 ): ResolveChannelTargetResult {
   const target =
     channel === 'push'
-      ? findContact(contactChannels, 'PUSH')?.token
+      ? findContactEntry(contactChannels, 'PUSH')?.token
       : channel === 'sms'
-        ? phoneOf(findContact(contactChannels, 'SMS'))
-        : (phoneOf(findContact(contactChannels, 'VOICE')) ??
-          phoneOf(findContact(contactChannels, 'SMS')));
+        ? contactPhone(findContactEntry(contactChannels, 'SMS'))
+        : (contactPhone(findContactEntry(contactChannels, 'VOICE')) ??
+          contactPhone(findContactEntry(contactChannels, 'SMS')));
   if (!target) {
     return { skipped: true, reason: noTargetReason(channel) };
   }

@@ -41,6 +41,26 @@ describe('contact channel shape: snapshot writer ↔ producers ↔ channel worke
     });
   });
 
+  // Review MINOR-R8: the producer demanded exact-case 'PUSH' and a platform the worker never
+  // needed - the producer-stricter direction, where the page is never published at all.
+  it.each([
+    ['lowercase channel', { channel: 'push', token: 'tok-1' }],
+    ['no platform', { channel: 'PUSH', token: 'tok-1' }],
+  ])('a push entry with %s resolves on both sides', (_label, entry) => {
+    expect(resolvePushTarget([entry])).toMatchObject({ skipped: false, token: 'tok-1' });
+    expect(resolveChannelTarget('push', [entry])).toEqual({ skipped: false, target: 'tok-1' });
+  });
+
+  it('a malformed entry is ignored by both sides, never thrown on', () => {
+    const malformed = [{ token: 'x' }, null, { channel: 7 }] as unknown as Parameters<
+      typeof resolveSmsTarget
+    >[0];
+    const contacts = [...(malformed ?? []), writerSms];
+    expect(resolveSmsTarget(contacts)).toEqual({ skipped: false, number: phone });
+    expect(resolvePushTarget(contacts).skipped).toBe(true);
+    expect(resolveChannelTarget('sms', contacts)).toEqual({ skipped: false, target: phone });
+  });
+
   it('an invalid entry is skipped by both sides', () => {
     const invalid = { ...writerSms, valid: false };
     expect(resolveSmsTarget([invalid]).skipped).toBe(true);
