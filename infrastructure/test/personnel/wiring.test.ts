@@ -14,6 +14,7 @@ import {
   CMK_ARN,
   BOUNDARY_ARN,
   REGION,
+  grantsFor,
   installMocks,
   isGranted,
   lambdaEnv,
@@ -130,11 +131,70 @@ describe("personnel Lambdas: env and IAM match their handlers", { timeout: 30_00
     });
   });
 
+  describe("members update-roles (F2.7)", () => {
+    const FN = "boxalarm-dev-personnel-members-update-roles";
+    const POOL_ARN = "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_pool";
+
+    function allowedActions(prefix: string): string[] {
+      return statementsForRole(FN)
+        .filter((st) => st.Effect === "Allow")
+        .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]))
+        .filter((action) => action.startsWith(prefix))
+        .sort();
+    }
+
+    it("is routed at PUT /members/{memberId}/roles behind the API's authorizer", async () => {
+      await build();
+      const route = resourcesOfType("aws:apigatewayv2/route:Route").find(
+        (r) => r.inputs.routeKey === "PUT /api/v1/personnel/members/{memberId}/roles",
+      );
+      expect(route?.inputs.authorizationType).toBe("CUSTOM");
+      expect(route?.inputs.authorizerId).toBeTruthy();
+    });
+
+    it("carries exactly the env its handler reads: the table and the user pool", async () => {
+      await build();
+      const env = lambdaEnv(FN);
+      expect(env.PERSONNEL_TABLE_NAME).toBe("boxalarm-dev-platform-service");
+      expect(env.COGNITO_USER_POOL_ID).toBe("us-east-1_pool");
+      expect(env.VERIFIED_PERMISSIONS_POLICY_STORE_ID).toBeUndefined();
+    });
+
+    it("holds only GetItem + UpdateItem + PutItem on the platform table, with the audit deny", async () => {
+      await build();
+      const s = statementsForRole(FN);
+      expect(allowedActions("dynamodb:")).toEqual([
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+      ]);
+      for (const action of allowedActions("dynamodb:")) {
+        expect(isGranted(s, action, TABLE), action).toBe(true);
+      }
+      expect(s.some((st) => st.Sid === "DenyAuditMutations" && st.Effect === "Deny")).toBe(true);
+    });
+
+    it("may only list, add and remove group membership, and only in this stack's pool", async () => {
+      await build();
+      const s = statementsForRole(FN);
+      expect(allowedActions("cognito-idp:")).toEqual([
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:AdminListGroupsForUser",
+        "cognito-idp:AdminRemoveUserFromGroup",
+      ]);
+      for (const action of allowedActions("cognito-idp:")) {
+        expect(grantsFor(s, action, () => true).flatMap((st) => st.Resource)).toEqual([POOL_ARN]);
+      }
+      expect(allowedActions("verifiedpermissions:")).toEqual([]);
+    });
+  });
+
   describe("transactions are granted item-by-item (TransactWriteItems is not an IAM action)", () => {
     const ROLES = [
       "boxalarm-dev-personnel-members-create",
       "boxalarm-dev-personnel-members-update-status",
       "boxalarm-dev-personnel-members-update-profile",
+      "boxalarm-dev-personnel-members-update-roles",
       "boxalarm-dev-personnel-quals-put",
       "boxalarm-dev-personnel-availability-create",
       "boxalarm-dev-personnel-availability-expiry",
@@ -236,6 +296,7 @@ describe("personnel Lambdas: env and IAM match their handlers", { timeout: 30_00
     "boxalarm-dev-personnel-members-get": ["PERSONNEL_TABLE_NAME"],
     "boxalarm-dev-personnel-members-update-status": ["PERSONNEL_TABLE_NAME"],
     "boxalarm-dev-personnel-members-update-profile": ["PLATFORM_TABLE_NAME", VP],
+    "boxalarm-dev-personnel-members-update-roles": ["PERSONNEL_TABLE_NAME", "COGNITO_USER_POOL_ID"],
     "boxalarm-dev-personnel-quals-get": ["PERSONNEL_TABLE_NAME", "PLATFORM_BUS_NAME", VP],
     "boxalarm-dev-personnel-quals-put": ["PERSONNEL_TABLE_NAME", "PLATFORM_BUS_NAME", VP],
     "boxalarm-dev-alerting-eligibility-changed-consumer": ["ALERTING_TABLE_NAME"],

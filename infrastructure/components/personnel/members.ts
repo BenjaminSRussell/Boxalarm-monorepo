@@ -93,6 +93,40 @@ const UPDATE_STATUS_STATEMENT = (tableArn: pulumi.Input<string>) =>
   ]);
 
 /**
+ * updateRoles.ts: GetItem (reads the member's current roles, dept-scoped), then one
+ * transaction of UpdateItem (the member row's roles) + PutItem (AUDIT_LOG_ENTRY and the
+ * personnel.member.updated OUTBOX_ENTRY). No Query, no DeleteItem.
+ */
+const UPDATE_ROLES_STATEMENT = (tableArn: pulumi.Input<string>) =>
+  pulumi.output(tableArn).apply((arn) => [
+    {
+      Sid: "MembersUpdateRolesAccess" as const,
+      Effect: "Allow" as const,
+      Action: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"],
+      Resource: [arn],
+    },
+  ]);
+
+/**
+ * updateRoles.ts also syncs the member's Cognito role groups (lib/memberLogin.ts
+ * syncRoleGroups): list, then add/remove the difference. It never creates or deletes a
+ * login, so it holds neither of those. Scoped to this env's pool only.
+ */
+const UPDATE_ROLES_GROUPS_STATEMENT = (userPoolArn: pulumi.Input<string>) =>
+  pulumi.output(userPoolArn).apply((arn) => [
+    {
+      Sid: "MembersUpdateRoleGroups" as const,
+      Effect: "Allow" as const,
+      Action: [
+        "cognito-idp:AdminListGroupsForUser",
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:AdminRemoveUserFromGroup",
+      ],
+      Resource: [arn],
+    },
+  ]);
+
+/**
  * E2-S1-INFRA #203 roster routes: create/list/get/updateStatus, each its own
  * Lambda bundled from backend/src/services/personnel-service/members via
  * lambda-code.ts, scoped to the platform-service table + policy store.
@@ -103,6 +137,7 @@ export class Members extends pulumi.ComponentResource {
   public readonly getLambda: ServiceLambda;
   public readonly updateStatusLambda: ServiceLambda;
   public readonly updateProfileLambda: ServiceLambda;
+  public readonly updateRolesLambda: ServiceLambda;
 
   constructor(name: string, args: MembersArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("Members", args.env);
@@ -267,12 +302,52 @@ export class Members extends pulumi.ComponentResource {
       { parent: this },
     );
 
+    // F2.7 role assignment. updateRoles.ts gates on the authorizer's cognito:groups
+    // (CHIEF/ADMIN, never the caller's own roles) and makes no Verified Permissions call,
+    // so this Lambda holds no IsAuthorizedWithToken grant and no policy-store env.
+    this.updateRolesLambda = new ServiceLambda(
+      `${name}-update-roles`,
+      {
+        env,
+        serviceName: "personnel-service",
+        functionName: `boxalarm-${env}-personnel-members-update-roles`,
+        handler: LAMBDA_HANDLER,
+        code: lambdaCode("personnel-service", "members-update-roles"),
+        logGroup: args.logGroup,
+        environment: {
+          PERSONNEL_TABLE_NAME: args.platformTableName,
+          COGNITO_USER_POOL_ID: args.userPoolId,
+        },
+        additionalPolicyStatements: pulumi
+          .all([
+            UPDATE_ROLES_STATEMENT(args.platformTableArn),
+            UPDATE_ROLES_GROUPS_STATEMENT(args.userPoolArn),
+            args.platformTableArn,
+          ])
+          .apply(([table, groups, tableArn]) => [
+            ...table,
+            ...groups,
+            auditMutationDenyStatement(tableArn),
+          ]),
+      },
+      { parent: this },
+    );
+    args.httpApi.route(
+      `${name}-update-roles-route`,
+      {
+        routeKey: "PUT /api/v1/personnel/members/{memberId}/roles",
+        lambda: this.updateRolesLambda,
+      },
+      { parent: this },
+    );
+
     this.registerOutputs({
       createLambda: this.createLambda,
       listLambda: this.listLambda,
       getLambda: this.getLambda,
       updateStatusLambda: this.updateStatusLambda,
       updateProfileLambda: this.updateProfileLambda,
+      updateRolesLambda: this.updateRolesLambda,
     });
   }
 }
