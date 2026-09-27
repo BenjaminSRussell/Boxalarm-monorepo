@@ -235,6 +235,8 @@ export const personnelMembers = new Members("personnel-members", {
   platformTableArn: platformTable.tableArn,
   policyStoreArn: policyStore.policyStoreArn,
   policyStoreId: policyStore.policyStoreId,
+  userPoolId: identity.userPool.id,
+  userPoolArn: identity.userPool.arn,
   logGroup: personnelLogGroup,
   httpApi,
 });

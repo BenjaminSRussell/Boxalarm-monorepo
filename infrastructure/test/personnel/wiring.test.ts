@@ -69,7 +69,11 @@ async function build() {
     alertingLogGroup,
     alertingPermissionsBoundaryArn: BOUNDARY_ARN,
   };
-  new Members("members", common);
+  new Members("members", {
+    ...common,
+    userPoolId: "us-east-1_pool",
+    userPoolArn: "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_pool",
+  });
   new Losap("losap", common);
   new Attendance("attendance", common);
   new Quals("quals", { ...common, ...alerting });

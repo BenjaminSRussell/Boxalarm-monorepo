@@ -55,10 +55,39 @@ describe("Members", () => {
       platformTableArn: pulumi.output("arn:aws:dynamodb:us-east-1:123456789012:table/platform"),
       policyStoreArn: pulumi.output("arn:aws:verifiedpermissions::123456789012:policy-store/ps-1"),
       policyStoreId: pulumi.output("ps-1"),
+      userPoolId: pulumi.output("us-east-1_pool"),
+      userPoolArn: pulumi.output(
+        "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_pool",
+      ),
       logGroup,
       httpApi,
     });
   }
+
+  // create.ts provisions the member's login and keys the member on its sub.
+  it("lets only the create Lambda manage logins, in this pool, and tells it the pool id", async () => {
+    const members = await build();
+    const [createPolicy, env, listPolicy] = await Promise.all([
+      resolve(members.createLambda.rolePolicy.policy),
+      resolve(members.createLambda.function.environment),
+      resolve(members.listLambda.rolePolicy.policy),
+    ]);
+    const statement = (
+      JSON.parse(createPolicy) as {
+        Statement: Array<{ Sid: string; Action: string[]; Resource: string[] }>;
+      }
+    ).Statement.find((s) => s.Sid === "MembersCreateLogin");
+    expect(statement?.Action.sort()).toEqual([
+      "cognito-idp:AdminAddUserToGroup",
+      "cognito-idp:AdminCreateUser",
+      "cognito-idp:AdminDeleteUser",
+    ]);
+    expect(statement?.Resource).toEqual([
+      "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_pool",
+    ]);
+    expect(env?.variables?.COGNITO_USER_POOL_ID).toBe("us-east-1_pool");
+    expect(listPolicy).not.toContain("cognito-idp");
+  });
 
   it("grants no personnel role any permission on the alerting or incident tables (AC4)", async () => {
     const members = await build();

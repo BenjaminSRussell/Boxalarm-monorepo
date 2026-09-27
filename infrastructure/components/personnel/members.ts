@@ -13,6 +13,8 @@ export interface MembersArgs {
   platformTableArn: pulumi.Input<string>;
   policyStoreArn: pulumi.Input<string>;
   policyStoreId: pulumi.Input<string>;
+  userPoolId: pulumi.Input<string>;
+  userPoolArn: pulumi.Input<string>;
   logGroup: ServiceLogGroup;
   httpApi: HttpApi;
 }
@@ -52,6 +54,25 @@ const CREATE_STATEMENT = (tableArn: pulumi.Input<string>) =>
       Sid: "MembersCreateAccess" as const,
       Effect: "Allow" as const,
       Action: ["dynamodb:PutItem"],
+      Resource: [arn],
+    },
+  ]);
+
+/**
+ * create.ts also creates the member's login (lib/memberLogin.ts): AdminCreateUser, then
+ * AdminAddUserToGroup MEMBER, and AdminDeleteUser to undo a login whose member row could
+ * not be written. Scoped to this env's pool only.
+ */
+const CREATE_LOGIN_STATEMENT = (userPoolArn: pulumi.Input<string>) =>
+  pulumi.output(userPoolArn).apply((arn) => [
+    {
+      Sid: "MembersCreateLogin" as const,
+      Effect: "Allow" as const,
+      Action: [
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:AdminDeleteUser",
+      ],
       Resource: [arn],
     },
   ]);
@@ -108,10 +129,14 @@ export class Members extends pulumi.ComponentResource {
         handler: LAMBDA_HANDLER,
         code: lambdaCode("personnel-service", "members-create"),
         logGroup: args.logGroup,
-        environment: baseEnvironment,
+        environment: { ...baseEnvironment, COGNITO_USER_POOL_ID: args.userPoolId },
         additionalPolicyStatements: pulumi
-          .all([CREATE_STATEMENT(args.platformTableArn), vpStatement])
-          .apply(([table, vp]) => [...table, ...vp]),
+          .all([
+            CREATE_STATEMENT(args.platformTableArn),
+            CREATE_LOGIN_STATEMENT(args.userPoolArn),
+            vpStatement,
+          ])
+          .apply(([table, login, vp]) => [...table, ...login, ...vp]),
       },
       { parent: this },
     );
