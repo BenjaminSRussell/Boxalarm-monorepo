@@ -1,4 +1,3 @@
-import { generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Decision, type VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
 import {
@@ -10,16 +9,16 @@ import {
 import type { CedarPrincipalContext, GuardEvent } from '@boxalarm/authz';
 
 const originalEnv = { ...process.env };
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const testPrivateKeyPem = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
 
 beforeEach(() => {
   vi.resetModules();
   process.env.PLATFORM_TABLE_NAME = 'platform-table';
   process.env.VERIFIED_PERMISSIONS_POLICY_STORE_ID = 'ps-1';
-  process.env.CLOUDFRONT_DISTRIBUTION_DOMAIN = 'assets.boxalarm.dev';
-  process.env.CLOUDFRONT_KEY_PAIR_ID = 'KEYPAIR123';
-  process.env.CLOUDFRONT_PRIVATE_KEY_SECRET_ID = 'cf-signing-key';
+  process.env.PLATFORM_ASSETS_BUCKET_NAME = 'boxalarm-dev-platform-assets';
+  // Presigning is local SigV4: any credentials will do.
+  process.env.AWS_ACCESS_KEY_ID = 'test';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test';
+  process.env.AWS_REGION = 'us-east-1';
 });
 
 afterEach(() => {
@@ -124,12 +123,6 @@ function fakeDynamoClient(options: {
     return {};
   });
   return { send } as unknown as DynamoDBDocumentClient;
-}
-
-function fakeSecretsClient() {
-  return {
-    send: vi.fn().mockResolvedValue({ SecretString: testPrivateKeyPem }),
-  };
 }
 
 describe('reportDefect handler', () => {
@@ -256,9 +249,6 @@ describe('reportDefect handler', () => {
   });
 
   it('signs a photo upload URL when photo.filename is provided (training attachment pattern)', async () => {
-    const { createSecretsManagerClient } = await import('./defectPhotoUpload.js');
-    createSecretsManagerClient(fakeSecretsClient() as never);
-
     const { createReportDefectHandler } = await import('./reportDefectHandler.js');
     const handler = createReportDefectHandler({
       client: fakeDynamoClient({}),

@@ -1,47 +1,41 @@
-import { getSignedUrl } from '@aws-sdk/cloudfront-signer';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import xray from 'aws-xray-sdk-core';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { VerifiedDeptId } from '@boxalarm/dept-scope';
 
+// Files go to the platform-assets bucket through a short-lived regional S3 presigned PUT.
+// architecture.md §8 describes CloudFront signed URLs, but N6.1 (U.S. residency, no global
+// edge) forbids CloudFront repo-wide - infrastructure/test/residency-encryption.test.ts
+// enforces it - so the CloudFront signer this module used could never be configured and
+// every upload request failed. Same approach as inspections-service/assetsSigner.ts.
 export interface AttachmentUploadConfig {
-  readonly distributionDomain: string;
-  readonly keyPairId: string;
-  readonly privateKey: string;
+  readonly bucketName: string;
 }
 
-let cachedSecretsClient: SecretsManagerClient | undefined;
-
-export function createSecretsManagerClient(client?: SecretsManagerClient): SecretsManagerClient {
-  cachedSecretsClient ??= client ?? xray.captureAWSv3Client(new SecretsManagerClient({}));
-  return cachedSecretsClient;
-}
-
-export async function readAttachmentUploadConfig(
+export function readAttachmentUploadConfig(
   env: NodeJS.ProcessEnv,
-  secretsClient?: SecretsManagerClient,
 ): Promise<AttachmentUploadConfig> {
-  const distributionDomain = env.CLOUDFRONT_DISTRIBUTION_DOMAIN;
-  const keyPairId = env.CLOUDFRONT_KEY_PAIR_ID;
-  const privateKeySecretId = env.CLOUDFRONT_PRIVATE_KEY_SECRET_ID;
-  if (!distributionDomain) {
-    throw new Error('CLOUDFRONT_DISTRIBUTION_DOMAIN is required and was not set');
+  const bucketName = env.PLATFORM_ASSETS_BUCKET_NAME;
+  if (!bucketName) {
+    return Promise.reject(new Error('PLATFORM_ASSETS_BUCKET_NAME is required and was not set'));
   }
-  if (!keyPairId) {
-    throw new Error('CLOUDFRONT_KEY_PAIR_ID is required and was not set');
-  }
-  if (!privateKeySecretId) {
-    throw new Error('CLOUDFRONT_PRIVATE_KEY_SECRET_ID is required and was not set');
-  }
-  const client = createSecretsManagerClient(secretsClient);
-  const output = await client.send(new GetSecretValueCommand({ SecretId: privateKeySecretId }));
-  const privateKey = output.SecretString;
-  if (!privateKey) {
-    throw new Error(`Secret ${privateKeySecretId} has no SecretString value`);
-  }
-  return { distributionDomain, keyPairId, privateKey };
+  return Promise.resolve({ bucketName });
 }
 
-const UPLOAD_URL_EXPIRY_MS = 10 * 60 * 1000;
+/** Presigns one PUT; injectable so tests need no AWS credentials. */
+export type PresignPutFn = (bucketName: string, key: string, expiresIn: number) => Promise<string>;
+
+let cachedS3Client: S3Client | undefined;
+
+// Presigning is a local SigV4 computation with the Lambda role's credentials - no network
+// call - so the client is not wrapped in X-Ray.
+export const presignPut: PresignPutFn = (bucketName, key, expiresIn) => {
+  cachedS3Client ??= new S3Client({});
+  return getSignedUrl(cachedS3Client, new PutObjectCommand({ Bucket: bucketName, Key: key }), {
+    expiresIn,
+  });
+};
+
+const UPLOAD_URL_EXPIRY_SECONDS = 10 * 60;
 
 export interface CreateAttachmentUploadUrlParams {
   readonly deptId: VerifiedDeptId;
@@ -60,22 +54,17 @@ function isSafeFilename(filename: string): boolean {
   return SAFE_FILENAME.test(filename);
 }
 
-export function createAttachmentUploadUrl(
+export async function createAttachmentUploadUrl(
   config: AttachmentUploadConfig,
   params: CreateAttachmentUploadUrlParams,
-): AttachmentUpload {
+  presign: PresignPutFn = presignPut,
+): Promise<AttachmentUpload> {
   if (!isSafeFilename(params.filename)) {
     throw new TypeError(
       `attachment filename must match ${SAFE_FILENAME}: received ${JSON.stringify(params.filename)}`,
     );
   }
   const attachmentS3Key = `${params.deptId}/CERTIFICATION/${params.certId}/${params.filename}`;
-  const urlPath = `${params.deptId}/CERTIFICATION/${params.certId}/${encodeURIComponent(params.filename)}`;
-  const uploadUrl = getSignedUrl({
-    url: `https://${config.distributionDomain}/${urlPath}`,
-    keyPairId: config.keyPairId,
-    privateKey: config.privateKey,
-    dateLessThan: new Date(Date.now() + UPLOAD_URL_EXPIRY_MS).toISOString(),
-  });
+  const uploadUrl = await presign(config.bucketName, attachmentS3Key, UPLOAD_URL_EXPIRY_SECONDS);
   return { attachmentS3Key, uploadUrl };
 }

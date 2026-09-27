@@ -249,7 +249,7 @@ async function reportDefect(
   if (value.photoFilename) {
     try {
       const config = await readDefectPhotoUploadConfig(process.env);
-      const upload = createDefectPhotoUploadUrl(config, {
+      const upload = await createDefectPhotoUploadUrl(config, {
         deptId,
         defectId,
         filename: value.photoFilename,

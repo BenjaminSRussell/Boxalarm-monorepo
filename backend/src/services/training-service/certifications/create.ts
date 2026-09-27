@@ -128,7 +128,7 @@ async function createCertificationInner(
   if (value.attachmentFilename) {
     try {
       const config = await readAttachmentUploadConfig(process.env);
-      const upload = createAttachmentUploadUrl(config, {
+      const upload = await createAttachmentUploadUrl(config, {
         deptId,
         certId,
         filename: value.attachmentFilename,

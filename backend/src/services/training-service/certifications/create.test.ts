@@ -1,16 +1,8 @@
-import { generateKeyPairSync } from 'node:crypto';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { Decision } from '@aws-sdk/client-verifiedpermissions';
 import type { VerifiedPermissionsClient } from '@aws-sdk/client-verifiedpermissions';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import type { CedarPrincipalContext, GuardEvent } from '@boxalarm/authz';
-
-function fakeSecretsClient(secretString: string): SecretsManagerClient {
-  return {
-    send: vi.fn().mockResolvedValue({ SecretString: secretString }),
-  } as unknown as SecretsManagerClient;
-}
 
 const originalEnv = { ...process.env };
 
@@ -19,9 +11,6 @@ const OFFICER: CedarPrincipalContext = {
   deptId: 'NICHOLS',
   'cognito:groups': 'officer',
 };
-
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const testPrivateKeyPem = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
 
 function decidingClient(decision: 'ALLOW' | 'DENY'): VerifiedPermissionsClient {
   return {
@@ -144,16 +133,16 @@ describe('create.ts handler (entrypoint)', () => {
   });
 
   it('signs an attachment upload URL scoped to {deptId}/CERTIFICATION/{certId}/ and returns it alongside the record (AC2)', async () => {
-    process.env.CLOUDFRONT_DISTRIBUTION_DOMAIN = 'assets.boxalarm.dev';
-    process.env.CLOUDFRONT_KEY_PAIR_ID = 'KEYPAIR123';
-    process.env.CLOUDFRONT_PRIVATE_KEY_SECRET_ID = 'cf-signing-key';
+    process.env.PLATFORM_ASSETS_BUCKET_NAME = 'boxalarm-dev-platform-assets';
+    // Presigning is local SigV4: any credentials will do.
+    process.env.AWS_ACCESS_KEY_ID = 'test';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.AWS_REGION = 'us-east-1';
     const { createAuthzClient } = await import('@boxalarm/authz');
     createAuthzClient(process.env, decidingClient('ALLOW'));
     const { createDynamoClient } = await import('../dynamoClient.js');
     const send = vi.fn().mockResolvedValue({});
     createDynamoClient({ send } as unknown as DynamoDBDocumentClient);
-    const { createSecretsManagerClient } = await import('../attachmentUpload.js');
-    createSecretsManagerClient(fakeSecretsClient(testPrivateKeyPem));
     const { handler } = await import('./create.js');
 
     const result = await handler(
@@ -178,13 +167,13 @@ describe('create.ts handler (entrypoint)', () => {
   });
 
   it('logs the invalid-attachment error before returning 400 (error-path-logging)', async () => {
-    process.env.CLOUDFRONT_DISTRIBUTION_DOMAIN = 'assets.boxalarm.dev';
-    process.env.CLOUDFRONT_KEY_PAIR_ID = 'KEYPAIR123';
-    process.env.CLOUDFRONT_PRIVATE_KEY_SECRET_ID = 'cf-signing-key';
+    process.env.PLATFORM_ASSETS_BUCKET_NAME = 'boxalarm-dev-platform-assets';
+    // Presigning is local SigV4: any credentials will do.
+    process.env.AWS_ACCESS_KEY_ID = 'test';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.AWS_REGION = 'us-east-1';
     const { createAuthzClient } = await import('@boxalarm/authz');
     createAuthzClient(process.env, decidingClient('ALLOW'));
-    const { createSecretsManagerClient } = await import('../attachmentUpload.js');
-    createSecretsManagerClient(fakeSecretsClient(testPrivateKeyPem));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { handler } = await import('./create.js');
 
