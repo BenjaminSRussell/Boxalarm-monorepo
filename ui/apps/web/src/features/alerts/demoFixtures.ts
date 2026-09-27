@@ -1,4 +1,5 @@
 import type {
+  ActiveDispatchList,
   CanaryStatus,
   DeliveryReceipt,
   DeviceState,
@@ -14,6 +15,9 @@ const DISPATCHES = new Map<string, DispatchAlert>();
 const ROSTERS = new Map<string, RosterEntry[]>();
 const RECEIPTS = new Map<string, DeliveryReceipt[]>();
 const RIDING_BOARDS = new Map<string, RidingBoard>();
+/** Epoch seconds each demo dispatch went out — drives the active-dispatch list. */
+const DISPATCHED_AT = new Map<string, number>();
+const DEMO_ACTIVE_WINDOW_SECONDS = 2 * 60 * 60;
 
 const DEVICE_STATES = new Map<string, DeviceState>([
   [
@@ -176,6 +180,12 @@ function ensureSeeded(dispatchId: string): void {
   RIDING_BOARDS.set(dispatchId, seedRidingBoard(dispatchId));
 }
 
+// One call dispatched a few minutes before the demo loads, so the dashboard's active-call tile
+// has something real (to the demo) to show.
+const DEMO_ACTIVE_DISPATCH_ID = 'NICHOLS-DEMO-1';
+ensureSeeded(DEMO_ACTIVE_DISPATCH_ID);
+DISPATCHED_AT.set(DEMO_ACTIVE_DISPATCH_ID, Math.floor(Date.now() / 1000) - 12 * 60);
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -197,7 +207,36 @@ export function demoAlertsRequest(
     const input = body as unknown as ManualDispatchInput;
     ensureSeeded(dispatchId);
     DISPATCHES.set(dispatchId, seedDispatch(dispatchId, input));
+    DISPATCHED_AT.set(dispatchId, Math.floor(Date.now() / 1000));
     return json({ dispatchId, sourceSystem: 'MANUAL' }, 201);
+  }
+
+  if (path === 'alerting/dispatches' && method === 'GET') {
+    const asOf = Math.floor(Date.now() / 1000);
+    const list: ActiveDispatchList = {
+      dispatches: [...DISPATCHED_AT.entries()]
+        .filter(([, at]) => at >= asOf - DEMO_ACTIVE_WINDOW_SECONDS)
+        .sort(([, a], [, b]) => b - a)
+        .flatMap(([dispatchId, dispatchedAt]) => {
+          const dispatch = DISPATCHES.get(dispatchId);
+          return dispatch
+            ? [
+                {
+                  dispatchId,
+                  incidentType: dispatch.incidentType,
+                  address: dispatch.address,
+                  crossStreets: dispatch.crossStreets,
+                  dispatchedAt,
+                  toneLadder: { status: 'ACTIVE', currentToneSequence: 1 },
+                },
+              ]
+            : [];
+        }),
+      activeWindowSeconds: DEMO_ACTIVE_WINDOW_SECONDS,
+      asOf,
+      truncated: false,
+    };
+    return json(list);
   }
 
   if (

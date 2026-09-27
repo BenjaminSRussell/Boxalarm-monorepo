@@ -545,6 +545,7 @@ describe("PolicyStore", () => {
         expect(await decide(group, "SelfTestAlertPath", member)).toBe("allow");
         expect(await decide(group, "RegisterPushToken", member)).toBe("allow");
         expect(await decide(group, "ViewAlertDetail", dept)).toBe("allow");
+        expect(await decide(group, "ListActiveDispatches", dept)).toBe("allow");
       },
     );
 
@@ -566,6 +567,36 @@ describe("PolicyStore", () => {
         expect(await decide(group, "ViewDiagnostics", dispatch)).toBe("deny");
       },
     );
+
+    it("DENYs ListActiveDispatches to a principal in no role group", async () => {
+      expect(await decide("NOT_A_ROLE", "ListActiveDispatches", dept)).toBe("deny");
+    });
+
+    it("DENYs ListActiveDispatches on a non-Department resource (schema appliesTo)", async () => {
+      const { CEDAR_SCHEMA, alertingMemberActionsPolicy } =
+        await import("../../components/authz/cedar-policies");
+      const { isAuthorized } =
+        (await import("@cedar-policy/cedar-wasm/nodejs")) as typeof import("@cedar-policy/cedar-wasm/nodejs");
+      const result = isAuthorized({
+        principal: { type: "Boxalarm::User", id: "pool-1|user-1" },
+        action: { type: "Boxalarm::Action", id: "ListActiveDispatches" },
+        resource: dispatch,
+        context: {},
+        schema: JSON.parse(CEDAR_SCHEMA) as string,
+        validateRequest: true,
+        policies: { staticPolicies: alertingMemberActionsPolicy("pool-1") },
+        entities: [
+          {
+            uid: { type: "Boxalarm::User", id: "pool-1|user-1" },
+            attrs: {},
+            parents: [{ type: "Boxalarm::UserGroup", id: "pool-1|MEMBER" }],
+          },
+          { uid: { type: "Boxalarm::UserGroup", id: "pool-1|MEMBER" }, attrs: {}, parents: [] },
+          { uid: dispatch, attrs: {}, parents: [] },
+        ],
+      });
+      expect(result.type === "success" ? result.response.decision : "rejected").not.toBe("allow");
+    });
   });
 
   // inspections-service (F6): every action its handlers send must be in the schema and

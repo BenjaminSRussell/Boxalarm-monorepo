@@ -1,20 +1,32 @@
 import type { DutyShift, ShiftCoverage } from './types';
 
+// Tonight's 18:00-06:00 standby, relative to when the demo loads, so the dashboard's
+// today's-shifts tile has a shift to show.
+const tonight = new Date();
+tonight.setHours(18, 0, 0, 0);
+
 let shifts: DutyShift[] = [
   {
     shiftId: 's-1',
-    startAt: 1758391200,
-    endAt: 1758434400,
+    startAt: 1758391200000,
+    endAt: 1758434400000,
     stationId: 'STATION-1',
     status: 'OPEN',
+  },
+  {
+    shiftId: 's-tonight',
+    startAt: tonight.getTime(),
+    endAt: tonight.getTime() + 12 * 60 * 60 * 1000,
+    stationId: 'STATION-1',
+    status: 'PARTIALLY_FILLED',
   },
 ];
 
 const coverage: ShiftCoverage[] = [
   {
     shiftId: 's-1',
-    startAt: 1758391200,
-    endAt: 1758434400,
+    startAt: 1758391200000,
+    endAt: 1758434400000,
     stationId: 'STATION-1',
     status: 'short',
     positions: [

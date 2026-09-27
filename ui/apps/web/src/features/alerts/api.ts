@@ -1,5 +1,6 @@
 import { apiRequest, type AuthTokenSource } from '../../lib/apiClient';
 import type {
+  ActiveDispatchList,
   CanaryStatus,
   DeliveryReceipt,
   DiagnosticsResult,
@@ -18,6 +19,11 @@ export async function getDispatch(
     tokens,
   );
   return (await response.json()) as DispatchAlert;
+}
+
+export async function listActiveDispatches(tokens: AuthTokenSource): Promise<ActiveDispatchList> {
+  const response = await apiRequest('alerting/dispatches?status=active', tokens);
+  return (await response.json()) as ActiveDispatchList;
 }
 
 export async function getRoster(

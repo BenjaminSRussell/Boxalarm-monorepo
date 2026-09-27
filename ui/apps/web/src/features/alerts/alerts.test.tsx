@@ -301,6 +301,54 @@ test('diagnostics renders the delivery timeline for a member on the eligible ros
   expect(await screen.findByText(/Notification permission: OK/)).toBeTruthy();
 });
 
+test('diagnostics labels raw receipts (no status field) from their provider timestamps', async () => {
+  server.use(
+    http.get('/api/v1/alerting/dispatches/D-5/diagnostics/m-2', () =>
+      HttpResponse.json({
+        dispatchId: 'D-5',
+        memberId: 'm-2',
+        diagnosis: 'ON_ROSTER',
+        timeline: [
+          {
+            entityType: 'DELIVERY_RECEIPT',
+            channel: 'PUSH',
+            toneSequence: 1,
+            sentAt: 1700000000,
+            deliveredAt: 1700000005,
+          },
+          {
+            entityType: 'DELIVERY_RECEIPT',
+            channel: 'SMS',
+            toneSequence: 1,
+            sentAt: 1700000000,
+            failureReason: 'CARRIER_REJECTED',
+          },
+          { entityType: 'DELIVERY_RECEIPT', channel: 'VOICE', toneSequence: 1, sentAt: 1700000090 },
+        ],
+        deviceState: null,
+      }),
+    ),
+    http.get('/api/v1/alerting/canary/status', () =>
+      HttpResponse.json({
+        healthy: true,
+        latestResult: 'PASS',
+        latestLatencyMs: 1800,
+        latestRanAt: Math.floor(Date.now() / 1000),
+        runs: [],
+      }),
+    ),
+  );
+
+  const user = userEvent.setup();
+  renderDiagnosticsPage(['ADMIN']);
+  await user.type(await screen.findByLabelText('Dispatch ID'), 'D-5');
+  await user.type(screen.getByLabelText('Member ID'), 'm-2');
+
+  expect(await screen.findByText('Delivered')).toBeTruthy();
+  expect(screen.getByText('Failed — CARRIER_REJECTED')).toBeTruthy();
+  expect(screen.getByText('Sent, not confirmed delivered')).toBeTruthy();
+});
+
 test('diagnostics states the member was not on the eligible roster, distinct from sent-not-delivered', async () => {
   server.use(
     http.get('/api/v1/alerting/dispatches/D-4/diagnostics/m-9', () =>

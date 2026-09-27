@@ -5,6 +5,7 @@ import type {
   CreateCertificationInput,
   CreateTrainingEventInput,
   ExpiringCertification,
+  RosterTrainingHours,
   Transcript,
   TranscriptExportFormat,
   TrainingEvent,
@@ -66,6 +67,16 @@ export async function listExpiringCertifications(
 ): Promise<ExpiringCertification[]> {
   const response = await apiRequest('training/certifications/expiring', tokens);
   return (await response.json()) as ExpiringCertification[];
+}
+
+/** Department-wide hours by member and category for events starting in [from, to] (epoch ms). */
+export async function getRosterTrainingHours(
+  tokens: AuthTokenSource,
+  from: number,
+  to: number,
+): Promise<RosterTrainingHours> {
+  const response = await apiRequest(`training/hours?from=${from}&to=${to}`, tokens);
+  return (await response.json()) as RosterTrainingHours;
 }
 
 export async function listTrainingEvents(tokens: AuthTokenSource): Promise<TrainingEvent[]> {

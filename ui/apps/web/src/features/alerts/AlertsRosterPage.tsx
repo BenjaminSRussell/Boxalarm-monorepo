@@ -404,8 +404,8 @@ function DispatchHeader({ dispatchId }: { dispatchId: string }) {
 
 // E1-S1-UI, E1-S4-UI, E1-S5-UI, E1-S6-UI, E1-S17-UI, E5-S8-UI, E1-S18-UI: one screen (/alerts/roster
 // per the existing route table) - dispatch header + pre-plan, live roster, delivery receipts, and
-// the riding board, plus the manual-entry fallback that lands here on submit. No endpoint exists
-// to list active dispatches, so an officer enters/keeps a dispatchId in the URL (?dispatchId=).
+// the riding board, plus the manual-entry fallback that lands here on submit. The dispatchId is
+// kept in the URL (?dispatchId=); the dashboard's active-call tile links here with it set.
 export function AlertsRosterPage() {
   const auth = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();

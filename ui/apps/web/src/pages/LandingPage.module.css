@@ -24,3 +24,35 @@
   gap: var(--bx-space-lg);
   margin-top: var(--bx-space-lg);
 }
+
+.callCard {
+  margin-top: var(--bx-space-lg);
+}
+
+.tileMessage {
+  margin: 0 0 var(--bx-space-sm);
+  color: var(--bx-fg-muted);
+  font-size: 14px;
+}
+
+.tileError {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--bx-space-sm);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.listItem {
+  padding: var(--bx-space-xs) 0;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  color: var(--bx-fg-muted);
+}

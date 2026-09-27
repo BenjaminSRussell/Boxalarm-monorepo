@@ -121,6 +121,24 @@ export async function trainingDemoRequest(
     return json(transcript);
   }
 
+  // The demo router strips the query string before it reaches here, so from/to are not echoed.
+  if (path === 'training/hours' && method === 'GET') {
+    return json({
+      from: 0,
+      to: 0,
+      members: [
+        {
+          memberId: 'm-1',
+          categories: [
+            { category: 'Ladders', hours: 6 },
+            { category: 'Hazmat', hours: 4 },
+          ],
+        },
+        { memberId: 'm-3', categories: [{ category: 'Ladders', hours: 3 }] },
+      ],
+    });
+  }
+
   if (path === 'training/events' && method === 'GET') {
     return json(events);
   }

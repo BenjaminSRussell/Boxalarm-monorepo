@@ -2,7 +2,9 @@ export type ShiftStatus = 'OPEN' | 'PARTIALLY_FILLED' | 'FULL' | 'CANCELLED';
 
 export interface DutyShift {
   shiftId: string;
+  /** Epoch milliseconds (personnel-service DUTY_SHIFT convention). */
   startAt: number;
+  /** Epoch milliseconds. */
   endAt: number;
   stationId: string;
   status: ShiftStatus;

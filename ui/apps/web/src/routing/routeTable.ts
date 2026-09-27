@@ -79,6 +79,15 @@ export const APP_ROUTES: readonly AppRoute[] = [
     showInNav: true,
   },
   {
+    // GET training/hours roster view is ViewRosterTrainingHours — the officer tier
+    // (cedar-policies.ts OFFICER_TIER_GROUPS: OFFICER, TRAINING, CHIEF, ADMIN).
+    path: '/training/hours',
+    navPath: '/training/hours',
+    label: 'Training hours',
+    roles: ['TRAINING', 'ADMIN', 'OFFICER', 'CHIEF'],
+    showInNav: true,
+  },
+  {
     path: '/apparatus',
     navPath: '/apparatus',
     label: 'Apparatus',

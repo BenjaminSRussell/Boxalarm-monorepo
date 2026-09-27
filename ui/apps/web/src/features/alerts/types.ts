@@ -39,6 +39,29 @@ export interface DispatchAlert {
   prePlan?: PrePlanEnrichment | null;
 }
 
+/** One row of GET alerting/dispatches?status=active (dispatches/list/handler.ts). */
+export interface ActiveDispatch {
+  dispatchId: string;
+  incidentType: string | null;
+  address: string | null;
+  crossStreets: string | null;
+  /** Epoch seconds. */
+  dispatchedAt: number;
+  toneLadder: { status: string; currentToneSequence: number };
+}
+
+/**
+ * "Active" is a server-side recency window (the alerting plane has no cleared state), so the
+ * response carries the window it applied — render it rather than implying a lifecycle state.
+ */
+export interface ActiveDispatchList {
+  dispatches: ActiveDispatch[];
+  activeWindowSeconds: number;
+  /** Epoch seconds the window was evaluated at. */
+  asOf: number;
+  truncated: boolean;
+}
+
 export type DeliveryReceiptStatus = 'FAILED' | 'OPENED' | 'DELIVERED' | 'SENT_UNCONFIRMED' | 'SENT';
 
 export interface DeliveryReceipt {
@@ -111,6 +134,7 @@ export interface DiagnosticsTimelineEntry {
   sentAt?: number;
   deliveredAt?: number | null;
   openedAt?: number | null;
+  failureReason?: string | null;
   escalatedAt?: number;
   reason?: string;
   answeredAt?: number;

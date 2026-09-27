@@ -205,6 +205,9 @@ export const INVENTORY_ADMIN_GROUPS = ["OFFICER", "CHIEF", "ADMIN"] as const;
 // because no entity attributes reach Cedar - see the department-scoping note below.
 export const ALERTING_MEMBER_ACTIONS = [
   "ViewAlertDetail",
+  // GET /alerting/dispatches?status=active (dashboard active-call tile) - same department-wide
+  // summary every member already sees per dispatch through ViewAlertDetail.
+  "ListActiveDispatches",
   "ViewRoster",
   "RecordResponse",
   "SelfTestAlertPath",
@@ -231,6 +234,7 @@ const ALERTING_ACTION_RESOURCE: Record<
   "Dispatch" | "Member" | "Department"
 > = {
   ViewAlertDetail: "Department",
+  ListActiveDispatches: "Department",
   ViewRoster: "Dispatch",
   RecordResponse: "Dispatch",
   SelfTestAlertPath: "Member",
