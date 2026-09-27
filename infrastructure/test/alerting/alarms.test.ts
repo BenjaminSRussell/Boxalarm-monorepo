@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
@@ -151,6 +153,23 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
     expect(alarm.metricName).toBe(metricName);
     expect(alarm.dimensions).toEqual(dimensions);
     expect(alarm.alarmActions).toEqual([PAGE_TOPIC_ARN]);
+  });
+
+  // Review MINOR-R4: the page had no redrive path. The alarm names the runbook and script,
+  // and both must exist where it says.
+  it("points the escalation on-failure page at its runbook and redrive script", async () => {
+    await build();
+    const description = String(
+      alarmByName("boxalarm-dev-alerting-escalation-onfailure").inputs.alarmDescription,
+    );
+    const repoRoot = path.resolve(__dirname, "../../..");
+    for (const referenced of [
+      "docs/runbooks/alerting-escalation-onfailure.md",
+      "infrastructure/scripts/redrive-escalation-onfailure.sh",
+    ]) {
+      expect(description).toContain(referenced);
+      expect(fs.existsSync(path.join(repoRoot, referenced)), referenced).toBe(true);
+    }
   });
 
   it("gives every alarm it owns a page action", async () => {

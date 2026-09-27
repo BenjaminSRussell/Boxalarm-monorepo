@@ -137,6 +137,8 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     // is a tone, voice escalation or mutual-aid request that did not complete.
     pageAlarm("escalation-onfailure-alarm", {
       name: `boxalarm-${env}-alerting-escalation-onfailure`,
+      alarmDescription:
+        "A voice escalation, tone 2/3 or mutual-aid request did not complete. Runbook: docs/runbooks/alerting-escalation-onfailure.md (redrive: infrastructure/scripts/redrive-escalation-onfailure.sh).",
       namespace: "AWS/SQS",
       metricName: "ApproximateNumberOfMessagesVisible",
       dimensions: { QueueName: args.escalationOnFailureQueue.name },
