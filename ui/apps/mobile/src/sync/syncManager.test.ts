@@ -326,7 +326,9 @@ async function enqueuePhotoDefect(id: string, uploadUrl: string, putStatus: numb
 }
 
 test('an already-expired signed upload URL is not PUT; the item is REJECTED with a clear reason', async () => {
-  const expiredUrl = 'https://cdn.example.com/signed?Expires=1700000000&Signature=s&Key-Pair-Id=k';
+  // Signed 2023-11-14T22:13:20Z for 600 s: long past.
+  const expiredUrl =
+    'https://assets.s3.us-east-1.amazonaws.com/dept/defect/1/x.jpg?X-Amz-Date=20231114T221320Z&X-Amz-Expires=600&X-Amz-Signature=s';
   const fetchSpy = await enqueuePhotoDefect('defect-expired', expiredUrl, 200);
 
   expect(fetchSpy).not.toHaveBeenCalledWith(expiredUrl, expect.anything());
@@ -338,10 +340,9 @@ test('an already-expired signed upload URL is not PUT; the item is REJECTED with
 });
 
 test('a 403 from the signed upload URL (expired/invalid signature) is REJECTED, not retried forever', async () => {
-  const future = Math.floor(Date.now() / 1000) + 600;
   const fetchSpy = await enqueuePhotoDefect(
     'defect-403',
-    `https://cdn.example.com/signed?Expires=${future}&Signature=s&Key-Pair-Id=k`,
+    `https://assets.s3.us-east-1.amazonaws.com/dept/defect/1/x.jpg?X-Amz-Date=${amzDate(new Date())}&X-Amz-Expires=600&X-Amz-Signature=s`,
     403,
   );
 
@@ -349,4 +350,20 @@ test('a 403 from the signed upload URL (expired/invalid signature) is REJECTED, 
   expect(row?.status).toBe('REJECTED');
   expect(row?.lastError).toMatch(/upload link expired/i);
   fetchSpy.mockRestore();
+});
+
+function amzDate(date: Date): string {
+  return date
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}/, '');
+}
+
+test('reads the expiry of an S3 presigned URL from X-Amz-Date + X-Amz-Expires', () => {
+  expect(
+    syncManager.signedUrlExpiresAtMs(
+      'https://b.s3.amazonaws.com/k?X-Amz-Date=20260927T120000Z&X-Amz-Expires=600&X-Amz-Signature=s',
+    ),
+  ).toBe(Date.UTC(2026, 8, 27, 12, 10, 0));
+  expect(syncManager.signedUrlExpiresAtMs('https://b.s3.amazonaws.com/k')).toBeNull();
 });

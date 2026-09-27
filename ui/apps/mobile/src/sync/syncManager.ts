@@ -106,7 +106,7 @@ export async function discard(id: string): Promise<void> {
   await notify();
 }
 
-// The defect POST's signed photo URL is short-lived (CloudFront canned policy, ~10 min), and the
+// The defect POST's signed photo URL is short-lived (an S3 presigned PUT, 10 min), and the
 // API has no way to re-issue one: an idempotent replay of the POST returns the existing defect
 // without an uploadUrl. So an expired URL can never succeed - the defect itself is already
 // saved, only its photo is lost - and is surfaced to the user instead of retried forever.
@@ -116,9 +116,13 @@ class PhotoUploadUrlExpiredError extends Error {
   }
 }
 
-function signedUrlExpiresAtMs(url: string): number | null {
-  const match = /[?&]Expires=(\d+)/.exec(url);
-  return match ? Number(match[1]) * 1000 : null;
+// S3 SigV4 presigned URLs carry X-Amz-Date (YYYYMMDDTHHMMSSZ) and X-Amz-Expires (seconds).
+export function signedUrlExpiresAtMs(url: string): number | null {
+  const date = /[?&]X-Amz-Date=(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(url);
+  const expires = /[?&]X-Amz-Expires=(\d+)/.exec(url);
+  if (!date || !expires) return null;
+  const [, y, mo, d, h, mi, sec] = date.map(Number) as number[];
+  return Date.UTC(y!, mo! - 1, d!, h!, mi!, sec!) + Number(expires[1]) * 1000;
 }
 
 // A 4xx means the server refused this request as sent, so an identical retry cannot succeed -
@@ -164,7 +168,7 @@ async function uploadPhoto(row: OutboxRow): Promise<void> {
     body: blob,
     headers: { 'Content-Type': guessPhotoContentType(row.photoLocalUri) },
   });
-  // CloudFront answers an expired or otherwise invalid signature with 403.
+  // S3 answers an expired or otherwise invalid signature with 403.
   if (uploadResponse.status === 403) throw new PhotoUploadUrlExpiredError();
   if (!uploadResponse.ok) {
     throw new Error(`Photo upload failed with status ${uploadResponse.status}`);
