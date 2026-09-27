@@ -39,6 +39,7 @@
     "@aws-sdk/util-dynamodb": "3.996.9",
     "@boxalarm/authz": "*",
     "@boxalarm/dept-scope": "*",
+    "@boxalarm/health": "*",
     "@boxalarm/logging": "*",
     "@boxalarm/metrics": "*",
     "@boxalarm/outbox": "*",

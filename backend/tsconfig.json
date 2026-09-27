@@ -10,7 +10,8 @@
     { "path": "packages/authz" },
     { "path": "packages/outbox" },
     { "path": "packages/metrics" },
-    { "path": "packages/logging" }
+    { "path": "packages/logging" },
+    { "path": "packages/health" }
   ],
   "include": ["src", "test", "vitest.config.ts"]
 }
