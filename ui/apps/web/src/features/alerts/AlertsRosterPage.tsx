@@ -21,6 +21,7 @@ import {
   submitManualDispatch,
 } from './api';
 import { PrePlanPanel } from './PrePlanPanel';
+import { ToneLadderPanel } from './ToneLadderPanel';
 import type { DeliveryReceipt, FieldError, ManualDispatchInput, RosterEntry } from './types';
 
 const REFETCH_INTERVAL_MS = 10_000;
@@ -403,8 +404,9 @@ function DispatchHeader({ dispatchId }: { dispatchId: string }) {
 }
 
 // E1-S1-UI, E1-S4-UI, E1-S5-UI, E1-S6-UI, E1-S17-UI, E5-S8-UI, E1-S18-UI: one screen (/alerts/roster
-// per the existing route table) - dispatch header + pre-plan, live roster, delivery receipts, and
-// the riding board, plus the manual-entry fallback that lands here on submit. No endpoint exists
+// per the existing route table) - dispatch header + pre-plan, the tone-ladder / mutual-aid
+// controls (F1.13/F1.14), live roster, delivery receipts, and the riding board, plus the
+// manual-entry fallback that lands here on submit. No endpoint exists
 // to list active dispatches, so an officer enters/keeps a dispatchId in the URL (?dispatchId=).
 export function AlertsRosterPage() {
   const auth = useAuth();
@@ -437,6 +439,7 @@ export function AlertsRosterPage() {
       {dispatchId ? (
         <>
           <DispatchHeader dispatchId={dispatchId} />
+          <ToneLadderPanel dispatchId={dispatchId} />
           <RosterTable dispatchId={dispatchId} />
           <ReceiptsTable dispatchId={dispatchId} />
           <RidingBoardSection dispatchId={dispatchId} />
