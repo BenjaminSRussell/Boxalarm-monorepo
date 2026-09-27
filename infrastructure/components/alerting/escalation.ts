@@ -248,8 +248,9 @@ export class Escalation extends pulumi.ComponentResource {
     );
     const asyncTargets = { escalation: this.lambda, "tone-evaluator": this.toneEvaluatorLambda };
     for (const [key, target] of Object.entries(asyncTargets)) {
-      // The async destination is written with the function's own execution role.
-      new aws.iam.RolePolicy(
+      // The async destination is written with the function's own execution role. The invoke
+      // config depends on this grant: Lambda validates it can reach the destination.
+      const sendPolicy = new aws.iam.RolePolicy(
         `${name}-${key}-onfailure-send`,
         {
           role: target.role.id,
@@ -279,7 +280,7 @@ export class Escalation extends pulumi.ComponentResource {
           maximumEventAgeInSeconds: 3600,
           destinationConfig: { onFailure: { destination: this.onFailureQueue.arn } },
         },
-        { parent: this },
+        { parent: this, dependsOn: [sendPolicy] },
       );
     }
 
