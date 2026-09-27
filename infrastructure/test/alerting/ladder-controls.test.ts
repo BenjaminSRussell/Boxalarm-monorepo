@@ -154,6 +154,8 @@ describe("officer ladder-control routes", { timeout: 30_000 }, () => {
       "dynamodb:GetItem",
       "dynamodb:Query",
       "dynamodb:PutItem",
+      // Marks each officer prompt sent after it publishes (mutualAidPort.ts).
+      "dynamodb:UpdateItem",
       "dynamodb:TransactWriteItems",
     ]) {
       expect(isGranted(s, action, TABLE_ARN), action).toBe(true);
@@ -202,6 +204,22 @@ describe("officer ladder-control routes", { timeout: 30_000 }, () => {
       alarmActions: [PAGE_TOPIC_ARN],
     });
     // The backend emits it with dimension sets [] and ["Reason"]; only [] matches no dims.
+    expect(alarm.inputs.dimensions).toBeUndefined();
+  });
+
+  it.each([
+    ["prompt-failed", "MutualAidPromptFailed"],
+    ["request-failed", "MutualAidRequestFailed"],
+    ["no-officer-reachable", "MutualAidNoOfficerReachable"],
+  ])("pages on-call when mutual aid %s (%s)", async (suffix, metricName) => {
+    await build();
+    const alarm = alarmByName(`boxalarm-dev-alerting-mutual-aid-${suffix}`);
+    expect(alarm.inputs).toMatchObject({
+      namespace: "Boxalarm/Alerting",
+      metricName,
+      threshold: 0,
+      alarmActions: [PAGE_TOPIC_ARN],
+    });
     expect(alarm.inputs.dimensions).toBeUndefined();
   });
 

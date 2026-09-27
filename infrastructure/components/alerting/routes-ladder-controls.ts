@@ -54,6 +54,7 @@ export class RoutesLadderControls extends pulumi.ComponentResource {
   public readonly halt: AlertingRoute;
   public readonly mutualAidTrigger: AlertingRoute;
   public readonly mutualAidAcknowledge: AlertingRoute;
+  public readonly mutualAidAlarms: aws.cloudwatch.MetricAlarm[];
   public readonly failureAlarm: aws.cloudwatch.MetricAlarm;
 
   constructor(
@@ -155,15 +156,17 @@ export class RoutesLadderControls extends pulumi.ComponentResource {
         environment: { ...baseEnvironment, ALERTING_TOPIC_ARN: args.alertingTopicArn },
         additionalPolicyStatements: pulumi.output(args.alertingTopicArn).apply((topicArn) => [
           {
-            // requestMutualAid (escalation/mutualAidPort.ts): GetItem METADATA, the singleton
-            // TransactWriteItems (PutItem), Query of the eligibility snapshot, conditional
-            // PutItem per officer prompt, PutItem of the outbox row.
+            // requestMutualAid (escalation/mutualAidPort.ts): GetItem METADATA and each
+            // existing prompt claim, the singleton TransactWriteItems (PutItem), Query of the
+            // eligibility snapshot, conditional PutItem per officer prompt, UpdateItem marking
+            // a prompt sent, PutItem of the outbox row.
             Sid: "AlertingTableMutualAidWrite",
             Effect: "Allow" as const,
             Action: [
               "dynamodb:GetItem",
               "dynamodb:Query",
               "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
               "dynamodb:TransactWriteItems",
             ],
             Resource: tableArn,
@@ -234,6 +237,34 @@ export class RoutesLadderControls extends pulumi.ComponentResource {
         alarmActions: [args.pageTopicArn],
       },
       { parent: this },
+    );
+
+    // Mutual aid must never fail silently (mutualAidPort.ts / toneEvaluatorHandler.ts):
+    //  - MutualAidPromptFailed: an officer prompt could not be sent (the call is retried);
+    //  - MutualAidRequestFailed: the automatic tone-3 request failed (the evaluation retries);
+    //  - MutualAidNoOfficerReachable: recorded, but no officer has a push target to prompt.
+    this.mutualAidAlarms = [
+      ["prompt-failed", "MutualAidPromptFailed"],
+      ["request-failed", "MutualAidRequestFailed"],
+      ["no-officer-reachable", "MutualAidNoOfficerReachable"],
+    ].map(
+      ([suffix, metricName]) =>
+        new aws.cloudwatch.MetricAlarm(
+          `${name}-mutual-aid-${suffix}-alarm`,
+          {
+            name: `boxalarm-${env}-alerting-mutual-aid-${suffix}`,
+            namespace: "Boxalarm/Alerting",
+            metricName: metricName!,
+            statistic: "Sum",
+            comparisonOperator: "GreaterThanThreshold",
+            threshold: 0,
+            period: 60,
+            evaluationPeriods: 1,
+            treatMissingData: "notBreaching",
+            alarmActions: [args.pageTopicArn],
+          },
+          { parent: this },
+        ),
     );
 
     this.registerOutputs({
