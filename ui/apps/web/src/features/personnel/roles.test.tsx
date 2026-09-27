@@ -123,6 +123,34 @@ test('a chief grants and removes roles through a confirm step that names the cha
   ).toBe(true);
 });
 
+// Review MINOR-8: a demoted ADMIN/CHIEF keeps role-manager rights on their current token.
+test('removing ADMIN or CHIEF warns that rights last until the session refreshes', async () => {
+  serveMember(member(['MEMBER', 'ADMIN']));
+  const user = userEvent.setup();
+  renderDetail(['CHIEF']);
+
+  const form = await screen.findByRole('form', { name: 'Member roles' });
+  await user.click(within(form).getByRole('checkbox', { name: 'ADMIN' }));
+  await user.click(within(form).getByRole('button', { name: 'Review role changes' }));
+
+  const dialog = await screen.findByRole('dialog', { name: 'Change roles for Sam Lee?' });
+  expect(within(dialog).getByText(/Until then Sam can still change roles/)).toBeTruthy();
+  expect(within(dialog).getByText(/Revoke all sessions/)).toBeTruthy();
+});
+
+test('granting a role shows no session warning', async () => {
+  serveMember(member(['MEMBER']));
+  const user = userEvent.setup();
+  renderDetail(['CHIEF']);
+
+  const form = await screen.findByRole('form', { name: 'Member roles' });
+  await user.click(within(form).getByRole('checkbox', { name: 'OFFICER' }));
+  await user.click(within(form).getByRole('button', { name: 'Review role changes' }));
+
+  const dialog = await screen.findByRole('dialog', { name: 'Change roles for Sam Lee?' });
+  expect(within(dialog).queryByText(/Revoke all sessions/)).toBeNull();
+});
+
 test("shows the server's own words when the save fails, and keeps the dialog open", async () => {
   serveMember(member(['MEMBER']), () =>
     HttpResponse.json(

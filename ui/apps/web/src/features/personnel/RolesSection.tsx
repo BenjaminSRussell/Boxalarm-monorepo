@@ -59,6 +59,10 @@ export function RolesSection({ member, canEdit }: { member: Member; canEdit: boo
   });
 
   const summary = describeRoleChange(saved, draft);
+  // A demoted ADMIN/CHIEF keeps role-manager rights on their current token (up to an hour).
+  const removesManagerRole = (['ADMIN', 'CHIEF'] as const).some(
+    (role) => saved.includes(role) && !draft.includes(role),
+  );
 
   async function confirmSave(): Promise<void> {
     try {
@@ -147,7 +151,12 @@ export function RolesSection({ member, canEdit }: { member: Member; canEdit: boo
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title={`Change roles for ${name}?`}
-        consequence={`${summary}. This takes effect within an hour, when ${member.firstName}'s app next refreshes.`}
+        consequence={
+          `${summary}. This takes effect within an hour, when ${member.firstName}'s app next refreshes.` +
+          (removesManagerRole
+            ? ` Until then ${member.firstName} can still change roles. To cut that off now, also use Revoke all sessions on this page.`
+            : '')
+        }
         confirmLabel="Save roles"
         onConfirm={confirmSave}
       />
