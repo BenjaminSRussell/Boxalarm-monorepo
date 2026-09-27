@@ -23,6 +23,7 @@ import {
   updateMemberStatus,
 } from './api';
 import type { AttendanceActivityType, MemberStatus } from './types';
+import { RolesSection } from './RolesSection';
 
 const STATUSES: MemberStatus[] = ['PROBATIONARY', 'ACTIVE', 'LOA', 'RETIRED'];
 const ACTIVITY_TYPES: AttendanceActivityType[] = [
@@ -231,6 +232,8 @@ export function MemberDetailPage() {
   const queryClient = useQueryClient();
   const isAdmin = auth.roles.includes('ADMIN');
   const canRevokeSessions = auth.roles.includes('ADMIN') || auth.roles.includes('CHIEF');
+  // Role assignment is CHIEF/ADMIN only - not OFFICER, who could otherwise promote themselves.
+  const canManageRoles = canRevokeSessions;
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [revokeForbidden, setRevokeForbidden] = useState<unknown>(null);
   const [revoked, setRevoked] = useState(false);
@@ -384,6 +387,8 @@ export function MemberDetailPage() {
               <p role="alert">{statusMutation.error.message}</p>
             </ApiForbiddenGate>
           ) : null}
+
+          <RolesSection member={member} canEdit={canManageRoles} />
 
           {canRevokeSessions ? (
             <div style={{ marginTop: 'var(--boxalarm-spacing-lg)' }}>

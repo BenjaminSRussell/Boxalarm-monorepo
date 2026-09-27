@@ -52,6 +52,29 @@ test('updates a member status through the fixture store', async () => {
   expect(member.status).toBe('ACTIVE');
 });
 
+test('sets member roles through the fixture store the way the server normalizes them', async () => {
+  const response = await apiRequest('personnel/members/m-4/roles', tokens, {
+    method: 'PUT',
+    body: JSON.stringify({ roles: ['CHIEF', 'OFFICER', 'OFFICER'] }),
+  });
+  const result = (await response.json()) as { roles: string[]; changed: boolean };
+  expect(result).toMatchObject({ roles: ['MEMBER', 'OFFICER', 'CHIEF'], changed: true });
+
+  const member = await apiRequest('personnel/members/m-4', tokens);
+  expect(((await member.json()) as { roles: string[] }).roles).toEqual([
+    'MEMBER',
+    'OFFICER',
+    'CHIEF',
+  ]);
+
+  await expect(
+    apiRequest('personnel/members/m-4/roles', tokens, {
+      method: 'PUT',
+      body: JSON.stringify({ roles: ['SUPERUSER'] }),
+    }),
+  ).rejects.toBeInstanceOf(ApiError);
+});
+
 test('gets and puts department config through the fixture store', async () => {
   const initial = await apiRequest('platform/config/ALERT_RULES', tokens);
   const config = (await initial.json()) as { value: { escalationThresholdN: number } };
