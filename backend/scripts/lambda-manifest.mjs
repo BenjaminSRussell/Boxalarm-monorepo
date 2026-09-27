@@ -393,6 +393,26 @@ export const LAMBDA_ENTRIES = [
     entry: 'src/services/alerting-service/audit/deliveryBaselineHandler.ts',
   },
   {
+    service: 'alerting-service',
+    function: 'tone-ladder-advance',
+    entry: 'src/services/alerting-service/ladderControls/advanceHandler.ts',
+  },
+  {
+    service: 'alerting-service',
+    function: 'tone-ladder-halt',
+    entry: 'src/services/alerting-service/ladderControls/haltHandler.ts',
+  },
+  {
+    service: 'alerting-service',
+    function: 'mutual-aid-trigger',
+    entry: 'src/services/alerting-service/ladderControls/mutualAidTriggerHandler.ts',
+  },
+  {
+    service: 'alerting-service',
+    function: 'mutual-aid-acknowledge',
+    entry: 'src/services/alerting-service/ladderControls/mutualAidAcknowledgeHandler.ts',
+  },
+  {
     service: 'personnel-service',
     function: 'push-tokens-register',
     entry: 'src/services/personnel-service/pushTokens/registerToken.ts',
