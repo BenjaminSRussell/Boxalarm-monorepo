@@ -1,9 +1,12 @@
 import { PublishCommand, type SNSClient } from '@aws-sdk/client-sns';
 import {
+  GetCommand,
   PutCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
+import { emitOutcomeMetric } from '@boxalarm/metrics';
 import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { buildBridgeOutboxRecord } from '../platformBusBridge.js';
 import { queryEligibleMembers, type EligibilitySnapshotItem } from '../eligibility/selector.js';
@@ -51,9 +54,37 @@ function cancellationCode(error: unknown, index: number): string | undefined {
   return reasons?.[index]?.Code;
 }
 
+const METRIC_NAMESPACE = 'Boxalarm/Alerting';
+
+/**
+ * Thrown after every reachable officer has been prompted when at least one prompt could not
+ * be sent, so the caller retries: the Tone Evaluator via its Scheduler retry, a manual
+ * trigger via the officer's retry. A repeat is safe - sent prompts are skipped and only the
+ * unsent ones go out again.
+ */
+export class MutualAidPromptIncompleteError extends Error {
+  constructor(
+    readonly failed: number,
+    readonly officers: number,
+  ) {
+    super(`mutual-aid prompt failed for ${failed} of ${officers} officers`);
+    this.name = 'MutualAidPromptIncompleteError';
+  }
+}
+
+type PromptOutcome = 'SENT' | 'ALREADY_SENT' | 'NO_PUSH_TARGET' | 'FAILED';
+
 const ADAPTER_NAME = 'OFFICER_MANUAL_PROMPT';
 const OFFICER_ROLE = 'OFFICER';
 
+/**
+ * Claims, publishes, then marks one officer's prompt sent. The claim alone proves nothing:
+ * a publish that failed after it left the claim behind, and skipping on the claim meant a
+ * retry never prompted that officer. An existing claim is skipped only once sentAt shows it
+ * went out; otherwise it is re-published - safe, because the deterministic
+ * MessageDeduplicationId collapses repeats inside SNS FIFO's window and the push worker's
+ * MAPROMPT send guard collapses them after it.
+ */
 async function promptOfficer(
   ddb: DynamoDBDocumentClient,
   sns: SNSClient,
@@ -63,41 +94,50 @@ async function promptOfficer(
   dispatchId: string,
   dispatch: DispatchAlertText,
   officer: EligibilitySnapshotItem,
-): Promise<boolean> {
+): Promise<PromptOutcome> {
   const pushTarget = resolvePushTarget(officer.contactChannels);
   const idempotencyKey = `${dispatchId}#MUTUALAID#${officer.memberId}#push`;
-  const item = {
+  const key = {
     pk: buildDeptScopedPk(deptId, 'DISPATCH', dispatchId),
     sk: `MAPROMPT#${officer.memberId}#PUSH`,
-    entityType: 'MUTUAL_AID_PROMPT',
-    dispatchId,
-    memberId: officer.memberId,
-    deptId,
-    idempotencyKey,
-    sentAt: Math.floor(Date.now() / 1000),
-    delivered: !pushTarget.skipped,
   };
+  const context = { deptId, dispatchId, memberId: officer.memberId };
   try {
     await ddb.send(
       new PutCommand({
         TableName: tableName,
-        Item: item,
+        Item: {
+          ...key,
+          entityType: 'MUTUAL_AID_PROMPT',
+          dispatchId,
+          memberId: officer.memberId,
+          deptId,
+          idempotencyKey,
+          claimedAt: Math.floor(Date.now() / 1000),
+          delivered: !pushTarget.skipped,
+        },
         ConditionExpression: 'attribute_not_exists(idempotencyKey)',
       }),
     );
   } catch (error) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
-      return false;
+    if (!(error instanceof Error) || error.name !== 'ConditionalCheckFailedException') {
+      logError('alerting.mutualAid.promptWriteFailed', error, context);
+      return 'FAILED';
     }
-    logError('alerting.mutualAid.promptWriteFailed', error, {
-      deptId,
-      dispatchId,
-      memberId: officer.memberId,
-    });
-    return false;
+    try {
+      const existing = await ddb.send(
+        new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }),
+      );
+      if (existing.Item?.sentAt) {
+        return 'ALREADY_SENT';
+      }
+    } catch (readError) {
+      logError('alerting.mutualAid.promptReadFailed', readError, context);
+      return 'FAILED';
+    }
   }
   if (pushTarget.skipped) {
-    return false;
+    return 'NO_PUSH_TARGET';
   }
   try {
     await sns.send(
@@ -120,15 +160,24 @@ async function promptOfficer(
         MessageAttributes: { channel: { DataType: 'String', StringValue: 'push' } },
       }),
     );
-    return true;
   } catch (error) {
-    logError('alerting.mutualAid.promptPublishFailed', error, {
-      deptId,
-      dispatchId,
-      memberId: officer.memberId,
-    });
-    return false;
+    logError('alerting.mutualAid.promptPublishFailed', error, context);
+    return 'FAILED';
   }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: key,
+        UpdateExpression: 'SET sentAt = :sentAt',
+        ExpressionAttributeValues: { ':sentAt': Math.floor(Date.now() / 1000) },
+      }),
+    );
+  } catch (error) {
+    // The prompt went out; a retry may re-publish it, which the dedup id and send guard absorb.
+    logError('alerting.mutualAid.promptMarkSentFailed', error, context);
+  }
+  return 'SENT';
 }
 
 export async function requestMutualAid(input: MutualAidRequestInput): Promise<MutualAidResult> {
@@ -137,6 +186,7 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
   const pk = buildDeptScopedPk(deptId, 'DISPATCH', dispatchId);
   const triggeredAt = Math.floor(Date.now() / 1000);
 
+  let created = true;
   try {
     await ddb.send(
       new TransactWriteCommand({
@@ -196,16 +246,20 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
         cancellationCode(error, SINGLETON_ITEM_INDEX) === undefined ||
         cancellationCode(error, SINGLETON_ITEM_INDEX) === 'ConditionalCheckFailed'
       ) {
+        // Already requested - but an earlier attempt may have died before prompting every
+        // officer, so fall through to the prompt pass, which skips prompts already sent.
         logInfo('alerting.mutualAid.alreadyRequested', { deptId, dispatchId });
-        return { requested: false, officersNotified: 0, adapterUsed: ADAPTER_NAME };
+        created = false;
+      } else {
+        // Any other cancellation (TransactionConflict, throttling) recorded nothing: rethrow so
+        // the caller retries instead of reporting "already requested" when nobody was.
+        logError('alerting.mutualAid.eventWriteFailed', error, { deptId, dispatchId });
+        throw error;
       }
-      // Any other cancellation (TransactionConflict, throttling) recorded nothing: rethrow so
-      // the caller retries instead of reporting "already requested" when nobody was.
+    } else {
       logError('alerting.mutualAid.eventWriteFailed', error, { deptId, dispatchId });
       throw error;
     }
-    logError('alerting.mutualAid.eventWriteFailed', error, { deptId, dispatchId });
-    throw error;
   }
 
   const eligibleMembers = await queryEligibleMembers(ddb, tableName, deptId);
@@ -220,13 +274,17 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
     ),
   );
   let officersNotified = 0;
+  let failed = 0;
   promptResults.forEach((result, index) => {
     if (result.status === 'fulfilled') {
-      if (result.value) {
+      if (result.value === 'SENT') {
         officersNotified += 1;
+      } else if (result.value === 'FAILED') {
+        failed += 1;
       }
       return;
     }
+    failed += 1;
     logError('alerting.mutualAid.promptFailed', result.reason, {
       deptId,
       dispatchId,
@@ -234,24 +292,48 @@ export async function requestMutualAid(input: MutualAidRequestInput): Promise<Mu
     });
   });
 
-  try {
-    await ddb.send(
-      new PutCommand({
-        TableName: tableName,
-        Item: buildBridgeOutboxRecord(deptId, 'alerting.mutual_aid.triggered', dispatchId, {
-          dispatchId,
-          triggeredAt,
-          reason,
-          predicateSnapshot: { officerCount: officers.length },
-          adapterUsed: ADAPTER_NAME,
-          officersNotified,
+  if (created) {
+    try {
+      await ddb.send(
+        new PutCommand({
+          TableName: tableName,
+          Item: buildBridgeOutboxRecord(deptId, 'alerting.mutual_aid.triggered', dispatchId, {
+            dispatchId,
+            triggeredAt,
+            reason,
+            predicateSnapshot: { officerCount: officers.length },
+            adapterUsed: ADAPTER_NAME,
+            officersNotified,
+          }),
         }),
-      }),
-    );
-  } catch (error) {
-    logError('alerting.mutualAid.bridgeOutboxWriteFailed', error, { deptId, dispatchId });
+      );
+    } catch (error) {
+      logError('alerting.mutualAid.bridgeOutboxWriteFailed', error, { deptId, dispatchId });
+    }
   }
 
-  logInfo('alerting.mutualAid.requested', { deptId, dispatchId, reason, officersNotified });
-  return { requested: true, officersNotified, adapterUsed: ADAPTER_NAME };
+  if (created && officers.every((o) => resolvePushTarget(o.contactChannels).skipped)) {
+    // Recorded, but no officer can be prompted: the mutual-aid call depends on someone
+    // noticing. Alarmed (MutualAidNoOfficerReachable) so it is never silent.
+    emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidNoOfficerReachable');
+    logError('alerting.mutualAid.noOfficerReachable', new Error('no officer push target'), {
+      deptId,
+      dispatchId,
+      officerCount: officers.length,
+    });
+  }
+
+  if (failed > 0) {
+    emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidPromptFailed');
+    throw new MutualAidPromptIncompleteError(failed, officers.length);
+  }
+
+  logInfo('alerting.mutualAid.requested', {
+    deptId,
+    dispatchId,
+    reason,
+    created,
+    officersNotified,
+  });
+  return { requested: created, officersNotified, adapterUsed: ADAPTER_NAME };
 }

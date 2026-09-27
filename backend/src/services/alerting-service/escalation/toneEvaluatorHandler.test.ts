@@ -748,6 +748,23 @@ describe('toneEvaluatorHandler manual override (POST /tone-ladder/advance)', () 
     );
   });
 
+  // A mutual-aid failure after the tone-3 commit was only logged, and the next retry stopped
+  // at SKIPPED_ALREADY_FIRED - so the request was lost. It now runs before the commit.
+  it('leaves tone 3 uncommitted when mutual aid fails, so the retry requests it again', async () => {
+    const { handler, items } = await load([
+      { ...METADATA_ITEM, currentToneSequence: 2 },
+      ELIGIBLE_MEMBER,
+    ]);
+    requestMutualAid.mockRejectedValueOnce(new Error('mutual aid prompt failed'));
+
+    await expect(handler(manual(3))).rejects.toThrow('mutual aid prompt failed');
+    expect(items.get(`${PK}#TONE#3`)).toBeUndefined();
+
+    await expect(handler(manual(3))).resolves.toEqual({ outcome: 'FIRED_MANUAL_OVERRIDE' });
+    expect(requestMutualAid).toHaveBeenCalledTimes(2);
+    expect(items.get(`${PK}#TONE#3`)).toBeDefined();
+  });
+
   it('advancing to tone 3 with the predicate met pages tone 3 but does not request mutual aid', async () => {
     const { handler, sns } = await load([
       { ...METADATA_ITEM, currentToneSequence: 2 },

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { SNSClient } from '@aws-sdk/client-sns';
 import { toVerifiedDeptId } from '@boxalarm/dept-scope';
-import { requestMutualAid } from './mutualAidPort.js';
+import { MutualAidPromptIncompleteError, requestMutualAid } from './mutualAidPort.js';
 
 interface FakeItem {
   pk: string;
@@ -73,6 +73,21 @@ function createFakeDdb(
           items.set(`${put.Item.pk}#${put.Item.sk}`, put.Item);
         }
       }
+      return Promise.resolve({});
+    }
+    if (name === 'GetCommand') {
+      const key = (input as { Key: { pk: string; sk: string } }).Key;
+      return Promise.resolve({ Item: items.get(`${key.pk}#${key.sk}`) });
+    }
+    if (name === 'UpdateCommand') {
+      const update = input as {
+        Key: { pk: string; sk: string };
+        ExpressionAttributeValues: Record<string, unknown>;
+      };
+      const key = `${update.Key.pk}#${update.Key.sk}`;
+      const existing = items.get(key);
+      if (existing)
+        items.set(key, { ...existing, sentAt: update.ExpressionAttributeValues[':sentAt'] });
       return Promise.resolve({});
     }
     throw new Error(`fake ddb: unsupported command ${name}`);
@@ -217,7 +232,7 @@ describe('requestMutualAid', () => {
     const snsSend = vi.fn().mockResolvedValue({});
     const sns = { send: snsSend } as unknown as SNSClient;
 
-    const result = await requestMutualAid({
+    const input = {
       ddb: { send } as unknown as DynamoDBDocumentClient,
       sns,
       tableName: 'alerting-table',
@@ -225,15 +240,62 @@ describe('requestMutualAid', () => {
       deptId: DEPT_ID,
       dispatchId: 'dispatch-1',
       dispatch: DISPATCH_TEXT,
-      reason: 'TONE_3_PREDICATE_UNMET',
-    });
+      reason: 'TONE_3_PREDICATE_UNMET' as const,
+    };
 
-    // Does not throw for the whole batch, and the surviving officer is still counted.
-    expect(result).toEqual({
-      requested: true,
+    // The surviving officer is still prompted, but the failure is surfaced so the caller
+    // retries instead of treating mutual aid as fully requested.
+    await expect(requestMutualAid(input)).rejects.toBeInstanceOf(MutualAidPromptIncompleteError);
+    expect(snsSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('a retry after a failed prompt prompts only the officer who was missed', async () => {
+    const officer = (memberId: string): FakeItem => ({
+      pk: ELIGIBILITY_PK,
+      sk: `MEMBER#${memberId}`,
+      entityType: 'MEMBER_ELIGIBILITY_SNAPSHOT',
+      memberId,
+      active: true,
+      quals: [],
+      roles: ['OFFICER'],
+      contactChannels: [{ channel: 'PUSH', token: 'tok', platform: 'ios', valid: true }],
+      availabilityState: 'AVAILABLE',
+      snapshotUpdatedAt: 0,
+    });
+    const { send } = createFakeDdb([officer('officer-a'), officer('officer-b')]);
+    let failedOnce = false;
+    const snsSend = vi.fn((command: { input: { Message: string } }) => {
+      if (!failedOnce && command.input.Message.includes('officer-b')) {
+        failedOnce = true;
+        return Promise.reject(new Error('sns throttled'));
+      }
+      return Promise.resolve({});
+    });
+    const input = {
+      ddb: { send } as unknown as DynamoDBDocumentClient,
+      sns: { send: snsSend } as unknown as SNSClient,
+      tableName: 'alerting-table',
+      topicArn: 'arn:aws:sns:us-east-1:1:alerting-topic.fifo',
+      deptId: DEPT_ID,
+      dispatchId: 'dispatch-1',
+      dispatch: DISPATCH_TEXT,
+      reason: 'TONE_3_PREDICATE_UNMET' as const,
+    };
+
+    await expect(requestMutualAid(input)).rejects.toBeInstanceOf(MutualAidPromptIncompleteError);
+    const firstAttemptCalls = snsSend.mock.calls.length;
+    const retry = await requestMutualAid(input);
+
+    expect(retry).toEqual({
+      requested: false,
       officersNotified: 1,
       adapterUsed: 'OFFICER_MANUAL_PROMPT',
     });
+    const promptedOnRetry = snsSend.mock.calls
+      .slice(firstAttemptCalls)
+      .map((call) => call[0].input.Message);
+    expect(promptedOnRetry).toHaveLength(1);
+    expect(promptedOnRetry[0]).toContain('officer-b');
   });
 
   it('is a no-op the second time it is invoked for the same dispatch (singleton guard)', async () => {

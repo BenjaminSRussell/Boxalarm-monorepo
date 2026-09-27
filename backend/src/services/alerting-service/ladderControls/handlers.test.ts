@@ -557,6 +557,15 @@ describe('POST /mutual-aid/trigger', () => {
         reason: 'TONE_3_PREDICATE_UNMET',
         triggeredAt: 1798000360,
       },
+      // officer-1 was already prompted by the first trigger.
+      {
+        pk: PK,
+        sk: 'MAPROMPT#officer-1#PUSH',
+        entityType: 'MUTUAL_AID_PROMPT',
+        memberId: 'officer-1',
+        idempotencyKey: 'dispatch-1#MUTUALAID#officer-1#push',
+        sentAt: 1798000361,
+      },
     ]);
 
     const result = parse(await handler(buildEvent('mutual-aid/trigger')));

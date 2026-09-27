@@ -605,6 +605,34 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
     eligibleMembers,
   );
 
+  // A manual advance bypasses the predicate to fire, but mutual aid still follows the
+  // architecture's rule — tone 3 fired with the predicate unmet — so an officer advancing a
+  // department that is already staffed does not also page the mutual-aid prompt.
+  //
+  // Requested BEFORE the fire-guard commit, and a failure propagates: once TONE#3 is
+  // committed a retry returns SKIPPED_ALREADY_FIRED and never reaches this line, so a
+  // mutual-aid request that failed after the commit (and was only logged) was lost for
+  // good. Retrying the whole evaluation is safe - tone-3 receipts already marked sent are
+  // skipped, the MUTUALAID singleton is written once, and only unsent prompts go out again.
+  if (toneSequence === TONE_SEQUENCE_THREE && !predicateMet) {
+    try {
+      await requestMutualAid({
+        ddb,
+        sns,
+        tableName,
+        topicArn,
+        deptId,
+        dispatchId,
+        dispatch,
+        reason: 'TONE_3_PREDICATE_UNMET',
+      });
+    } catch (error) {
+      logError('alerting.toneLadder.mutualAidFailed', error, { correlationId });
+      emitOutcomeMetric(METRIC_NAMESPACE, 'MutualAidRequestFailed');
+      throw error;
+    }
+  }
+
   const fireCommit = await commitToneEvaluation(
     ddb,
     tableName,
@@ -621,26 +649,6 @@ export const handler = async (payload: unknown): Promise<{ outcome: ToneOutcome 
   if (fireCommit === 'already_exists') {
     logInfo('alerting.toneLadder.alreadyEvaluated', { correlationId });
     return { outcome: 'SKIPPED_ALREADY_FIRED' };
-  }
-
-  // A manual advance bypasses the predicate to fire, but mutual aid still follows the
-  // architecture's rule — tone 3 fired with the predicate unmet — so an officer advancing a
-  // department that is already staffed does not also page the mutual-aid prompt.
-  if (toneSequence === TONE_SEQUENCE_THREE && !predicateMet) {
-    try {
-      await requestMutualAid({
-        ddb,
-        sns,
-        tableName,
-        topicArn,
-        deptId,
-        dispatchId,
-        dispatch,
-        reason: 'TONE_3_PREDICATE_UNMET',
-      });
-    } catch (error) {
-      logError('alerting.toneLadder.mutualAidFailed', error, { correlationId });
-    }
   }
 
   emitOutcomeMetric(METRIC_NAMESPACE, manualOverride ? 'ToneFiredManualOverride' : 'ToneFired');
