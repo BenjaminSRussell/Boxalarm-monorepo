@@ -12,6 +12,9 @@ export type ButtonSize = 'field' | 'alert';
 
 interface ButtonProps {
   label: string;
+  /** Overrides the spoken name when the visible label alone is ambiguous (e.g. "Retry" in a
+   * list of several records). */
+  accessibilityLabel?: string;
   onPress: (event: GestureResponderEvent) => void;
   variant?: ButtonVariant;
   /** 'field' = the 56dp glove-sized floor; 'alert' = the 72dp alert-path floor
@@ -26,6 +29,7 @@ const SIZE_HEIGHT: Record<ButtonSize, number> = { field: targetSize.field, alert
 
 export function Button({
   label,
+  accessibilityLabel,
   onPress,
   variant = 'primary',
   size = 'field',
@@ -44,6 +48,7 @@ export function Button({
   return (
     <TouchableOpacity
       accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
       accessibilityState={{ disabled: isDisabled, busy: loading }}
       onPress={onPress}
       disabled={isDisabled}

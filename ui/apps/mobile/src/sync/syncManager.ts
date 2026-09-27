@@ -17,6 +17,22 @@ let unsubscribeNetInfo: (() => void) | null = null;
 let recoveredOrphans = false;
 let lastSyncAt: string | null = null;
 const listeners = new Set<Listener>();
+// Ids this process delivered, so a screen can tell "sent" apart from "discarded" once a row
+// leaves the outbox. Bounded: only the screen that queued an item asks, shortly afterwards.
+const recentlySynced = new Set<string>();
+const RECENTLY_SYNCED_LIMIT = 50;
+
+export function hasSynced(id: string): boolean {
+  return recentlySynced.has(id);
+}
+
+function rememberSynced(id: string): void {
+  recentlySynced.add(id);
+  if (recentlySynced.size > RECENTLY_SYNCED_LIMIT) {
+    const oldest = recentlySynced.values().next().value;
+    if (oldest !== undefined) recentlySynced.delete(oldest);
+  }
+}
 
 // Called on every auth/config change (useSyncEngine, mounted once at the app root). While signed in, a NetInfo
 // listener drains on reconnect; on sign-out it is removed so repeated login/logout cycles never
@@ -304,6 +320,7 @@ export async function drain(): Promise<void> {
       try {
         await processEntry(row.id);
         await outbox.markSynced(row.id);
+        rememberSynced(row.id);
         lastSyncAt = new Date().toISOString();
       } catch (error) {
         if (isPermanentRejection(error)) {
