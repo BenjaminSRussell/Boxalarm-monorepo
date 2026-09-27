@@ -47,8 +47,8 @@ test('getShifts returns the real shifts (with empty positions) on a successful c
       shifts: [
         {
           shiftId: 'SHIFT-1',
-          startAt: '2026-10-01T00:00:00Z',
-          endAt: '2026-10-01T12:00:00Z',
+          startAt: Date.parse('2026-10-01T00:00:00Z'),
+          endAt: Date.parse('2026-10-01T12:00:00Z'),
           stationId: 'STATION-1',
           status: 'OPEN',
         },

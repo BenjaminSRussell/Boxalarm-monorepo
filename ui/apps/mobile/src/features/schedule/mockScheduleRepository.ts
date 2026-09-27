@@ -3,8 +3,8 @@ import type { ClaimResult, DutyShift, ScheduleRepository } from './types';
 const SHIFTS: DutyShift[] = [
   {
     shiftId: 'SHIFT-0511',
-    startAt: '2026-09-20T18:00:00Z',
-    endAt: '2026-09-21T06:00:00Z',
+    startAt: Date.parse('2026-09-20T18:00:00Z'),
+    endAt: Date.parse('2026-09-21T06:00:00Z'),
     stationId: 'STATION-1',
     status: 'PARTIALLY_FILLED',
     positions: [
@@ -14,8 +14,8 @@ const SHIFTS: DutyShift[] = [
   },
   {
     shiftId: 'SHIFT-0512',
-    startAt: '2026-09-27T18:00:00Z',
-    endAt: '2026-09-28T06:00:00Z',
+    startAt: Date.parse('2026-09-27T18:00:00Z'),
+    endAt: Date.parse('2026-09-28T06:00:00Z'),
     stationId: 'STATION-1',
     status: 'OPEN',
     positions: [

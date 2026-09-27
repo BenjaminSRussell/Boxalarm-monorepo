@@ -14,7 +14,7 @@ const STATUS_LABEL: Record<ShiftStatus, string> = {
   CANCELLED: 'Cancelled',
 };
 
-function formatShiftTime(startAt: string): string {
+function formatShiftTime(startAt: number): string {
   return new Date(startAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 

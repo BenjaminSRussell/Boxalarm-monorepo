@@ -10,8 +10,9 @@ export interface ShiftPosition {
 
 export interface DutyShift {
   shiftId: string;
-  startAt: string; // ISO
-  endAt: string;
+  /** Epoch milliseconds, as personnel-service stores DUTY_SHIFT.startAt/endAt. */
+  startAt: number;
+  endAt: number;
   stationId: string;
   status: ShiftStatus;
   positions: ShiftPosition[];
