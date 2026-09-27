@@ -26,7 +26,7 @@ vi.mock('@aws-sdk/lib-dynamodb', () => {
   };
 });
 
-const { createMember, getMember, listMembers, updateMemberStatus } =
+const { createMember, getMember, listMembers, updateMemberRoles, updateMemberStatus } =
   await import('./memberRepository.js');
 
 const PRINCIPAL = { deptId: 'NICHOLS' };
@@ -40,7 +40,11 @@ interface FakeCommandCall {
     readonly ConditionExpression?: string;
     readonly ExclusiveStartKey?: Record<string, unknown>;
     readonly TransactItems?: ReadonlyArray<{
-      readonly Update?: { Key: Record<string, unknown>; ConditionExpression: string };
+      readonly Update?: {
+        Key: Record<string, unknown>;
+        ConditionExpression: string;
+        ExpressionAttributeValues?: Record<string, unknown>;
+      };
       readonly Put?: { Item: Record<string, unknown>; ConditionExpression?: string };
     }>;
   };
@@ -212,6 +216,62 @@ describe('memberRepository', () => {
       await expect(
         updateMemberStatus('table', PRINCIPAL, 'm1', 'PROBATIONARY', 'ACTIVE', 'actor-1'),
       ).rejects.toThrow('ConditionalCheckFailed');
+    });
+  });
+
+  describe('updateMemberRoles', () => {
+    it('writes roles, the audit row, and a member.updated outbox entry carrying roles in one transaction', async () => {
+      sendMock.mockResolvedValueOnce({});
+      await updateMemberRoles(
+        'table',
+        PRINCIPAL,
+        'm1',
+        ['MEMBER'],
+        ['MEMBER', 'OFFICER'],
+        'actor-1',
+      );
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const [memberUpdate, auditPut, outboxPut] = lastCall().input.TransactItems ?? [];
+
+      expect(memberUpdate?.Update?.Key).toEqual({ pk: 'DEPT#NICHOLS#MEMBER#m1', sk: 'METADATA' });
+      expect(memberUpdate?.Update?.ConditionExpression).toBe(
+        'attribute_exists(pk) AND #roles = :previousRoles',
+      );
+      expect(memberUpdate?.Update?.ExpressionAttributeValues).toMatchObject({
+        ':previousRoles': ['MEMBER'],
+        ':roles': ['MEMBER', 'OFFICER'],
+      });
+
+      expect(auditPut?.Put?.Item.pk).toMatch(/^DEPT#NICHOLS#AUDIT#\d{4}-\d{2}-\d{2}$/);
+      expect(auditPut?.Put?.Item.changedFields).toEqual({
+        roles: { old: ['MEMBER'], new: ['MEMBER', 'OFFICER'] },
+      });
+      expect(auditPut?.Put?.Item.actorId).toBe('actor-1');
+
+      const outbox = outboxPut?.Put?.Item;
+      expect(outbox).toMatchObject({
+        pk: 'DEPT#NICHOLS#OUTBOX#m1',
+        entityType: 'OUTBOX_ENTRY',
+        eventType: 'personnel.member.updated',
+        source: 'personnel-service',
+        correlationId: 'm1',
+        schemaVersion: '1.0',
+      });
+      expect(typeof outbox?.eventId).toBe('string');
+      expect(Number.isNaN(Date.parse(outbox?.eventTime as string))).toBe(false);
+      expect(outbox?.payload).toEqual({
+        deptId: 'NICHOLS',
+        memberId: 'm1',
+        roles: ['MEMBER', 'OFFICER'],
+      });
+    });
+
+    it('propagates a failed transaction so the handler can answer 503', async () => {
+      sendMock.mockRejectedValueOnce(new Error('TransactionCanceledException'));
+      await expect(
+        updateMemberRoles('table', PRINCIPAL, 'm1', ['MEMBER'], ['MEMBER', 'CHIEF'], 'actor-1'),
+      ).rejects.toThrow('TransactionCanceledException');
     });
   });
 

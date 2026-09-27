@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ForbiddenError, requireAdminRole } from './authz.js';
+import { ForbiddenError, requireAdminRole, requireRoleManager } from './authz.js';
 import type { VerifiedAccessToken } from '../../platform-service/authorizer/tokenVerifier.js';
 
 function ctxWithGroups(groups: string): VerifiedAccessToken {
@@ -26,4 +26,17 @@ describe('requireAdminRole', () => {
   it('denies a caller with an empty groups string', () => {
     expect(() => requireAdminRole(ctxWithGroups(''))).toThrow(ForbiddenError);
   });
+});
+
+describe('requireRoleManager', () => {
+  it.each(['ADMIN', 'CHIEF', 'MEMBER CHIEF'])('allows a caller in %s', (groups) => {
+    expect(() => requireRoleManager(ctxWithGroups(groups))).not.toThrow();
+  });
+
+  it.each(['OFFICER', 'MEMBER OFFICER TRAINING APPARATUS', 'MEMBER', ''])(
+    'denies %j — an officer must not be able to promote anyone, themselves included',
+    (groups) => {
+      expect(() => requireRoleManager(ctxWithGroups(groups))).toThrow(ForbiddenError);
+    },
+  );
 });

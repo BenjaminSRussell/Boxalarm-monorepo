@@ -79,6 +79,11 @@ export const LAMBDA_ENTRIES = [
   },
   {
     service: 'personnel-service',
+    function: 'members-update-roles',
+    entry: 'src/services/personnel-service/members/updateRoles.ts',
+  },
+  {
+    service: 'personnel-service',
     function: 'quals',
     entry: 'src/services/personnel-service/quals/handler.ts',
   },

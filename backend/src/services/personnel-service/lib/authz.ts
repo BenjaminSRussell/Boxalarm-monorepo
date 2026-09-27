@@ -19,3 +19,16 @@ export function requireAdminRole(ctx: VerifiedAccessToken): void {
     throw new ForbiddenError('caller does not hold an admin-gated role (ADMIN, OFFICER, or CHIEF)');
   }
 }
+
+/**
+ * Assigning roles is CHIEF/ADMIN only (F2.7). OFFICER passes requireAdminRole, so reusing
+ * it here would let an officer grant themselves or a friend ADMIN.
+ */
+const ROLE_MANAGER_GROUPS = new Set(['ADMIN', 'CHIEF']);
+
+export function requireRoleManager(ctx: VerifiedAccessToken): void {
+  const groups = ctx['cognito:groups'].split(' ').filter((group) => group.length > 0);
+  if (!groups.some((group) => ROLE_MANAGER_GROUPS.has(group))) {
+    throw new ForbiddenError('only ADMIN or CHIEF may change member roles');
+  }
+}

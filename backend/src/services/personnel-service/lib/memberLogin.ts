@@ -2,10 +2,13 @@ import {
   AdminAddUserToGroupCommand,
   AdminCreateUserCommand,
   AdminDeleteUserCommand,
+  AdminListGroupsForUserCommand,
+  AdminRemoveUserFromGroupCommand,
   CognitoIdentityProviderClient,
   UsernameExistsException,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { captureAWSv3Client } from 'aws-xray-sdk-core';
+import { MEMBER_ROLES, type MemberRole } from './memberRepository.js';
 
 /**
  * Every member is a Cognito user, and the member's id IS that user's `sub`. The apps send
@@ -105,4 +108,75 @@ export async function deleteMemberLogin(
   await client.send(
     new AdminDeleteUserCommand({ UserPoolId: config.userPoolId, Username: username }),
   );
+}
+
+export interface RoleGroupChanges {
+  readonly added: readonly MemberRole[];
+  readonly removed: readonly MemberRole[];
+}
+
+function isMemberRole(group: string): group is MemberRole {
+  return (MEMBER_ROLES as readonly string[]).includes(group);
+}
+
+async function listRoleGroups(
+  client: CognitoIdentityProviderClient,
+  config: MemberLoginConfig,
+  memberId: string,
+): Promise<Set<MemberRole>> {
+  const current = new Set<MemberRole>();
+  let nextToken: string | undefined;
+  do {
+    const page = await client.send(
+      new AdminListGroupsForUserCommand({
+        UserPoolId: config.userPoolId,
+        Username: memberId,
+        NextToken: nextToken,
+      }),
+    );
+    for (const group of page.Groups ?? []) {
+      if (group.GroupName && isMemberRole(group.GroupName)) {
+        current.add(group.GroupName);
+      }
+    }
+    nextToken = page.NextToken;
+  } while (nextToken);
+  return current;
+}
+
+/**
+ * Makes the member's role groups exactly `roles` and returns what changed. The authorizer
+ * and Cedar read roles from `cognito:groups`, so this is what actually grants or revokes
+ * them. Username is the memberId: it is the user's `sub`, which the admin APIs accept.
+ * Groups that are not one of the six roles are never touched. Safe to repeat - a retry
+ * after a partial failure only applies what is still missing.
+ */
+export async function syncRoleGroups(
+  client: CognitoIdentityProviderClient,
+  config: MemberLoginConfig,
+  memberId: string,
+  roles: readonly MemberRole[],
+): Promise<RoleGroupChanges> {
+  const current = await listRoleGroups(client, config, memberId);
+  const added = roles.filter((role) => !current.has(role));
+  const removed = MEMBER_ROLES.filter((role) => current.has(role) && !roles.includes(role));
+  for (const role of added) {
+    await client.send(
+      new AdminAddUserToGroupCommand({
+        UserPoolId: config.userPoolId,
+        Username: memberId,
+        GroupName: role,
+      }),
+    );
+  }
+  for (const role of removed) {
+    await client.send(
+      new AdminRemoveUserFromGroupCommand({
+        UserPoolId: config.userPoolId,
+        Username: memberId,
+        GroupName: role,
+      }),
+    );
+  }
+  return { added, removed };
 }
