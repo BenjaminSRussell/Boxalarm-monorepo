@@ -133,7 +133,7 @@ describe('memberStatusRevocationHandler', () => {
     );
   });
 
-  it('rethrows (never swallows) on malformed payload — absent status — so SQS retries and the DLQ catches it', async () => {
+  it('ignores a member.updated with no status (a profile, push-token or role change) instead of DLQing it', async () => {
     const revokeMemberSession = vi.fn();
     vi.doMock('./cognitoRevocationClient.js', () => ({
       readRevocationConfig: () => ({ userPoolId: 'pool-1' }),
@@ -142,7 +142,26 @@ describe('memberStatusRevocationHandler', () => {
     }));
 
     const { handler } = await import('./memberStatusRevocationHandler.js');
-    const malformed = { ...memberUpdatedEvent('mbr-102', 'LOA'), payload: { memberId: 'mbr-102' } };
+    const rolesChange = {
+      ...memberUpdatedEvent('mbr-102', 'LOA'),
+      payload: { deptId: 'NICHOLS', memberId: 'mbr-102', roles: ['MEMBER', 'OFFICER'] },
+    };
+    const event: SQSEvent = { Records: [sqsRecord(rolesChange)] };
+
+    await expect(handler(event, {} as never, () => undefined)).resolves.toBeUndefined();
+    expect(revokeMemberSession).not.toHaveBeenCalled();
+  });
+
+  it('rethrows (never swallows) on malformed payload — empty status — so SQS retries and the DLQ catches it', async () => {
+    const revokeMemberSession = vi.fn();
+    vi.doMock('./cognitoRevocationClient.js', () => ({
+      readRevocationConfig: () => ({ userPoolId: 'pool-1' }),
+      createRevocationClient: () => ({}),
+      revokeMemberSession,
+    }));
+
+    const { handler } = await import('./memberStatusRevocationHandler.js');
+    const malformed = memberUpdatedEvent('mbr-102', ' ');
     const event: SQSEvent = { Records: [sqsRecord(malformed)] };
 
     await expect(handler(event, {} as never, () => undefined)).rejects.toThrow(
@@ -198,7 +217,7 @@ describe('memberStatusRevocationHandler', () => {
     }));
 
     const { handler } = await import('./memberStatusRevocationHandler.js');
-    const malformed = { ...memberUpdatedEvent('mbr-bad', 'LOA'), payload: { memberId: 'mbr-bad' } };
+    const malformed = memberUpdatedEvent('mbr-bad', '');
     const event: SQSEvent = {
       Records: [
         sqsRecord(malformed, 'msg-bad'),

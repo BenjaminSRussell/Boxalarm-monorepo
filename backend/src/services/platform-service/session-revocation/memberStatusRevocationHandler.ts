@@ -50,13 +50,21 @@ function safeExtractCorrelationId(record: SQSRecord): string | undefined {
   }
 }
 
-function parseMemberStatusEvent(record: SQSRecord): MemberStatusChangedPayload {
+/**
+ * Returns undefined for a member.updated that is not a status change: profile, push-token
+ * and role changes share the event type but carry no `status`, and must not be retried
+ * into the DLQ. A `status` that is present but unusable is still malformed.
+ */
+function parseMemberStatusEvent(record: SQSRecord): MemberStatusChangedPayload | undefined {
   const envelope = unwrapEnvelope(record.body);
   if (envelope.eventType !== 'personnel.member.updated') {
     throw new Error(`unexpected eventType: ${JSON.stringify(envelope.eventType)}`);
   }
   const memberId = envelope.payload?.memberId;
   const status = envelope.payload?.status;
+  if (status === undefined) {
+    return undefined;
+  }
   if (typeof memberId !== 'string' || memberId.trim().length === 0) {
     throw new Error('payload.memberId is required and was not a non-empty string');
   }
@@ -89,7 +97,7 @@ export const handler: Handler<SQSEvent, void> = async (event) => {
   // also letting one malformed record block every later record in the same batch.
   const results = await Promise.allSettled(
     event.Records.map(async (record) => {
-      let payload: MemberStatusChangedPayload;
+      let payload: MemberStatusChangedPayload | undefined;
       try {
         payload = parseMemberStatusEvent(record);
       } catch (error) {
@@ -105,7 +113,7 @@ export const handler: Handler<SQSEvent, void> = async (event) => {
         throw error;
       }
 
-      if (!REVOKING_STATUSES.has(payload.status)) {
+      if (!payload || !REVOKING_STATUSES.has(payload.status)) {
         return;
       }
 

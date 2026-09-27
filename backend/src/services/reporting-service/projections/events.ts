@@ -139,6 +139,11 @@ export function projectionWrites(event: DomainEvent, nowMs: number): readonly Pr
       ];
     }
     case 'personnel.member.updated':
+      // member.updated also carries profile, push-token and role changes, which hold no
+      // status and have nothing for the status rollup.
+      return payload.status === undefined && payload.newStatus === undefined
+        ? []
+        : [memberStatusWrite(payload)];
     case 'personnel.member.created':
       return [memberStatusWrite(payload)];
     case 'personnel.availability.changed': {
