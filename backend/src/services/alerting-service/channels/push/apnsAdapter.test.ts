@@ -1,9 +1,22 @@
 import { generateKeyPairSync, verify, type KeyObject } from 'node:crypto';
-import { createServer, type Http2Server, type IncomingHttpHeaders } from 'node:http2';
+import {
+  constants,
+  createServer,
+  type Http2Server,
+  type IncomingHttpHeaders,
+  type ServerHttp2Session,
+} from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { resetApnsSessions, sendViaApns, type Http2Transport } from './apnsAdapter.js';
+import {
+  APNS_SESSION_MAX_IDLE_MS,
+  http2Transport,
+  isConnectionLevelError,
+  resetApnsSessions,
+  sendViaApns,
+  type Http2Transport,
+} from './apnsAdapter.js';
 import { resetPushCredentialCaches } from './pushCredentials.js';
 import type { PushNotification } from './pushPayload.js';
 
@@ -296,4 +309,104 @@ describe('sendViaApns host selection and sandbox isolation', () => {
       expect(origins).toEqual([]);
     },
   );
+});
+
+describe('http2Transport connection handling (review M1)', () => {
+  let server: Http2Server;
+  let origin: string;
+  const serverSessions: ServerHttp2Session[] = [];
+  let mode: 'ok' | 'goaway-next' = 'ok';
+
+  beforeAll(async () => {
+    server = createServer();
+    server.on('session', (session) => serverSessions.push(session));
+    server.on('stream', (stream, headers) => {
+      stream.on('error', () => undefined);
+      if (mode === 'goaway-next') {
+        mode = 'ok';
+        // Refuse every stream on this connection, as APNs does when it drains one.
+        stream.session?.goaway(constants.NGHTTP2_NO_ERROR, 0);
+        stream.close(constants.NGHTTP2_REFUSED_STREAM);
+        return;
+      }
+      const path = String(headers[':path']);
+      if (path.endsWith('/hang')) return;
+      const respond = () => {
+        stream.respond({ ':status': 200 });
+        stream.end('');
+      };
+      if (path.endsWith('/slow')) setTimeout(respond, 300);
+      else stream.on('end', respond).resume();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    resetApnsSessions();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  afterEach(() => {
+    resetApnsSessions();
+    serverSessions.length = 0;
+    mode = 'ok';
+    vi.useRealTimers();
+  });
+
+  const post = (path: string, timeoutMs = 2_000) =>
+    http2Transport(origin, { ':path': `/3/device/${path}` }, '{}', timeoutMs);
+
+  it('a connection the server closed while idle is replaced in-process: the next page still succeeds', async () => {
+    await expect(post('first')).resolves.toMatchObject({ status: 200 });
+    expect(serverSessions).toHaveLength(1);
+
+    // The far side drops the connection; the client has not yet processed the close (as when
+    // the Lambda was frozen) when the next page goes out on the cached session.
+    serverSessions[0]!.destroy();
+    await expect(post('second')).resolves.toMatchObject({ status: 200 });
+    expect(serverSessions).toHaveLength(2);
+  });
+
+  it('a GOAWAY that refuses the page is retried once on a fresh connection', async () => {
+    await post('warm');
+    mode = 'goaway-next';
+    await expect(post('after-goaway')).resolves.toMatchObject({ status: 200 });
+    expect(serverSessions).toHaveLength(2);
+  });
+
+  it('a session idle past the threshold is replaced before use, not trusted', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    await post('first');
+    await post('soon-after');
+    expect(serverSessions).toHaveLength(1);
+    vi.setSystemTime(Date.now() + APNS_SESSION_MAX_IDLE_MS + 1_000);
+    await post('after-idle');
+    expect(serverSessions).toHaveLength(2);
+  });
+
+  it('a timed-out page cancels only its own stream: a sibling on the same connection still completes', async () => {
+    const [hung, sibling] = await Promise.allSettled([post('hang', 100), post('slow', 2_000)]);
+
+    expect(hung.status).toBe('rejected');
+    expect((hung as PromiseRejectedResult).reason).toBeInstanceOf(Error);
+    expect(String((hung as PromiseRejectedResult).reason)).toContain('timed out after 100ms');
+    expect(sibling).toMatchObject({ status: 'fulfilled', value: { status: 200 } });
+    expect(serverSessions).toHaveLength(1);
+    // The connection answered the PING, so it stays cached for the next page.
+    await post('next');
+    expect(serverSessions).toHaveLength(1);
+  });
+
+  it('classifies connection-level errors (and only those) as retryable on a fresh connection', () => {
+    for (const code of [
+      'ECONNRESET',
+      'EPIPE',
+      'ERR_HTTP2_GOAWAY_SESSION',
+      'ERR_HTTP2_STREAM_ERROR',
+    ]) {
+      expect(isConnectionLevelError(Object.assign(new Error(code), { code }))).toBe(true);
+    }
+    expect(isConnectionLevelError(new Error('APNs responded 500'))).toBe(false);
+  });
 });
