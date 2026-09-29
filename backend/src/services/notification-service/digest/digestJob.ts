@@ -124,7 +124,7 @@ async function planDeliveries(
   deptId: VerifiedDeptId,
   pending: readonly PendingReminder[],
   correlationId: string,
-): Promise<Delivery[]> {
+): Promise<{ deliveries: Delivery[]; unreachable: number }> {
   const deliveries = new Map<string, Delivery>();
   const add = (memberId: string, category: string, item: ReminderItem, email?: string) => {
     const key = `${memberId}#${category}`;
@@ -142,6 +142,7 @@ async function planDeliveries(
   let roster: RosterMember[] | undefined;
   let rosterFailed = false;
   const unheld = new Set<string>();
+  let unreachable = 0;
   for (const row of pending) {
     if (row.recipientType === 'MEMBER') {
       add(row.recipientId, deliveryCategory(row.category, 'MEMBER'), row.item);
@@ -167,6 +168,7 @@ async function planDeliveries(
         },
       );
       emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
+      unreachable += 1;
       continue;
     }
     const category = deliveryCategory(row.category, 'ROLE');
@@ -190,7 +192,7 @@ async function planDeliveries(
       add(member.memberId, category, row.item, member.email);
     }
   }
-  return [...deliveries.values()];
+  return { deliveries: [...deliveries.values()], unreachable };
 }
 
 async function claimDigestSlot(
@@ -411,7 +413,14 @@ export const handler = async (payload: unknown): Promise<{ processed: number }> 
     );
     emitOutcomeMetric(METRIC_NAMESPACE, 'DigestPendingRowMalformed');
   }
-  const deliveries = await planDeliveries(ddb, tableName, deptId, pending, correlationId);
+  const { deliveries, unreachable } = await planDeliveries(
+    ddb,
+    tableName,
+    deptId,
+    pending,
+    correlationId,
+  );
+  let failed = unreachable;
 
   let processed = 0;
   for (const delivery of deliveries) {
@@ -424,7 +433,16 @@ export const handler = async (payload: unknown): Promise<{ processed: number }> 
         category: delivery.category,
       });
       emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
+      failed += 1;
     }
+  }
+
+  // Every recipient has been tried. Fail the invocation so EventBridge Scheduler retries
+  // (3 times within the hour, digest.ts): each DIGESTSENT claim makes the retry skip everyone
+  // already sent, and the day's pending rows are only read by today's runs — swallowing the
+  // failure would drop those items for good.
+  if (failed > 0) {
+    throw new Error(`digest failed for ${failed} recipient(s); ${processed} sent`);
   }
 
   return { processed };

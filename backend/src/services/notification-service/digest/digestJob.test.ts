@@ -400,9 +400,10 @@ describe('digestJob handler (entrypoint-test obligation)', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { handler } = await import('./digestJob.js');
 
-    const result = await handler({ deptId: 'NICHOLS' });
-
-    expect(result).toEqual({ processed: 1 });
+    // The other group is still sent, then the run fails so Scheduler retries (review minor 2).
+    await expect(handler({ deptId: 'NICHOLS' })).rejects.toThrow(
+      'digest failed for 1 recipient(s); 1 sent',
+    );
     expect(sendPushDigest).toHaveBeenCalledTimes(1);
     expect(
       errorSpy.mock.calls.some((call) =>
@@ -449,9 +450,9 @@ describe('digestJob handler (entrypoint-test obligation)', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { handler } = await import('./digestJob.js');
 
-    const result = await handler({ deptId: 'NICHOLS' });
-
-    expect(result).toEqual({ processed: 1 });
+    await expect(handler({ deptId: 'NICHOLS' })).rejects.toThrow(
+      'digest failed for 1 recipient(s); 1 sent',
+    );
     expect(sendPushDigest).toHaveBeenCalledTimes(2);
     expect(sendEmailDigest).toHaveBeenCalledTimes(1);
     expect(
@@ -465,5 +466,66 @@ describe('digestJob handler (entrypoint-test obligation)', () => {
       ),
     ).toBe(true);
     errorSpy.mockRestore();
+  });
+
+  it('a Scheduler retry after a partial failure sends only the member who failed (review minor 2)', async () => {
+    const table = new Map<string, Record<string, unknown>>();
+    const send = vi.fn().mockImplementation((command: CommandLike) => {
+      if (command.constructor.name === 'QueryCommand') {
+        return Promise.resolve({
+          Items: [
+            pendingItem('MEMBER', 'MBR-FAIL', 'CERT-1'),
+            pendingItem('MEMBER', 'MBR-OK', 'CERT-2'),
+          ],
+        });
+      }
+      if (command.constructor.name === 'GetCommand') {
+        return Promise.resolve({
+          Item: keySk(command) === 'METADATA' ? { email: 'm@example.com' } : undefined,
+        });
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const put = (
+          command.input.TransactItems as { Put: { Item: { pk: string; sk: string } } }[]
+        )[0]!.Put;
+        const key = `${put.Item.pk}#${put.Item.sk}`;
+        if (table.has(key)) {
+          return Promise.reject(
+            Object.assign(new Error('exists'), {
+              name: 'TransactionCanceledException',
+              CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+            }),
+          );
+        }
+        table.set(key, put.Item);
+        return Promise.resolve({});
+      }
+      if (command.constructor.name === 'DeleteCommand') {
+        const key = command.input.Key as { pk: string; sk: string };
+        table.delete(`${key.pk}#${key.sk}`);
+      }
+      return Promise.resolve({});
+    });
+    mockDdb(send);
+    let failOnce = true;
+    const sendPushDigest = vi.fn().mockImplementation((_env: unknown, r: { memberId: string }) => {
+      if (r.memberId === 'MBR-FAIL' && failOnce) {
+        failOnce = false;
+        return Promise.reject(new Error('SNS throttled'));
+      }
+      return Promise.resolve(undefined);
+    });
+    const sendEmailDigest = vi.fn().mockResolvedValue(undefined);
+    mockChannelSender(sendPushDigest, sendEmailDigest);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await import('./digestJob.js');
+
+    await expect(handler({ deptId: 'NICHOLS' })).rejects.toThrow();
+    // The retry succeeds; MBR-OK's DIGESTSENT claim makes it a no-op for them.
+    await expect(handler({ deptId: 'NICHOLS' })).resolves.toBeDefined();
+
+    expect(
+      sendPushDigest.mock.calls.map((call) => (call[1] as { memberId: string }).memberId),
+    ).toEqual(['MBR-FAIL', 'MBR-OK', 'MBR-FAIL']);
   });
 });
