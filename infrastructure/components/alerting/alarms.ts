@@ -218,8 +218,9 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     // Push token invalidations (review M3). APNs answers BadDeviceToken both for a dead token
     // and for one sent to the wrong APNs environment, so a burst of invalidations usually means
     // the stack's APNs secret `environment` (or bundle id) does not match the installed app
-    // builds, not that members' phones died. The worker stops invalidating past 3 distinct
-    // tokens per 5 minutes and throws (MassInvalidationBlocked); both are paged.
+    // builds, not that members' phones died. Past 3 distinct tokens in the current and previous
+    // 5-minute windows the worker trips a 1-hour latch: no further invalidations, and those
+    // pages throw instead (MassInvalidationBlocked). Both are paged.
     pageAlarm("push-token-invalid-rate-alarm", {
       name: `boxalarm-${env}-alerting-push-token-invalid-rate`,
       alarmDescription:

@@ -327,14 +327,23 @@ describe('deliverChannelMessage — direct APNs/FCM push path', () => {
 
   /** Guard claim succeeds; the eligibility snapshot read returns the given push entry. */
   function tableWithSnapshot(pushEntry: Record<string, unknown>) {
-    return vi.fn().mockImplementation((command: { constructor: { name: string } }) => {
-      if (command.constructor.name === 'GetCommand') {
-        return Promise.resolve({
-          Item: { contactChannels: [pushEntry, { channel: 'sms', token: '+12035550100' }] },
-        });
-      }
-      return Promise.resolve({});
-    });
+    return vi
+      .fn()
+      .mockImplementation(
+        (command: { constructor: { name: string }; input: { Key?: { sk?: string } } }) => {
+          // Only the member's eligibility snapshot exists; the guard's latch and window items
+          // do not, so the guard admits.
+          if (
+            command.constructor.name === 'GetCommand' &&
+            command.input.Key?.sk === 'MEMBER#mbr-1'
+          ) {
+            return Promise.resolve({
+              Item: { contactChannels: [pushEntry, { channel: 'sms', token: '+12035550100' }] },
+            });
+          }
+          return Promise.resolve({});
+        },
+      );
   }
 
   it('builds a critical dispatch push with a per-tone collapse key and the exactly-once idempotency key, routed by the registered platform', async () => {
@@ -544,8 +553,8 @@ describe('deliverChannelMessage — direct APNs/FCM push path', () => {
   });
 });
 
-describe('deliverChannelMessage — mass token invalidation guard (review M3)', () => {
-  it('when the guard trips, the token is NOT invalidated and the send throws so the page stays loud', async () => {
+describe('deliverChannelMessage — mass token invalidation guard (review M3, round 2 N4)', () => {
+  function mockDeadToken(): void {
     const sendPush = vi
       .fn()
       .mockResolvedValue({ outcome: 'invalid_token', reason: 'APNS_BadDeviceToken' });
@@ -554,31 +563,115 @@ describe('deliverChannelMessage — mass token invalidation guard (review M3)', 
       ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
       sendPush,
     }));
+  }
+
+  type Command = { constructor: { name: string }; input: Record<string, unknown> };
+  const skOf = (command: Command) => (command.input.Key as { sk?: string } | undefined)?.sk ?? '';
+  const snapshot = {
+    Item: {
+      snapshotUpdatedAt: 1,
+      contactChannels: [{ channel: 'PUSH', token: 'tok-1', valid: true }],
+    },
+  };
+  const snapshotWrites = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls.filter(
+      ([command]) =>
+        (command as Command).constructor.name === 'UpdateCommand' &&
+        skOf(command as Command) === 'MEMBER#mbr-1',
+    );
+
+  it('when the guard trips, the token is NOT invalidated, the latch is written and the send throws', async () => {
+    mockDeadToken();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const send = vi
-      .fn()
-      .mockImplementation(
-        (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
-          const sk = (command.input.Key as { sk?: string } | undefined)?.sk ?? '';
-          if (command.constructor.name === 'UpdateCommand' && sk.startsWith('WINDOW#')) {
-            return Promise.resolve({
-              Attributes: { tokenHashes: new Set(['a', 'b', 'c', 'd']) },
-            });
-          }
-          return Promise.resolve({});
-        },
-      );
+    const send = vi.fn().mockImplementation((command: Command) => {
+      if (command.constructor.name === 'GetCommand' && skOf(command) === 'MEMBER#mbr-1') {
+        return Promise.resolve(snapshot);
+      }
+      if (command.constructor.name === 'UpdateCommand' && skOf(command).startsWith('WINDOW#')) {
+        return Promise.resolve({ Attributes: { tokenHashes: new Set(['a', 'b', 'c', 'd']) } });
+      }
+      return Promise.resolve({});
+    });
     const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
 
     await expect(
       deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
     ).rejects.toThrow('push token invalidation refused');
 
-    const touchedSnapshot = send.mock.calls.some(
-      (call) =>
-        ((call[0] as { input: { Key?: { sk?: string } } }).input.Key?.sk ?? '') === 'MEMBER#mbr-1',
+    expect(snapshotWrites(send)).toHaveLength(0);
+    const latchPut = send.mock.calls
+      .map(([command]) => command as Command)
+      .find(
+        (command) =>
+          command.constructor.name === 'PutCommand' &&
+          (command.input.Item as { sk: string }).sk === 'TRIPPED',
+      );
+    expect(latchPut).toBeDefined();
+    errorSpy.mockRestore();
+  });
+
+  it('while the latch holds, every invalidation is refused before counting', async () => {
+    mockDeadToken();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const send = vi.fn().mockImplementation((command: Command) => {
+      if (command.constructor.name === 'GetCommand' && skOf(command) === 'MEMBER#mbr-1') {
+        return Promise.resolve(snapshot);
+      }
+      if (command.constructor.name === 'GetCommand' && skOf(command) === 'TRIPPED') {
+        return Promise.resolve({ Item: { ttl: Math.floor(Date.now() / 1000) + 600 } });
+      }
+      return Promise.resolve({});
+    });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
+    ).rejects.toThrow('guard is tripped');
+    expect(snapshotWrites(send)).toHaveLength(0);
+    errorSpy.mockRestore();
+  });
+
+  it('a rejection of a token the member has since replaced never reaches the guard (review round 2 m4)', async () => {
+    mockDeadToken();
+    const send = vi.fn().mockImplementation((command: Command) => {
+      if (command.constructor.name === 'GetCommand' && skOf(command) === 'MEMBER#mbr-1') {
+        return Promise.resolve({
+          Item: { contactChannels: [{ channel: 'PUSH', token: 'tok-new', valid: true }] },
+        });
+      }
+      return Promise.resolve({});
+    });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
+
+    expect(
+      send.mock.calls.some(([command]) => skOf(command as Command).startsWith('WINDOW#')),
+    ).toBe(false);
+  });
+
+  it('when the guard itself cannot reach DynamoDB, the token is kept and nothing is thrown (review round 2 m5)', async () => {
+    mockDeadToken();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const send = vi.fn().mockImplementation((command: Command) => {
+      if (command.constructor.name === 'GetCommand' && skOf(command) === 'MEMBER#mbr-1') {
+        return Promise.resolve(snapshot);
+      }
+      if (skOf(command) === 'TRIPPED') {
+        return Promise.reject(new Error('ProvisionedThroughputExceeded'));
+      }
+      return Promise.resolve({});
+    });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
+    ).resolves.toBeUndefined();
+
+    expect(snapshotWrites(send)).toHaveLength(0);
+    expect(errorSpy.mock.calls.some(([line]) => String(line).includes('invalidate_failed'))).toBe(
+      true,
     );
-    expect(touchedSnapshot).toBe(false);
     errorSpy.mockRestore();
   });
 });

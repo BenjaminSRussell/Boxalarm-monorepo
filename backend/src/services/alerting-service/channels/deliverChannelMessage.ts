@@ -298,27 +298,24 @@ async function invalidateDeadToken(
   invalidSinceMs: number | undefined,
 ): Promise<void> {
   try {
-    await admitTokenInvalidation(ddb, tableName, deptId, token);
+    const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token, {
+      ...(invalidSinceMs !== undefined ? { invalidSinceMs } : {}),
+      // Counted only when this token would really be invalidated (not a replaced or
+      // re-registered one), right before the write.
+      beforeInvalidate: () => admitTokenInvalidation(ddb, tableName, deptId, token),
+    });
+    logInfo('alerting.pushToken.invalidated_by_send', { correlationId, memberId, outcome });
   } catch (error) {
     if (error instanceof MassTokenInvalidationError) {
-      // Too many tokens rejected at once reads as a gateway misconfiguration, not dead devices:
-      // leave every token valid and throw so the page redelivers, dead-letters and pages on-call.
+      // A burst of rejected tokens reads as a gateway misconfiguration, not dead devices. This
+      // token stays valid, and so does every later one while the guard's latch holds. Throw
+      // so the page redelivers, dead-letters and pages on-call.
       logError('alerting.pushToken.mass_invalidation_blocked', error, { correlationId, memberId });
       emitOutcomeMetric(METRIC_NAMESPACE, 'MassInvalidationBlocked', 'push');
       throw error;
     }
-    // Could not count it: keep the token (a wasted send later beats disabling a live device).
-    logError('alerting.pushToken.invalidation_guard_failed', error, { correlationId, memberId });
-    return;
-  }
-  try {
-    const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token, {
-      ...(invalidSinceMs !== undefined ? { invalidSinceMs } : {}),
-    });
-    logInfo('alerting.pushToken.invalidated_by_send', { correlationId, memberId, outcome });
-  } catch (error) {
-    // The page already failed terminally; a failed invalidation only means the next page
-    // tries the dead token again and re-attempts this write.
+    // The guard could not decide, or the write failed: the token stays valid (a wasted send
+    // later beats disabling a live device). The page already failed terminally.
     logError('alerting.pushToken.invalidate_failed', error, { correlationId, memberId });
   }
 }

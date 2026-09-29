@@ -50,12 +50,20 @@ export async function invalidatePushToken(
      * registered at or after it was re-registered by a live device and is left alone.
      */
     readonly invalidSinceMs?: number;
+    /**
+     * Runs once, only when the entry is about to be invalidated (not for no_match or
+     * reregistered), before the write. Throwing aborts the invalidation and the token stays
+     * valid. The push worker's mass-invalidation guard hooks in here, so it counts only real
+     * invalidations.
+     */
+    readonly beforeInvalidate?: () => Promise<void>;
   } = {},
 ): Promise<InvalidatePushTokenResult> {
   assertNoDelimiter(memberId, 'memberId');
   const pk = buildDeptScopedPk(deptId, 'ELIGIBILITY');
   const sk = `MEMBER#${memberId}`;
 
+  let admitted = false;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     const existing = await client.send(new GetCommand({ TableName: tableName, Key: { pk, sk } }));
     const currentChannels =
@@ -70,6 +78,11 @@ export async function invalidatePushToken(
       pushEntry.registeredAt >= options.invalidSinceMs
     ) {
       return 'reregistered';
+    }
+
+    if (!admitted) {
+      await options.beforeInvalidate?.();
+      admitted = true;
     }
 
     const snapshotUpdatedAt = existing.Item.snapshotUpdatedAt as number | undefined;
