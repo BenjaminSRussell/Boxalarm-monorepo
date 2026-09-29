@@ -13,6 +13,7 @@ import { loadRoster, membersWithRoles, readChannelMutes } from '../reminders/rec
 import { buildNotificationItem, isConditionalPutFailed } from '../repository.js';
 import {
   logError,
+  MalformedEventError,
   METRIC_NAMESPACE,
   parseEnvelope,
   recordReminder,
@@ -31,7 +32,12 @@ interface DefectReminder extends ReminderRecord {
   readonly immediate: boolean;
 }
 
-function toDefectReminder({ payload }: EventEnvelope): DefectReminder {
+function toDefectReminder({ payload, eventTime }: EventEnvelope): DefectReminder {
+  // The inbox record for an out-of-service defect is keyed on the event time; the outbox
+  // always sets it, and without it a redelivery could not find the record it already wrote.
+  if (!eventTime || !Number.isFinite(Date.parse(eventTime))) {
+    throw new MalformedEventError(LABEL);
+  }
   const unitLabel = requireString(payload, 'unitLabel', LABEL);
   const severity = requireString(payload, 'severity', LABEL);
   const immediate = payload.outOfService === true || IMMEDIATE_SEVERITIES.has(severity);
@@ -235,8 +241,9 @@ async function deliverImmediately(
 ): Promise<void> {
   const roster = await loadRoster(ddb, tableName, deptId);
   const recipients = membersWithRoles(roster, categoryConfig(APPARATUS_DEFECT_CATEGORY).roles);
-  const eventTime = envelope.eventTime ? Date.parse(envelope.eventTime) : Number.NaN;
-  const createdAt = Number.isFinite(eventTime) ? eventTime : Date.now();
+  // Validated in toDefectReminder: the inbox record's key is built from it, so it must be the
+  // same on every redelivery — never the clock.
+  const createdAt = Date.parse(envelope.eventTime!);
 
   let failed = 0;
   for (const member of recipients) {

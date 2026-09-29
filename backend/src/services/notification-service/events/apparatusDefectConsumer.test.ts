@@ -41,7 +41,11 @@ function defect(overrides: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
-function sqsEvent(payload: Record<string, unknown>): SQSEvent {
+function sqsEvent(
+  payload: Record<string, unknown>,
+  /** null omits eventTime from the envelope. */
+  eventTime: string | null = '2026-09-29T14:03:00.000Z',
+): SQSEvent {
   return {
     Records: [
       {
@@ -53,7 +57,7 @@ function sqsEvent(payload: Record<string, unknown>): SQSEvent {
           source: 'apparatus-service',
           detail: {
             eventId: 'evt-9',
-            eventTime: '2026-09-29T14:03:00.000Z',
+            ...(eventTime === null ? {} : { eventTime }),
             eventType: 'apparatus.defect.reported',
             source: 'apparatus-service',
             correlationId: 'trace-9',
@@ -474,6 +478,20 @@ describe('apparatusDefectConsumer — nobody to tell', () => {
 });
 
 describe('apparatusDefectConsumer — malformed', () => {
+  it.each([null, 'not-a-date'])(
+    'rejects an event whose eventTime is %s rather than keying the inbox on the clock',
+    async (eventTime) => {
+      const send = vi.fn();
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { handler } = await load(send, vi.fn());
+
+      await expect(handler(sqsEvent(defect({ outOfService: true }), eventTime))).rejects.toThrow(
+        'apparatus.defect.reported event failed shape validation',
+      );
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects a payload without outOfService-independent required fields', async () => {
     const send = vi.fn();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
