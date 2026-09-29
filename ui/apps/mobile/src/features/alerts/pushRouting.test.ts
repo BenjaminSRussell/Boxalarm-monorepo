@@ -18,13 +18,18 @@ jest.mock('../../navigation/navigationRef', () => ({
   }),
 }));
 
-// NSUserDefaults via the in-memory Settings stand-in from jest.setup.js; __emitChange stands
-// in for the native settingsUpdated event.
+// NSUserDefaults via the Settings stand-in from jest.setup.js, which keeps React Native's
+// native store and JS-side copy apart. AppDelegate's tap record is a native write
+// (`nativeWrite`), visible to JS only at cold start (`coldStart`, the constants snapshot) or
+// through the settingsUpdated event (`settingsWatcher`).
 const settingsStub = Settings as typeof Settings & {
   __reset: () => void;
+  __nativeWrite: (values: Record<string, unknown>) => void;
+  __coldStart: () => void;
   __emitChange: () => void;
 };
-const setDefaults = (values: Record<string, unknown>) => Settings.set(values);
+const nativeWrite = (values: Record<string, unknown>) => settingsStub.__nativeWrite(values);
+const coldStart = () => settingsStub.__coldStart();
 const settingsWatcher = () => settingsStub.__emitChange();
 let appStateListener: ((status: string) => void) | undefined;
 
@@ -133,7 +138,8 @@ describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () =
   });
 
   test('cold start: a tap recorded before JS loaded routes once the navigator mounts, then is cleared', () => {
-    setDefaults(tap('DISP-COLD'));
+    nativeWrite(tap('DISP-COLD'));
+    coldStart();
     mockNavigationReady = false;
 
     subscribePushNotificationRouting();
@@ -146,28 +152,39 @@ describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () =
     expect(Settings.get('boxalarm.pendingAlertTap')).toBeNull();
   });
 
-  test('background/foreground: a tap recorded while running routes via the settings change', () => {
+  test('background/foreground: a native tap record reaches JS only through the settings change event', () => {
     subscribePushNotificationRouting();
-    setDefaults(tap('DISP-WARM'));
+    nativeWrite(tap('DISP-WARM'));
+    // Not visible to Settings.get yet - React Native only learns of it from settingsUpdated.
+    appStateListener?.('active');
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
     settingsWatcher();
 
     expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
     expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-WARM');
-    // The clear itself triggers another settings change, which must not navigate again.
+    // Clearing the record does not echo (RCTSettingsManager ignores its own writes), and a later
+    // unrelated settings change must not navigate again.
     settingsWatcher();
     expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
   });
 
-  test('resume: a tap pending when the app becomes active routes', () => {
+  test('resume retries a tap that reached JS while navigation could not take it', () => {
+    mockNavigationReady = false;
     subscribePushNotificationRouting();
-    setDefaults(tap('DISP-RESUME'));
+    nativeWrite(tap('DISP-RESUME'));
+    settingsWatcher();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
+    mockNavigationReady = true;
     appStateListener?.('active');
 
     expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-RESUME');
   });
 
   test('a stale tap (older than 10 minutes) is discarded without navigating', () => {
-    setDefaults(tap('DISP-OLD', nowSeconds() - 601));
+    nativeWrite(tap('DISP-OLD', nowSeconds() - 601));
+    coldStart();
 
     subscribePushNotificationRouting();
 
@@ -176,7 +193,8 @@ describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () =
   });
 
   test('a malformed record is discarded without navigating', () => {
-    setDefaults({ 'boxalarm.pendingAlertTap': { dispatchId: 7, tappedAt: nowSeconds() } });
+    nativeWrite({ 'boxalarm.pendingAlertTap': { dispatchId: 7, tappedAt: nowSeconds() } });
+    coldStart();
 
     subscribePushNotificationRouting();
 
@@ -185,7 +203,8 @@ describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () =
 
   test('Android never reads the iOS tap record', () => {
     Platform.OS = 'android';
-    setDefaults(tap('DISP-IOS-ONLY'));
+    nativeWrite(tap('DISP-IOS-ONLY'));
+    coldStart();
 
     subscribePushNotificationRouting();
 

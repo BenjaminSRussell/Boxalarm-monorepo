@@ -47,6 +47,8 @@ Push goes to APNs and FCM directly — no push vendor. `ChannelWorkers` creates 
 
 Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4). `critical` without that entitlement does not get critical treatment. `time-sensitive` needs the Time Sensitive Notifications capability, which is now in `ui/apps/mobile/ios/Boxalarm/Boxalarm.entitlements` and must also be enabled on the App ID in the developer portal. Neither level has been verified on a device in Sleep Focus yet. The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset. A self-test refused for a configuration reason is recorded as a failed test and not retried. Examples: sender or topic mismatch, credentials refused. A real page refused the same way throws, dead-letters and pages on-call.
 
+Before relying on push, run the device checklist in `docs/runbooks/push-device-verification.md`. It covers critical and time-sensitive delivery, foreground presentation, and cold, background and foreground tap routing on iOS and Android.
+
 ## Deploying
 
 `lambdaCode()` (`components/shared/lambda-code.ts`) wires each Lambda to `../backend/dist/<service>/<function>/index.mjs`

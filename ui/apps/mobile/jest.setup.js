@@ -103,26 +103,49 @@ jest.mock('@op-engineering/op-sqlite', () => {
 });
 
 // React Native's Settings (NSUserDefaults on iOS) needs the native SettingsManager, which Jest
-// does not link. An in-memory stand-in with the same API; tests drive it through jest.fn state.
+// does not link. This stand-in models what Settings.ios.js really does. `get` reads a JS-side copy
+// taken from the native constants at module load (`__coldStart`) and refreshed only by the
+// native settingsUpdated event (`__emitChange`). A native NSUserDefaults write (`__nativeWrite`,
+// e.g. AppDelegate recording a tap) is invisible to `get` until that event arrives. `set` writes
+// both copies without an event, as RCTSettingsManager ignores its own writes.
 jest.mock('react-native/Libraries/Settings/Settings', () => {
-  let values = {};
+  let native = {};
+  let js = {};
   const watchers = [];
+  const merge = (target, next) => {
+    const merged = { ...target, ...next };
+    Object.keys(next).forEach((key) => {
+      if (next[key] === null || next[key] === undefined) delete merged[key];
+    });
+    return merged;
+  };
   return {
     __esModule: true,
     default: {
-      get: jest.fn((key) => values[key]),
+      get: jest.fn((key) => js[key]),
       set: jest.fn((next) => {
-        values = { ...values, ...next };
+        js = { ...js, ...next };
+        native = merge(native, next);
       }),
       watchKeys: jest.fn((_keys, callback) => watchers.push(callback) - 1),
       clearWatch: jest.fn((id) => {
         watchers[id] = null;
       }),
       __reset: () => {
-        values = {};
+        native = {};
+        js = {};
         watchers.length = 0;
       },
-      __emitChange: () => watchers.forEach((callback) => callback && callback()),
+      __nativeWrite: (next) => {
+        native = merge(native, next);
+      },
+      __coldStart: () => {
+        js = { ...native };
+      },
+      __emitChange: () => {
+        js = { ...native };
+        watchers.forEach((callback) => callback && callback());
+      },
     },
   };
 });
