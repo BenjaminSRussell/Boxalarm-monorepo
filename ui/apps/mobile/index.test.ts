@@ -1,7 +1,10 @@
-import { setBackgroundMessageHandler } from '@react-native-firebase/messaging';
+import { onMessage, setBackgroundMessageHandler } from '@react-native-firebase/messaging';
 import { AppRegistry } from 'react-native';
 import { App } from './src/App';
-import { handleBackgroundPushMessage } from './src/features/alerts/pushNotificationDisplay';
+import {
+  handleBackgroundPushMessage,
+  handleForegroundPushMessage,
+} from './src/features/alerts/pushNotificationDisplay';
 
 jest.mock('react-native', () => ({ AppRegistry: { registerComponent: jest.fn() } }));
 jest.mock('./src/App', () => ({
@@ -11,6 +14,7 @@ jest.mock('./src/App', () => ({
 }));
 jest.mock('./src/features/alerts/pushNotificationDisplay', () => ({
   handleBackgroundPushMessage: jest.fn(async () => undefined),
+  handleForegroundPushMessage: jest.fn(async () => undefined),
 }));
 
 import './index';
@@ -32,4 +36,17 @@ test('routes background FCM messages through the fail-safe background handler', 
   await handler({ data: { dispatchId: 'DISP-1' } });
 
   expect(handleBackgroundPushMessage).toHaveBeenCalledWith({ dispatchId: 'DISP-1' });
+});
+
+test('routes foreground FCM messages (app open) through the fail-safe display path at app start', async () => {
+  const onMessageMock = onMessage as jest.Mock;
+  expect(onMessageMock).toHaveBeenCalledTimes(1);
+
+  const handler = onMessageMock.mock.calls[0][1] as (message: unknown) => Promise<void>;
+  await handler({ data: { dispatchId: 'DISP-2', category: 'dispatch' } });
+
+  expect(handleForegroundPushMessage).toHaveBeenCalledWith({
+    dispatchId: 'DISP-2',
+    category: 'dispatch',
+  });
 });
