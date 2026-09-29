@@ -321,7 +321,7 @@ describe('apparatus.defect.reported (outbox) -> apparatusDefectConsumer', () => 
 
     await handler(event);
 
-    expect(writes).toEqual([
+    expect(writes.filter((w) => w.entityType === 'NOTIFICATION')).toEqual([
       expect.objectContaining({
         entityType: 'NOTIFICATION',
         pk: 'DEPT#NICHOLS#MEMBER#LT-1',

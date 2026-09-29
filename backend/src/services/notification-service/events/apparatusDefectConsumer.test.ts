@@ -94,7 +94,17 @@ function fakeTable(mutes: Record<string, { push: boolean; email: boolean }> = {}
     if (name === 'PutCommand') {
       const item = command.input.Item as { pk: string; sk: string };
       const key = `${item.pk}|${item.sk}`;
-      if (command.input.ConditionExpression && rows.has(key)) {
+      const existing = rows.get(key);
+      const staleBefore = (
+        command.input.ExpressionAttributeValues as { ':staleBefore'?: number } | undefined
+      )?.[':staleBefore'];
+      // attribute_not_exists(sk) [OR (attribute_not_exists(sentAt) AND claimedAt < :staleBefore)]
+      const takeover =
+        staleBefore !== undefined &&
+        existing !== undefined &&
+        existing.sentAt === undefined &&
+        (existing.claimedAt as number) < staleBefore;
+      if (command.input.ConditionExpression && existing && !takeover) {
         return Promise.reject(
           Object.assign(new Error('exists'), { name: 'ConditionalCheckFailedException' }),
         );
@@ -222,7 +232,7 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
     ).toEqual(['APP-1', 'LT-1']);
   });
 
-  it('a failed push releases that inbox record and rejects, so the redelivery retries only them', async () => {
+  it('a failed push keeps the inbox record, releases only the push claim, and the redelivery re-pushes just that member', async () => {
     const table = fakeTable();
     const push = vi
       .fn()
@@ -235,7 +245,12 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
     await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow(
       'immediate defect delivery failed for 1 recipient(s)',
     );
-    expect(inboxRows(table).map((row) => row.memberId)).toEqual(['APP-1']);
+    expect(
+      inboxRows(table)
+        .map((row) => row.memberId)
+        .sort(),
+    ).toEqual(['APP-1', 'LT-1']);
+    expect(table.rows.has('DEPT#NICHOLS#MEMBER#LT-1|DEFECTPUSH#evt-9')).toBe(false);
 
     push.mockReset().mockResolvedValue(undefined);
     await handler(sqsEvent(defect({ outOfService: true })));
@@ -244,6 +259,95 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
       'LT-1',
     ]);
     expect(inboxRows(table)).toHaveLength(2);
+  });
+
+  it('a push that fails on every receive (to the DLQ) never costs anyone their inbox record', async () => {
+    const table = fakeTable();
+    const push = vi.fn().mockRejectedValue(new Error('SNS throttled'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await load(table.send, push);
+
+    for (let receive = 1; receive <= 5; receive += 1) {
+      await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow();
+    }
+
+    expect(push).toHaveBeenCalledTimes(10);
+    expect(
+      inboxRows(table)
+        .map((row) => row.memberId)
+        .sort(),
+    ).toEqual(['APP-1', 'LT-1']);
+  });
+
+  it('a mute read that keeps failing still leaves every inbox record in place', async () => {
+    const table = fakeTable();
+    const inner = table.send.getMockImplementation() as (command: CommandLike) => Promise<unknown>;
+    table.send.mockImplementation((command: CommandLike) =>
+      command.constructor.name === 'GetCommand'
+        ? Promise.reject(new Error('GetItem throttled'))
+        : inner(command),
+    );
+    const push = vi.fn();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await load(table.send, push);
+
+    await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow();
+    await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow();
+
+    expect(push).not.toHaveBeenCalled();
+    expect(inboxRows(table)).toHaveLength(2);
+  });
+
+  it('a handler that died after the inbox write but before pushing still pushes on redelivery', async () => {
+    const table = fakeTable();
+    const push = vi.fn().mockResolvedValue(undefined);
+    const { handler } = await load(table.send, push);
+    // Simulate the crashed first receive: both inbox records exist, no push claim does.
+    await handler(sqsEvent(defect({ outOfService: true })));
+    for (const key of [...table.rows.keys()].filter((k) => k.includes('DEFECTPUSH#'))) {
+      table.rows.delete(key);
+    }
+    push.mockClear();
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(inboxRows(table)).toHaveLength(2);
+  });
+
+  it('a handler that died after claiming but before pushing: the redelivery takes the stale claim over', async () => {
+    const table = fakeTable();
+    const push = vi.fn().mockResolvedValue(undefined);
+    const { handler, CLAIM_STALE_MS } = await load(table.send, push);
+    const claimedAt = Date.now() - CLAIM_STALE_MS - 1_000;
+    for (const member of ['APP-1', 'LT-1']) {
+      table.rows.set(`DEPT#NICHOLS#MEMBER#${member}|DEFECTPUSH#evt-9`, {
+        pk: `DEPT#NICHOLS#MEMBER#${member}`,
+        sk: 'DEFECTPUSH#evt-9',
+        claimedAt,
+      });
+    }
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(push).toHaveBeenCalledTimes(2);
+  });
+
+  it('a fresh claim held by a concurrent invocation is not taken over (no double push)', async () => {
+    const table = fakeTable();
+    const push = vi.fn().mockResolvedValue(undefined);
+    const { handler } = await load(table.send, push);
+    table.rows.set('DEPT#NICHOLS#MEMBER#LT-1|DEFECTPUSH#evt-9', {
+      pk: 'DEPT#NICHOLS#MEMBER#LT-1',
+      sk: 'DEFECTPUSH#evt-9',
+      claimedAt: Date.now(),
+    });
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(push.mock.calls.map((call) => (call[1] as { memberId: string }).memberId)).toEqual([
+      'APP-1',
+    ]);
   });
 
   it('rejects when the roster cannot be read, delivering to nobody', async () => {

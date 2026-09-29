@@ -51,13 +51,101 @@ function toDefectReminder({ payload }: EventEnvelope): DefectReminder {
   };
 }
 
-type ImmediateOutcome = 'Delivered' | 'AlreadyDelivered' | 'Failed';
+type ImmediateOutcome = 'Delivered' | 'Failed';
+type ChannelOutcome = 'Sent' | 'AlreadySent' | 'Muted' | 'Failed';
 
 /**
- * One officer's copy of an out-of-service defect: the inbox record first (conditional, and
- * keyed on the eventId and event time so a redelivery finds it), then a non-critical push
- * unless they muted apparatus-defect push. A failed push removes the inbox record again so
- * the redelivery retries both — the same claim/release shape as the digest.
+ * How long a channel claim stays owned by the invocation that took it. The queue's
+ * visibility timeout (30s) outlasts the Lambda's (25s), so by the time SQS redelivers a
+ * message whose handler died between claiming and sending, the claim is stale and the
+ * redelivery takes it over rather than skipping the send.
+ */
+export const CLAIM_STALE_MS = 30_000;
+const CLAIM_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+function claimKey(deptId: VerifiedDeptId, memberId: string, marker: string, eventId: string) {
+  return { pk: buildDeptScopedPk(deptId, 'MEMBER', memberId), sk: `${marker}#${eventId}` };
+}
+
+/**
+ * At-most-once-per-success delivery on one channel, independent of the inbox record: claim
+ * `{marker}#{eventId}` (new, or abandoned by a dead invocation), send, then stamp sentAt.
+ * A failed send releases only the claim, so the redelivery retries just that channel.
+ */
+async function sendOnce(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  deptId: VerifiedDeptId,
+  memberId: string,
+  marker: string,
+  envelope: EventEnvelope,
+  send: () => Promise<void>,
+): Promise<ChannelOutcome> {
+  const key = claimKey(deptId, memberId, marker, envelope.eventId);
+  const now = Date.now();
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          ...key,
+          entityType: 'NOTIFICATION_DELIVERY_CLAIM',
+          claimedAt: now,
+          ttl: Math.floor(now / 1000) + CLAIM_TTL_SECONDS,
+        },
+        ConditionExpression:
+          'attribute_not_exists(sk) OR (attribute_not_exists(sentAt) AND claimedAt < :staleBefore)',
+        ExpressionAttributeValues: { ':staleBefore': now - CLAIM_STALE_MS },
+      }),
+    );
+  } catch (error) {
+    if (isConditionalPutFailed(error)) {
+      return 'AlreadySent';
+    }
+    logError(`${LOG_PREFIX}.claim_failed`, error, envelope.eventId, { memberId, marker });
+    return 'Failed';
+  }
+
+  try {
+    await send();
+  } catch (error) {
+    logError(`${LOG_PREFIX}.send_failed`, error, envelope.eventId, { memberId, marker });
+    try {
+      await ddb.send(new DeleteCommand({ TableName: tableName, Key: key }));
+    } catch (releaseError) {
+      logError(`${LOG_PREFIX}.release_failed`, releaseError, envelope.eventId, {
+        memberId,
+        marker,
+      });
+    }
+    return 'Failed';
+  }
+
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          ...key,
+          entityType: 'NOTIFICATION_DELIVERY_CLAIM',
+          claimedAt: now,
+          sentAt: Date.now(),
+          ttl: Math.floor(now / 1000) + CLAIM_TTL_SECONDS,
+        },
+      }),
+    );
+  } catch (error) {
+    // Sent, but not recorded as sent: a redelivery after the claim goes stale may send again.
+    logError(`${LOG_PREFIX}.mark_sent_failed`, error, envelope.eventId, { memberId, marker });
+  }
+  return 'Sent';
+}
+
+/**
+ * One recipient's copy of an out-of-service defect. The inbox record is written
+ * idempotently (a conditional Put keyed on the eventId and event time; "already there" is
+ * success) and is never removed. Each outbound channel then goes through its own claim, so
+ * a failure on one channel neither erases the inbox record nor blocks a retry of the send.
  */
 async function deliverTo(
   ddb: DynamoDBDocumentClient,
@@ -86,46 +174,40 @@ async function deliverTo(
       }),
     );
   } catch (error) {
-    if (isConditionalPutFailed(error)) {
-      return 'AlreadyDelivered';
+    if (!isConditionalPutFailed(error)) {
+      logError(`${LOG_PREFIX}.inbox_write_failed`, error, envelope.eventId, { memberId });
+      return 'Failed';
     }
-    logError(`${LOG_PREFIX}.inbox_write_failed`, error, envelope.eventId, { memberId });
-    return 'Failed';
   }
 
+  let mutes: { push: boolean; email: boolean };
   try {
-    const mutes = await readChannelMutes(
+    mutes = await readChannelMutes(
       ddb,
       tableName,
       deptId,
       memberId,
       categoryConfig(APPARATUS_DEFECT_CATEGORY).muteKey,
     );
-    if (!mutes.push) {
-      await sendPushDigest(
-        process.env,
-        { memberId, email },
-        [item],
-        envelope.correlationId ?? envelope.eventId,
-        undefined,
-        APPARATUS_DEFECT_CATEGORY,
-      );
-    }
   } catch (error) {
-    logError(`${LOG_PREFIX}.push_failed`, error, envelope.eventId, { memberId });
-    try {
-      await ddb.send(
-        new DeleteCommand({
-          TableName: tableName,
-          Key: { pk: buildDeptScopedPk(deptId, 'MEMBER', memberId), sk: notification.sk },
-        }),
-      );
-    } catch (releaseError) {
-      logError(`${LOG_PREFIX}.release_failed`, releaseError, envelope.eventId, { memberId });
-    }
+    logError(`${LOG_PREFIX}.mute_read_failed`, error, envelope.eventId, { memberId });
     return 'Failed';
   }
-  return 'Delivered';
+
+  const push: ChannelOutcome = mutes.push
+    ? 'Muted'
+    : await sendOnce(ddb, tableName, deptId, memberId, 'DEFECTPUSH', envelope, () =>
+        sendPushDigest(
+          process.env,
+          { memberId, email },
+          [item],
+          envelope.correlationId ?? envelope.eventId,
+          undefined,
+          APPARATUS_DEFECT_CATEGORY,
+        ),
+      );
+  emitOutcomeMetric(METRIC_NAMESPACE, `ApparatusDefectPush${push}`);
+  return push === 'Failed' ? 'Failed' : 'Delivered';
 }
 
 async function deliverImmediately(
