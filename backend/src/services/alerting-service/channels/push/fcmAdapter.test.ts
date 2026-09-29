@@ -3,7 +3,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { sendViaFcm } from './fcmAdapter.js';
+import { buildFcmRequest, sendViaFcm } from './fcmAdapter.js';
 import {
   FCM_OAUTH_SCOPE,
   GOOGLE_OAUTH_TOKEN_URL,
@@ -406,5 +406,71 @@ describe('sendViaFcm self-test configuration refusals (review M5)', () => {
   it.each([429, 503])('a self-test %i still throws (transient, worth a retry)', async (status) => {
     reply = { status, body: { error: { status: 'UNAVAILABLE' } } };
     await expect(send(true)).rejects.toThrow(`FCM responded ${status}`);
+  });
+});
+
+describe('buildFcmRequest apns block (review minor 4)', () => {
+  it('honours the configured interruption level for a legacy iOS FCM token', () => {
+    const request = buildFcmRequest(dispatch, false, Date.now(), 'time-sensitive') as {
+      message: { apns: { payload: { aps: Record<string, unknown> } } };
+    };
+    expect(request.message.apns.payload.aps['interruption-level']).toBe('time-sensitive');
+    expect(request.message.apns.payload.aps.sound).toBe('default');
+  });
+
+  it('reads apnsInterruptionLevel from the FCM secret and sends it', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(
+              (url as string).endsWith('/token')
+                ? { access_token: 'a', expires_in: 3599 }
+                : { name: 'msg/1' },
+            ),
+            { status: 200 },
+          ),
+        ),
+      );
+    try {
+      const secret = JSON.stringify({
+        ...(JSON.parse(SERVICE_ACCOUNT) as object),
+        apnsInterruptionLevel: 'time-sensitive',
+      });
+      await sendViaFcm(dispatch, {
+        secretId: 'fcm-level',
+        isTest: false,
+        secretsClient: secretsClient(secret),
+        timeoutMs: 4_000,
+        fcmOrigin: 'https://fcm.test',
+        oauthTokenUrl: 'https://oauth.test/token',
+      });
+      const sendCall = fetchSpy.mock.calls.find(([url]) =>
+        (url as string).includes('messages:send'),
+      );
+      const body = JSON.parse((sendCall?.[1] as RequestInit).body as string) as {
+        message: { apns: { payload: { aps: Record<string, unknown> } } };
+      };
+      expect(body.message.apns.payload.aps['interruption-level']).toBe('time-sensitive');
+    } finally {
+      fetchSpy.mockRestore();
+      resetPushCredentialCaches();
+    }
+  });
+
+  it('refuses an invalid apnsInterruptionLevel (fail closed)', async () => {
+    const secret = JSON.stringify({
+      ...(JSON.parse(SERVICE_ACCOUNT) as object),
+      apnsInterruptionLevel: 'loud',
+    });
+    await expect(
+      sendViaFcm(dispatch, {
+        secretId: 'fcm-bad-level',
+        isTest: false,
+        secretsClient: secretsClient(secret),
+        timeoutMs: 4_000,
+      }),
+    ).rejects.toThrow('apnsInterruptionLevel must be');
   });
 });

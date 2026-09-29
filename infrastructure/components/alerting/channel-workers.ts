@@ -47,7 +47,9 @@ const PLACEHOLDER_ENDPOINT_URL: Record<VendorChannel, string> = {
  *
  * FCM (`fcm`, `fcmSandbox`) — the Firebase service-account key JSON exactly as downloaded
  * (project_id, private_key_id, private_key, client_email, ...), for a service account with
- * the Firebase Cloud Messaging API Admin role. Sandbox sends are `validate_only`; the sandbox
+ * the Firebase Cloud Messaging API Admin role, plus an optional `"apnsInterruptionLevel"` key
+ * (default "critical"; set it like the APNs secret's `interruptionLevel`) for iOS devices still
+ * on a legacy FCM token. Sandbox sends are `validate_only`; the sandbox
  * service account must be in the app's own Firebase project (another project gets
  * SENDER_ID_MISMATCH on every self-test).
  *

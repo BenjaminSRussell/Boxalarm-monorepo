@@ -30,6 +30,12 @@ export interface FcmCredentials {
   readonly clientEmail: string;
   readonly privateKey: string;
   readonly privateKeyId?: string | undefined;
+  /**
+   * Interruption level for the `apns` block FCM carries to an iOS device still on a legacy FCM
+   * token. An optional `apnsInterruptionLevel` key added to the service-account JSON, set the
+   * same as the APNs secret's `interruptionLevel`; defaults to `critical`.
+   */
+  readonly apnsInterruptionLevel: ApnsInterruptionLevel;
 }
 
 const ENV_KEYS: Record<PushPlatform, { readonly prod: string; readonly sandbox: string }> = {
@@ -138,7 +144,14 @@ export async function loadFcmCredentials(
 ): Promise<FcmCredentials> {
   const secret = await readSecretJson(secretId, client);
   const privateKeyId = secret.private_key_id;
+  const level = secret.apnsInterruptionLevel;
+  if (level !== undefined && level !== 'critical' && level !== 'time-sensitive') {
+    throw new Error(
+      `Secret ${secretId} apnsInterruptionLevel must be "critical" or "time-sensitive"`,
+    );
+  }
   return {
+    apnsInterruptionLevel: level ?? 'critical',
     projectId: requireString(secret, 'project_id', secretId),
     clientEmail: requireString(secret, 'client_email', secretId),
     privateKey: requireString(secret, 'private_key', secretId),

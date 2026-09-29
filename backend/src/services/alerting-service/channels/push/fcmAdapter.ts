@@ -4,6 +4,7 @@ import {
   fcmAccessToken,
   loadFcmCredentials,
   PushProviderAuthError,
+  type ApnsInterruptionLevel,
 } from './pushCredentials.js';
 import {
   apnsCollapseId,
@@ -38,6 +39,7 @@ export function buildFcmRequest(
   notification: PushNotification,
   isTest: boolean,
   nowMs: number = Date.now(),
+  apnsInterruptionLevel: ApnsInterruptionLevel = 'critical',
 ): Record<string, unknown> {
   return {
     // Self-test/canary: FCM validates the whole message (token included) but delivers nothing.
@@ -53,7 +55,7 @@ export function buildFcmRequest(
           'apns-push-type': 'alert',
           'apns-collapse-id': apnsCollapseId(notification.collapseKey),
         },
-        payload: buildApnsPayload(notification, 'critical'),
+        payload: buildApnsPayload(notification, apnsInterruptionLevel),
       },
     },
   };
@@ -135,7 +137,14 @@ async function sendViaFcmOnce(
         'content-type': 'application/json',
         authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify(buildFcmRequest(notification, options.isTest)),
+      body: JSON.stringify(
+        buildFcmRequest(
+          notification,
+          options.isTest,
+          Date.now(),
+          credentials.apnsInterruptionLevel,
+        ),
+      ),
       signal: AbortSignal.timeout(options.timeoutMs),
     },
   );
