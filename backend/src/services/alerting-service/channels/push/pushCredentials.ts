@@ -70,6 +70,23 @@ interface CachedSecret {
 
 const secretCache = new Map<string, CachedSecret>();
 
+/**
+ * In-flight reads and token fetches, shared by concurrent callers: a cold container handed a
+ * batch of ten pages makes one GetSecretValue and one OAuth call, not ten of each.
+ */
+const secretReads = new Map<string, Promise<Record<string, unknown>>>();
+const accessTokenFetches = new Map<string, Promise<string>>();
+
+function coalesce<T>(inFlight: Map<string, Promise<T>>, key: string, fn: () => Promise<T>) {
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  const promise = fn().finally(() => {
+    if (inFlight.get(key) === promise) inFlight.delete(key);
+  });
+  inFlight.set(key, promise);
+  return promise;
+}
+
 async function readSecretJson(
   secretId: string,
   client: SecretsManagerClient,
@@ -78,6 +95,13 @@ async function readSecretJson(
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
   }
+  return coalesce(secretReads, secretId, () => fetchSecretJson(secretId, client));
+}
+
+async function fetchSecretJson(
+  secretId: string,
+  client: SecretsManagerClient,
+): Promise<Record<string, unknown>> {
   const output = await client.send(new GetSecretValueCommand({ SecretId: secretId }));
   if (!output.SecretString) {
     throw new Error(`Secret ${secretId} has no SecretString value`);
@@ -239,6 +263,17 @@ export async function fcmAccessToken(
   if (cached && cached.expiresAt > now) {
     return cached.token;
   }
+  return coalesce(accessTokenFetches, cacheKey, () =>
+    fetchFcmAccessToken(cacheKey, credentials, options, now),
+  );
+}
+
+async function fetchFcmAccessToken(
+  cacheKey: string,
+  credentials: FcmCredentials,
+  options: FcmAccessTokenOptions,
+  now: number,
+): Promise<string> {
   const tokenUrl = options.tokenUrl ?? GOOGLE_OAUTH_TOKEN_URL;
   const iat = Math.floor(now / 1000);
   const assertion = signJwt(
@@ -294,7 +329,8 @@ export async function fcmAccessToken(
  */
 export function evictPushCredentials(secretId: string): void {
   secretCache.delete(secretId);
-  for (const cache of [apnsJwtCache, fcmAccessTokenCache]) {
+  secretReads.delete(secretId);
+  for (const cache of [apnsJwtCache, fcmAccessTokenCache, accessTokenFetches]) {
     for (const key of cache.keys()) {
       if (key.startsWith(`${secretId}#`)) cache.delete(key);
     }
@@ -306,6 +342,8 @@ export class PushProviderAuthError extends Error {}
 
 export function resetPushCredentialCaches(): void {
   secretCache.clear();
+  secretReads.clear();
   apnsJwtCache.clear();
   fcmAccessTokenCache.clear();
+  accessTokenFetches.clear();
 }

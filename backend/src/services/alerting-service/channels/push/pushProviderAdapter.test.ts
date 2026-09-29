@@ -170,3 +170,79 @@ describe('sendPush sandbox isolation (architecture §1.3)', () => {
     ).resolves.toEqual({ outcome: 'sent' });
   });
 });
+
+describe('credential reads are coalesced across concurrent sends (review minor 5)', () => {
+  it('ten concurrent APNs pages on a cold container read the secret once', async () => {
+    const { sendPush } = await import('./pushProviderAdapter.js');
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const send = vi.fn(async () => {
+      await gate;
+      return {
+        SecretString: JSON.stringify({
+          teamId: 'TEAM',
+          keyId: 'KEY',
+          privateKey: P8,
+          bundleId: 'org.nicholsfd.boxalarm',
+        }),
+      };
+    });
+    const { transport } = okTransport();
+    const pending = Array.from({ length: 10 }, () =>
+      sendPush(notification, 'APNS', env, {
+        secretsClient: { send } as unknown as SecretsManagerClient,
+        apnsTransport: transport,
+      }),
+    );
+    release();
+    await expect(Promise.all(pending)).resolves.toHaveLength(10);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('ten concurrent FCM pages fetch one OAuth token', async () => {
+    const { sendPush } = await import('./pushProviderAdapter.js');
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({
+      type: 'pkcs8',
+      format: 'pem',
+    });
+    const secrets = {
+      send: vi.fn(() =>
+        Promise.resolve({
+          SecretString: JSON.stringify({
+            project_id: 'p',
+            client_email: 'sa@p.iam.gserviceaccount.com',
+            private_key: rsa.toString(),
+          }),
+        }),
+      ),
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(
+              (url as string).endsWith('/token')
+                ? { access_token: 'a', expires_in: 3599 }
+                : { name: 'm' },
+            ),
+            { status: 200 },
+          ),
+        ),
+      );
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        sendPush({ ...notification, token: 'fcm' }, 'FCM', env, {
+          secretsClient: secrets as unknown as SecretsManagerClient,
+          fcmOrigin: 'https://fcm.test',
+          oauthTokenUrl: 'https://oauth.test/token',
+        }),
+      ),
+    );
+    const tokenCalls = fetchSpy.mock.calls.filter(([url]) => (url as string).endsWith('/token'));
+    expect(tokenCalls).toHaveLength(1);
+    expect(secrets.send).toHaveBeenCalledTimes(1);
+  });
+});
