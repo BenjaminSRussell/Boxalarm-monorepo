@@ -11,7 +11,8 @@ const CATEGORY_LABEL: Record<string, string> = {
   'apparatus-test-due': 'Apparatus tests due',
   'apparatus-defect': 'Apparatus defects reported',
   'inventory-reorder': 'Supplies to reorder',
-  'ppe-expiry': 'PPE expiring',
+  'ppe-expiry': 'Your PPE expiring',
+  'ppe-expiry-officer': 'Department PPE expiring',
 };
 
 export function categoryLabel(category: string): string {
@@ -34,7 +35,12 @@ export interface ReminderPreference {
 /** Every mutable reminder category, in the order the preferences screen lists them. */
 export const REMINDER_PREFERENCES: readonly ReminderPreference[] = [
   { category: CERT_EXPIRY_CATEGORY, legend: 'Certification-expiry reminders' },
-  { category: 'ppe-expiry', legend: 'PPE expiry reminders' },
+  { category: 'ppe-expiry', legend: 'Your PPE expiry reminders' },
+  {
+    category: 'ppe-expiry-officer',
+    legend: 'Department PPE expiry reminders',
+    roles: ['APPARATUS'],
+  },
   {
     category: 'apparatus-test-due',
     legend: 'Apparatus test reminders',

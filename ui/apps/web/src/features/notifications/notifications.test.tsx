@@ -362,7 +362,7 @@ test('renders each reminder category with its title, what is due, and a link whe
     },
     {
       notificationId: 'n-ppe',
-      category: 'ppe-expiry',
+      category: 'ppe-expiry-officer',
       summary: '1 PPE item expiring',
       items: [
         {
@@ -385,7 +385,7 @@ test('renders each reminder category with its title, what is due, and a link whe
   expect(await screen.findByText('Apparatus defects reported')).toBeTruthy();
   expect(screen.getByText('Apparatus tests due')).toBeTruthy();
   expect(screen.getByText('Supplies to reorder')).toBeTruthy();
-  expect(screen.getByText('PPE expiring')).toBeTruthy();
+  expect(screen.getByText('Department PPE expiring')).toBeTruthy();
 
   const oos = screen.getByRole('link', { name: 'E1 reported out of service' });
   expect(oos.getAttribute('href')).toBe('/apparatus/E1');
@@ -443,7 +443,7 @@ test('preferences: a MEMBER is offered only the reminders about their own record
 
   await certGroup();
   const legends = screen.getAllByRole('group').map((g) => g.querySelector('legend')?.textContent);
-  expect(legends).toEqual(['Certification-expiry reminders', 'PPE expiry reminders']);
+  expect(legends).toEqual(['Certification-expiry reminders', 'Your PPE expiry reminders']);
 });
 
 test('preferences: an apparatus officer can mute each apparatus reminder category on its own key', async () => {
@@ -467,7 +467,8 @@ test('preferences: an apparatus officer can mute each apparatus reminder categor
   const legends = screen.getAllByRole('group').map((g) => g.querySelector('legend')?.textContent);
   expect(legends).toEqual([
     'Certification-expiry reminders',
-    'PPE expiry reminders',
+    'Your PPE expiry reminders',
+    'Department PPE expiry reminders',
     'Apparatus test reminders',
     'Apparatus defect reports',
     'Supply reorder reminders',

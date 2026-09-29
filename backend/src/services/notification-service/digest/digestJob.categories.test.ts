@@ -184,7 +184,7 @@ describe('digestJob across reminder categories', () => {
     }
   });
 
-  it('ppe-expiry reaches the holder and the APPARATUS role; the holder gets the item once', async () => {
+  it('ppe-expiry reaches the holder under ppe-expiry and the APPARATUS role under ppe-expiry-officer', async () => {
     const ppe = item('APP-OFFICER:TURNOUT-COAT', 'TURNOUT-COAT');
     const { push } = await run([
       memberRow('FF-1', 'ppe-expiry', item('FF-1:HELMET', 'HELMET')),
@@ -195,16 +195,41 @@ describe('digestJob across reminder categories', () => {
 
     expect(pushedTo(push)).toEqual([
       'APP-OFFICER:ppe-expiry',
-      'CHIEF-1:ppe-expiry',
+      'APP-OFFICER:ppe-expiry-officer',
+      'CHIEF-1:ppe-expiry-officer',
       'FF-1:ppe-expiry',
     ]);
-    const holderItems = push.mock.calls.find(
-      (call) => (call[1] as { memberId: string }).memberId === 'APP-OFFICER',
-    )?.[2] as ReminderItem[];
-    // Its own coat (once, though it is both holder and APPARATUS) plus FF-1's helmet.
-    expect(holderItems.map((i) => i.subjectId).sort()).toEqual([
+    const itemsFor = (memberId: string, category: string) =>
+      (
+        push.mock.calls.find(
+          (call) => (call[1] as { memberId: string }).memberId === memberId && call[5] === category,
+        )?.[2] as ReminderItem[]
+      ).map((i) => i.subjectId);
+    expect(itemsFor('APP-OFFICER', 'ppe-expiry')).toEqual(['APP-OFFICER:TURNOUT-COAT']);
+    expect(itemsFor('APP-OFFICER', 'ppe-expiry-officer').sort()).toEqual([
       'APP-OFFICER:TURNOUT-COAT',
       'FF-1:HELMET',
+    ]);
+  });
+
+  it('muting your own PPE reminders does not silence the department PPE feed, and vice versa', async () => {
+    const { push, prefReads } = await run(
+      [
+        memberRow('APP-OFFICER', 'ppe-expiry', item('APP-OFFICER:COAT')),
+        roleRow('APPARATUS', 'ppe-expiry', item('FF-1:HELMET')),
+      ],
+      { 'NOTIFPREF#APP-OFFICER#ppe-expiry': { push: true, email: true } },
+    );
+
+    expect(prefReads).toEqual(
+      expect.arrayContaining([
+        'NOTIFPREF#APP-OFFICER#ppe-expiry',
+        'NOTIFPREF#APP-OFFICER#ppe-expiry-officer',
+      ]),
+    );
+    expect(pushedTo(push)).toEqual([
+      'APP-OFFICER:ppe-expiry-officer',
+      'CHIEF-1:ppe-expiry-officer',
     ]);
   });
 

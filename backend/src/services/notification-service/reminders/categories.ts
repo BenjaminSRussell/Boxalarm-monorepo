@@ -17,6 +17,8 @@ export const APPARATUS_TEST_DUE_CATEGORY = 'apparatus-test-due';
 export const APPARATUS_DEFECT_CATEGORY = 'apparatus-defect';
 export const INVENTORY_REORDER_CATEGORY = 'inventory-reorder';
 export const PPE_EXPIRY_CATEGORY = 'ppe-expiry';
+/** The APPARATUS role's department-wide PPE copy: its own mute, apart from the holder's. */
+export const PPE_EXPIRY_OFFICER_CATEGORY = 'ppe-expiry-officer';
 
 /**
  * Department roles (personnel-service memberRepository.ts MEMBER_ROLES) a reminder routes to.
@@ -161,8 +163,19 @@ const CONFIGS: readonly ReminderCategoryConfig[] = [
     category: PPE_EXPIRY_CATEGORY,
     muteKey: PPE_EXPIRY_CATEGORY,
     roles: ['APPARATUS'],
+    // Like cert-expiry-officer: muting "my PPE" must not silence the department feed, and
+    // the reverse. Unlike it, the department copy can be muted (on its own key).
+    roleCategory: PPE_EXPIRY_OFFICER_CATEGORY,
     pushChannelId: 'ppe-expiry-digest',
     subject: (n) => `${plural(n, 'PPE item', 'PPE items')} expiring`,
+    summary: (n) => `${plural(n, 'PPE item', 'PPE items')} expiring`,
+  },
+  {
+    category: PPE_EXPIRY_OFFICER_CATEGORY,
+    muteKey: PPE_EXPIRY_OFFICER_CATEGORY,
+    roles: [],
+    pushChannelId: 'ppe-expiry-digest',
+    subject: (n) => `${plural(n, 'department PPE item', 'department PPE items')} expiring`,
     summary: (n) => `${plural(n, 'PPE item', 'PPE items')} expiring`,
   },
 ];

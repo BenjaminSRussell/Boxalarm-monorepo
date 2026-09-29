@@ -126,8 +126,9 @@ test('lists only the reminders a MEMBER can receive', async () => {
 
   const { findByLabelText, queryByLabelText } = await render(<NotificationPreferencesScreen />);
 
-  expect(await findByLabelText('PPE expiry push notifications')).toBeTruthy();
+  expect(await findByLabelText('Your PPE expiry push notifications')).toBeTruthy();
   expect(queryByLabelText('Apparatus defects push notifications')).toBeNull();
+  expect(queryByLabelText('Department PPE expiry push notifications')).toBeNull();
 });
 
 test('an apparatus officer can mute each apparatus reminder under its own category', async () => {
@@ -148,6 +149,8 @@ test('an apparatus officer can mute each apparatus reminder under its own catego
   const { findByLabelText } = await render(<NotificationPreferencesScreen />);
 
   expect(await findByLabelText('Apparatus tests due push notifications')).toBeTruthy();
+  // The department PPE feed has its own switch, apart from the member's own PPE.
+  expect(await findByLabelText('Department PPE expiry push notifications')).toBeTruthy();
   await waitFor(async () =>
     expect((await findByLabelText('Supply reorders push notifications')).props.value).toBe(false),
   );
