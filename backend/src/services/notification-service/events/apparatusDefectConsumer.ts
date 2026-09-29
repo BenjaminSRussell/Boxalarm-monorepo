@@ -26,7 +26,8 @@ const LABEL = 'apparatus.defect.reported';
 const LOG_PREFIX = 'notification.apparatusDefect';
 
 /** Severities that take a unit off the road: inbox + email now, as well as the digest. */
-const IMMEDIATE_SEVERITIES: ReadonlySet<string> = new Set(['OUT_OF_SERVICE', 'CRITICAL']);
+// apparatus-service's DefectSeverity is MINOR | MAJOR | OUT_OF_SERVICE (defectRepository.ts).
+const IMMEDIATE_SEVERITIES: ReadonlySet<string> = new Set(['OUT_OF_SERVICE']);
 
 interface DefectReminder extends ReminderRecord {
   readonly immediate: boolean;
@@ -282,7 +283,7 @@ async function deliverImmediately(
 /**
  * apparatus.defect.reported (apparatus-service outbox, F4.3) -> the APPARATUS role and
  * officers. Every defect is recorded for the daily digest (push + email + inbox). A defect
- * that takes the unit out of service (outOfService, or an OUT_OF_SERVICE/CRITICAL severity)
+ * that takes the unit out of service (outOfService, or the OUT_OF_SERVICE severity)
  * is additionally written to their inboxes and emailed now, with a push on the
  * non-critical notification channel (published, though no device subscriber exists yet) —
  * never an interruption-level alert. Recording it for the digest too means an out-of-service

@@ -178,7 +178,6 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
   it.each([
     ['outOfService: true', defect({ outOfService: true, severity: 'MAJOR' })],
     ['severity OUT_OF_SERVICE', defect({ severity: 'OUT_OF_SERVICE' })],
-    ['severity CRITICAL', defect({ severity: 'CRITICAL' })],
   ])(
     '%s: writes every APPARATUS/OFFICER inbox and pushes now, no digest row',
     async (_c, payload) => {
@@ -357,6 +356,17 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
     expect(push.mock.calls.map((call) => (call[1] as { memberId: string }).memberId)).toEqual([
       'APP-1',
     ]);
+  });
+
+  it('MAJOR without outOfService waits for the digest; there is no CRITICAL severity', async () => {
+    const table = fakeTable();
+    const push = vi.fn();
+    const { handler } = await load(table.send, push);
+
+    await handler(sqsEvent(defect({ severity: 'CRITICAL', outOfService: false })));
+
+    expect(push).not.toHaveBeenCalled();
+    expect(inboxRows(table)).toHaveLength(0);
   });
 
   it('rejects when the roster cannot be read, delivering to nobody', async () => {

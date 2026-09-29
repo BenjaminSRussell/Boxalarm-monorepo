@@ -18,7 +18,19 @@ export const APPARATUS_DEFECT_CATEGORY = 'apparatus-defect';
 export const INVENTORY_REORDER_CATEGORY = 'inventory-reorder';
 export const PPE_EXPIRY_CATEGORY = 'ppe-expiry';
 
-/** Department roles (personnel-service memberRepository.ts MEMBER_ROLES) a reminder routes to. */
+/**
+ * Department roles (personnel-service memberRepository.ts MEMBER_ROLES) a reminder routes to.
+ *
+ * Routing choices beyond architecture.md §5, decided here (recorded for the next architecture
+ * revision rather than edited into it, which would stale the compiled artifacts):
+ *  - apparatus-defect goes to APPARATUS and every OFFICER, not only "the apparatus officer
+ *    role" (§5 :1552). A unit off the road changes who and what can respond, which is every
+ *    line officer's business, and a volunteer department may have no APPARATUS holder at all.
+ *  - apparatus-test-due goes to APPARATUS and the CHIEF, who answers for ISO/NFPA testing
+ *    compliance.
+ *  - inventory-reorder goes to APPARATUS (the quartermaster in practice) and ADMIN (§5's
+ *    "quartermaster/admin").
+ */
 export type ReminderRole = 'OFFICER' | 'TRAINING' | 'APPARATUS' | 'ADMIN' | 'CHIEF';
 
 /**
