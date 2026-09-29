@@ -173,4 +173,26 @@ describe('pushReceiptHandler', () => {
     expect(JSON.parse(result.body)).toEqual({ memberId: 'mbr-1', invalidated: false });
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  // Review minor 6: a bare INVALID_ARGUMENT cannot say whether it names the token or the
+  // payload, so the webhook path must not disable a device on it.
+  it('treats a bare INVALID_ARGUMENT as non-permanent: 200 invalidated:false, no DynamoDB call', async () => {
+    const send = vi.fn();
+    vi.doMock('../eligibility/dynamoClient.js', () => ({
+      createDynamoClient: () => ({ send }),
+      readAlertingConfig: () => ({ tableName: 'alerting-table' }),
+    }));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { handler } = await import('./pushReceiptHandler.js');
+    const result = (await handler(
+      buildEvent(
+        { 'x-push-provider-secret': 'shared-secret' },
+        { deptId: 'NICHOLS', memberId: 'mbr-1', token: 'tok-1', errorCode: 'INVALID_ARGUMENT' },
+      ),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ memberId: 'mbr-1', invalidated: false });
+    expect(send).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
 });

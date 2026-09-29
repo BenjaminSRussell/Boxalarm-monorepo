@@ -11,15 +11,19 @@ interface ContactChannelSnapshot {
 }
 
 /**
- * APNs/FCM error codes that say the token itself is dead — retrying the same token can never
- * succeed. Shared by the provider-webhook path (pushReceiptHandler) and the push worker, which
- * learns the same fact synchronously from the provider's send response.
+ * Webhook error codes that say the token itself is dead, so retrying the same token can never
+ * succeed. Used by the provider-webhook path (pushReceiptHandler). The push worker classifies
+ * the gateway's synchronous response itself (push/apnsAdapter.ts, push/fcmAdapter.ts).
+ *
+ * FCM `INVALID_ARGUMENT` is deliberately absent. It names a dead token only when its field
+ * violation is `message.token`; otherwise it is a payload bug that must stay loud. A webhook
+ * body carries just the code, so it cannot tell the two apart and must not disable a device
+ * on it.
  */
 export const PERMANENT_INVALID_TOKEN_CODES: ReadonlySet<string> = new Set([
   'BadDeviceToken',
   'Unregistered',
   'UNREGISTERED',
-  'INVALID_ARGUMENT',
 ]);
 
 export type InvalidatePushTokenResult = 'invalidated' | 'no_match' | 'reregistered';
