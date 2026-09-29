@@ -187,6 +187,26 @@ export async function deliverChannelMessage(
     throw error;
   }
 
+  if (result.outcome === 'test_refused') {
+    // Self-test/canary refused for a configuration reason: record the failure for the test
+    // result, but neither retry (it cannot succeed) nor touch the member's token.
+    logInfo('alerting.channel.test_refused', {
+      correlationId,
+      memberId,
+      channel,
+      reason: result.reason,
+    });
+    emitOutcomeMetric(METRIC_NAMESPACE, 'TestRefused', channel);
+    await recordClaimedFailure(
+      ddb,
+      tableName,
+      pk,
+      sk,
+      new Error(`PUSH_TEST_REFUSED ${result.reason}`),
+    );
+    return;
+  }
+
   if (result.outcome === 'invalid_token') {
     // Terminal: the gateway says this device token is dead, so retrying it can never page the
     // member. Recorded FAILED (not thrown - no redelivery), and the contact entry is marked

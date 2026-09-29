@@ -576,3 +576,33 @@ describe('deliverChannelMessage — mass token invalidation guard (review M3)', 
     errorSpy.mockRestore();
   });
 });
+
+describe('deliverChannelMessage — self-test configuration refusal (review M5)', () => {
+  it('records the guard FAILED, does not throw, and never touches the member snapshot', async () => {
+    const sendPush = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'test_refused', reason: 'FCM_SENDER_ID_MISMATCH' });
+    vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider: vi.fn() }));
+    vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+      sendPush,
+    }));
+    const send = vi.fn().mockResolvedValue({});
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', { ...baseParams, isTest: true }),
+    ).resolves.toBeUndefined();
+
+    const inputs = send.mock.calls.map(
+      (call) => (call[0] as { input: Record<string, unknown> }).input,
+    );
+    expect(inputs.at(-1)?.ExpressionAttributeValues).toEqual({
+      ':reason': 'PUSH_TEST_REFUSED FCM_SENDER_ID_MISMATCH',
+      ':failed': 'FAILED',
+    });
+    expect(
+      inputs.some((input) => (input.Key as { sk?: string } | undefined)?.sk === 'MEMBER#mbr-1'),
+    ).toBe(false);
+  });
+});

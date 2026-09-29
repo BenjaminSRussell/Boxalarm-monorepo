@@ -11,7 +11,7 @@ import {
   pushDataFields,
   type PushNotification,
 } from './pushPayload.js';
-import type { PushSendResult } from './pushResult.js';
+import { isNonRetryableRefusal, type PushSendResult } from './pushResult.js';
 
 export const FCM_ORIGIN = 'https://fcm.googleapis.com';
 
@@ -103,7 +103,11 @@ export async function sendViaFcm(
     try {
       return await sendViaFcmOnce(notification, options);
     } catch (retryError) {
-      if (retryError instanceof PushProviderAuthError) evictPushCredentials(options.secretId);
+      if (!(retryError instanceof PushProviderAuthError)) throw retryError;
+      evictPushCredentials(options.secretId);
+      if (options.isTest) {
+        return { outcome: 'test_refused', reason: `FCM_CREDENTIALS_REFUSED` };
+      }
       throw retryError;
     }
   }
@@ -157,6 +161,12 @@ async function sendViaFcmOnce(
   const message = `FCM responded ${response.status} ${errorCode}`;
   if (response.status === 401 || (response.status === 403 && errorCode !== 'SENDER_ID_MISMATCH')) {
     throw new PushProviderAuthError(message);
+  }
+  // A self-test refused for configuration (SENDER_ID_MISMATCH when the sandbox service account
+  // is in another Firebase project, a payload INVALID_ARGUMENT…) is a test failure, not a page
+  // to retry into the DLQ. Real pages keep throwing so a misconfigured stack pages on-call.
+  if (options.isTest && isNonRetryableRefusal(response.status)) {
+    return { outcome: 'test_refused', reason: `FCM_${errorCode}` };
   }
   throw new Error(message);
 }

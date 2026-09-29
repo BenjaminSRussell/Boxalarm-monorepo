@@ -12,7 +12,7 @@ import {
   buildApnsPayload,
   type PushNotification,
 } from './pushPayload.js';
-import type { PushSendResult } from './pushResult.js';
+import { isNonRetryableRefusal, type PushSendResult } from './pushResult.js';
 
 export const APNS_PRODUCTION_ORIGIN = 'https://api.push.apple.com';
 export const APNS_SANDBOX_ORIGIN = 'https://api.sandbox.push.apple.com';
@@ -238,7 +238,11 @@ export async function sendViaApns(
     try {
       return await sendViaApnsOnce(notification, options);
     } catch (retryError) {
-      if (retryError instanceof PushProviderAuthError) evictPushCredentials(options.secretId);
+      if (!(retryError instanceof PushProviderAuthError)) throw retryError;
+      evictPushCredentials(options.secretId);
+      if (options.isTest) {
+        return { outcome: 'test_refused', reason: `APNS_CREDENTIALS_REFUSED` };
+      }
       throw retryError;
     }
   }
@@ -282,6 +286,12 @@ async function sendViaApnsOnce(
   const message = `APNs responded ${response.status} ${reason}`;
   if (APNS_AUTH_FAILURES.has(reason)) {
     throw new PushProviderAuthError(message);
+  }
+  // A self-test refused for configuration (DeviceTokenNotForTopic, TopicDisallowed, BadTopic…)
+  // is a test failure, not a page to retry into the DLQ. Real pages keep throwing: a
+  // misconfigured production stack must dead-letter and page on-call.
+  if (options.isTest && isNonRetryableRefusal(response.status)) {
+    return { outcome: 'test_refused', reason: `APNS_${reason}` };
   }
   throw new Error(message);
 }

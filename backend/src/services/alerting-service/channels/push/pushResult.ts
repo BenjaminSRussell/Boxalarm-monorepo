@@ -6,4 +6,15 @@
  */
 export type PushSendResult =
   | { readonly outcome: 'sent'; readonly providerMessageId?: string }
-  | { readonly outcome: 'invalid_token'; readonly reason: string };
+  | { readonly outcome: 'invalid_token'; readonly reason: string }
+  /**
+   * Self-test/canary only: the gateway refused the message for a configuration reason (sender
+   * or topic mismatch, credentials) rather than a dead token. Terminal and non-invalidating:
+   * a redelivery cannot fix configuration, and a test must not dead-letter and page on-call.
+   */
+  | { readonly outcome: 'test_refused'; readonly reason: string };
+
+/** A 4xx other than 429 — a refusal a retry cannot fix. */
+export function isNonRetryableRefusal(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 429;
+}

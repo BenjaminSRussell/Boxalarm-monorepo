@@ -334,3 +334,75 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
     },
   );
 });
+
+describe('sendViaFcm self-test configuration refusals (review M5)', () => {
+  let server: Server;
+  let origin: string;
+  let reply: { status: number; body: unknown } = { status: 200, body: {} };
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.setHeader('content-type', 'application/json');
+        if (req.url === '/token') {
+          res.end(JSON.stringify({ access_token: 'access', expires_in: 3599 }));
+          return;
+        }
+        res.statusCode = reply.status;
+        res.end(JSON.stringify(reply.body));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  afterEach(() => resetPushCredentialCaches());
+
+  const send = (isTest: boolean) =>
+    sendViaFcm(dispatch, {
+      secretId: isTest ? 'fcm-sandbox' : 'fcm-prod',
+      isTest,
+      secretsClient: secretsClient(),
+      timeoutMs: 4_000,
+      fcmOrigin: origin,
+      oauthTokenUrl: `${origin}/token`,
+    });
+
+  const senderMismatch = {
+    status: 403,
+    body: {
+      error: { status: 'PERMISSION_DENIED', details: [{ errorCode: 'SENDER_ID_MISMATCH' }] },
+    },
+  };
+
+  it('a self-test SENDER_ID_MISMATCH (sandbox service account in another project) is a terminal test failure', async () => {
+    reply = senderMismatch;
+    await expect(send(true)).resolves.toEqual({
+      outcome: 'test_refused',
+      reason: 'FCM_SENDER_ID_MISMATCH',
+    });
+  });
+
+  it('a self-test whose credentials stay refused is a terminal test failure, not a DLQ page', async () => {
+    reply = { status: 403, body: { error: { status: 'PERMISSION_DENIED' } } };
+    await expect(send(true)).resolves.toEqual({
+      outcome: 'test_refused',
+      reason: 'FCM_CREDENTIALS_REFUSED',
+    });
+  });
+
+  it('a real page with SENDER_ID_MISMATCH still throws (a misconfigured stack must page on-call)', async () => {
+    reply = senderMismatch;
+    await expect(send(false)).rejects.toThrow('FCM responded 403 SENDER_ID_MISMATCH');
+  });
+
+  it.each([429, 503])('a self-test %i still throws (transient, worth a retry)', async (status) => {
+    reply = { status, body: { error: { status: 'UNAVAILABLE' } } };
+    await expect(send(true)).rejects.toThrow(`FCM responded ${status}`);
+  });
+});

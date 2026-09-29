@@ -47,7 +47,9 @@ const PLACEHOLDER_ENDPOINT_URL: Record<VendorChannel, string> = {
  *
  * FCM (`fcm`, `fcmSandbox`) — the Firebase service-account key JSON exactly as downloaded
  * (project_id, private_key_id, private_key, client_email, ...), for a service account with
- * the Firebase Cloud Messaging API Admin role. Sandbox sends are `validate_only`.
+ * the Firebase Cloud Messaging API Admin role. Sandbox sends are `validate_only`; the sandbox
+ * service account must be in the app's own Firebase project (another project gets
+ * SENDER_ID_MISMATCH on every self-test).
  *
  * Self-test and canary messages (isTest) read only the sandbox secrets and fail closed when
  * one is unset (architecture §1.3).

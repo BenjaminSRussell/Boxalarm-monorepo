@@ -460,3 +460,50 @@ describe('http2Transport connection handling (review M1)', () => {
     expect(isConnectionLevelError(new Error('APNs responded 500'))).toBe(false);
   });
 });
+
+describe('sendViaApns self-test configuration refusals (review M5)', () => {
+  afterEach(() => resetPushCredentialCaches());
+
+  const respond =
+    (status: number, reason: string): Http2Transport =>
+    () =>
+      Promise.resolve({ status, headers: {}, body: JSON.stringify({ reason }) });
+
+  const send = (isTest: boolean, transport: Http2Transport) =>
+    sendViaApns(dispatch, {
+      secretId: isTest ? 'apns-sandbox' : 'apns-prod',
+      isTest,
+      secretsClient: secretsClient(apnsSecret()).client,
+      timeoutMs: 4_000,
+      transport,
+    });
+
+  it.each(['DeviceTokenNotForTopic', 'TopicDisallowed', 'BadTopic'])(
+    'a self-test %s is a terminal test failure',
+    async (reason) => {
+      await expect(send(true, respond(400, reason))).resolves.toEqual({
+        outcome: 'test_refused',
+        reason: `APNS_${reason}`,
+      });
+    },
+  );
+
+  it('a self-test whose provider token stays refused is a terminal test failure', async () => {
+    await expect(send(true, respond(403, 'InvalidProviderToken'))).resolves.toEqual({
+      outcome: 'test_refused',
+      reason: 'APNS_CREDENTIALS_REFUSED',
+    });
+  });
+
+  it('a real page with DeviceTokenNotForTopic still throws', async () => {
+    await expect(send(false, respond(400, 'DeviceTokenNotForTopic'))).rejects.toThrow(
+      'APNs responded 400 DeviceTokenNotForTopic',
+    );
+  });
+
+  it('a self-test 503 still throws', async () => {
+    await expect(send(true, respond(503, 'ServiceUnavailable'))).rejects.toThrow(
+      'APNs responded 503',
+    );
+  });
+});
