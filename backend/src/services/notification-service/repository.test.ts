@@ -5,8 +5,11 @@ import {
   buildDigestSentMarker,
   buildNotificationItem,
   buildPendingItem,
+  buildEventSeenMarker,
   buildPreferenceItem,
+  buildReminderPendingItem,
   CERT_EXPIRY_CATEGORY,
+  DIGEST_BUCKET,
   isConditionalCheckFailed,
   parsePreferenceItem,
   TODAY_BUCKET,
@@ -141,5 +144,53 @@ describe('asTransactionCancellation / isConditionalCheckFailed', () => {
     const error = new Error('boom');
     expect(asTransactionCancellation(error)).toBeUndefined();
     expect(isConditionalCheckFailed(error)).toBe(false);
+  });
+});
+
+describe('DIGEST_BUCKET', () => {
+  it('buckets a reminder recorded before the 12:00 UTC digest under today', () => {
+    expect(DIGEST_BUCKET(new Date('2026-09-15T10:00:00Z'))).toBe('2026-09-15');
+    expect(DIGEST_BUCKET(new Date('2026-09-15T11:54:59Z'))).toBe('2026-09-15');
+  });
+
+  it('buckets one recorded at or after the cutoff under the next digest day, never a day already sent', () => {
+    expect(DIGEST_BUCKET(new Date('2026-09-15T11:55:00Z'))).toBe('2026-09-16');
+    expect(DIGEST_BUCKET(new Date('2026-09-15T23:59:59Z'))).toBe('2026-09-16');
+    expect(DIGEST_BUCKET(new Date('2026-12-31T18:00:00Z'))).toBe('2027-01-01');
+  });
+});
+
+describe('buildReminderPendingItem', () => {
+  it('stores the category-typed item and keys the row by category, day and subject', () => {
+    const item = buildReminderPendingItem(
+      DEPT_ID,
+      'ROLE',
+      'APPARATUS',
+      'apparatus-test-due',
+      {
+        subjectId: 'APP-E1:HOSE',
+        title: 'E1',
+        detail: 'HOSE test due 2026-10-01',
+        dueDate: '2026-10-01',
+        link: { kind: 'apparatus', id: 'E1' },
+      },
+      '2026-09-15',
+      1_500_000,
+    );
+    expect(item.pk).toBe('DEPT#NICHOLS#ROLE#APPARATUS');
+    expect(item.sk).toBe('DIGEST_PENDING#apparatus-test-due#2026-09-15#APP-E1:HOSE');
+    expect(item.subjectId).toBe('APP-E1:HOSE');
+    expect(item.dueDate).toBe('2026-10-01');
+    expect(item.item.link).toEqual({ kind: 'apparatus', id: 'E1' });
+    expect(item).not.toHaveProperty('certId');
+  });
+});
+
+describe('buildEventSeenMarker', () => {
+  it('keys the eventId under the department so a redelivery can be refused', () => {
+    const marker = buildEventSeenMarker(DEPT_ID, 'evt-1', 1_000_000);
+    expect(marker.pk).toBe('DEPT#NICHOLS#NOTIF_EVENT#evt-1');
+    expect(marker.sk).toBe('SEEN');
+    expect(marker.ttl).toBe(1000 + 7 * 24 * 60 * 60);
   });
 });

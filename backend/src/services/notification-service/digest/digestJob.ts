@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   DeleteCommand,
-  GetCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -12,16 +11,25 @@ import { emitOutcomeMetric } from '@boxalarm/metrics';
 import { sendEmailDigest, sendPushDigest } from '../channelSender.js';
 import { createDynamoClient, readNotificationConfig } from '../dynamoClient.js';
 import {
+  categoryConfig,
+  certExpiryItem,
+  CERT_EXPIRY_CATEGORY,
+  deliveryCategory,
+  type ReminderItem,
+} from '../reminders/categories.js';
+import {
+  loadRoster,
+  membersWithRoles,
+  readChannelMutes,
+  readMemberEmail,
+  type RosterMember,
+} from '../reminders/recipients.js';
+import {
   asTransactionCancellation,
   buildDigestSentMarker,
   buildNotificationItem,
-  CERT_EXPIRY_CATEGORY,
   isConditionalCheckFailed,
-  parsePreferenceItem,
   TODAY_BUCKET,
-  TRAINING_OFFICER_DIGEST_CATEGORY,
-  TRAINING_OFFICER_ROLE,
-  type DigestNotificationItem,
   type PendingRecipientType,
 } from '../repository.js';
 
@@ -34,19 +42,27 @@ export interface DigestJobPayload {
 interface RawPendingItem {
   readonly recipientType: PendingRecipientType;
   readonly recipientId: string;
-  readonly certId: string;
-  readonly expiryDate: string;
+  readonly category?: string;
+  readonly item?: ReminderItem;
+  // Rows recorded before categories existed carry only the cert fields.
+  readonly certId?: string;
+  readonly expiryDate?: string;
 }
 
-interface RecipientGroup {
+interface PendingReminder {
   readonly recipientType: PendingRecipientType;
   readonly recipientId: string;
-  readonly items: DigestNotificationItem[];
+  /** The category the row was recorded under (its routing). */
+  readonly category: string;
+  readonly item: ReminderItem;
 }
 
-interface RosterOfficer {
+/** One member's digest for one category: what claim, mutes, text and inbox record key on. */
+interface Delivery {
   readonly memberId: string;
-  readonly email?: string | undefined;
+  readonly category: string;
+  email?: string | undefined;
+  readonly items: Map<string, ReminderItem>;
 }
 
 function isDigestJobPayload(value: unknown): value is DigestJobPayload {
@@ -75,23 +91,15 @@ function logError(
   );
 }
 
-function groupByRecipient(items: readonly RawPendingItem[]): RecipientGroup[] {
-  const groups = new Map<string, RecipientGroup>();
-  for (const item of items) {
-    const key = `${item.recipientType}#${item.recipientId}`;
-    const entry: DigestNotificationItem = { certId: item.certId, expiryDate: item.expiryDate };
-    const existing = groups.get(key);
-    if (existing) {
-      existing.items.push(entry);
-    } else {
-      groups.set(key, {
-        recipientType: item.recipientType,
-        recipientId: item.recipientId,
-        items: [entry],
-      });
-    }
+function normalize(row: RawPendingItem): PendingReminder | undefined {
+  const category = row.category ?? CERT_EXPIRY_CATEGORY;
+  const item =
+    row.item ??
+    (row.certId && row.expiryDate ? certExpiryItem(row.certId, row.expiryDate) : undefined);
+  if (!item) {
+    return undefined;
   }
-  return [...groups.values()];
+  return { recipientType: row.recipientType, recipientId: row.recipientId, category, item };
 }
 
 async function queryPendingItems(
@@ -120,41 +128,69 @@ async function queryPendingItems(
   return items;
 }
 
-async function resolveTrainingOfficers(
+/**
+ * Fans the day's rows out to per-member, per-category deliveries. A ROLE row becomes one
+ * delivery entry per member holding the role; a member reached twice for the same subject
+ * (named on the event and holding the role, or holding two routed roles) gets it once.
+ * The roster is read at most once per run; when it cannot be read, every ROLE row is
+ * logged and counted as a failed recipient and the MEMBER rows still go out.
+ */
+async function planDeliveries(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   deptId: VerifiedDeptId,
+  pending: readonly PendingReminder[],
   correlationId: string,
-): Promise<RosterOfficer[]> {
-  const officers: RosterOfficer[] = [];
-  let exclusiveStartKey: Record<string, unknown> | undefined;
-  try {
-    do {
-      const result = await ddb.send(
-        new QueryCommand({
-          TableName: tableName,
-          IndexName: 'GSI3',
-          KeyConditionExpression: 'gsi3pk = :gsi3pk',
-          ExpressionAttributeValues: { ':gsi3pk': buildDeptScopedPk(deptId, 'MEMBER') },
-          ExclusiveStartKey: exclusiveStartKey,
-        }),
-      );
-      for (const item of result.Items ?? []) {
-        const roles = (item.roles as string[] | undefined) ?? [];
-        if (roles.includes(TRAINING_OFFICER_ROLE)) {
-          officers.push({
-            memberId: item.memberId as string,
-            email: item.email as string | undefined,
-          });
-        }
+): Promise<Delivery[]> {
+  const deliveries = new Map<string, Delivery>();
+  const add = (memberId: string, category: string, item: ReminderItem, email?: string) => {
+    const key = `${memberId}#${category}`;
+    let delivery = deliveries.get(key);
+    if (!delivery) {
+      delivery = { memberId, category, email, items: new Map() };
+      deliveries.set(key, delivery);
+    }
+    delivery.email ??= email;
+    if (!delivery.items.has(item.subjectId)) {
+      delivery.items.set(item.subjectId, item);
+    }
+  };
+
+  let roster: RosterMember[] | undefined;
+  let rosterFailed = false;
+  for (const row of pending) {
+    if (row.recipientType === 'MEMBER') {
+      add(row.recipientId, deliveryCategory(row.category, 'MEMBER'), row.item);
+      continue;
+    }
+    if (!roster && !rosterFailed) {
+      try {
+        roster = await loadRoster(ddb, tableName, deptId);
+      } catch (error) {
+        rosterFailed = true;
+        logError('notification.digest.roster_query_failed', error, correlationId);
       }
-      exclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
-    } while (exclusiveStartKey);
-  } catch (error) {
-    logError('notification.digest.roster_query_failed', error, correlationId);
-    throw error;
+    }
+    if (!roster) {
+      logError(
+        'notification.digest.recipient_failed',
+        new Error('roster unavailable'),
+        correlationId,
+        {
+          recipientType: 'ROLE',
+          role: row.recipientId,
+          category: row.category,
+        },
+      );
+      emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
+      continue;
+    }
+    const category = deliveryCategory(row.category, 'ROLE');
+    for (const member of membersWithRoles(roster, [row.recipientId])) {
+      add(member.memberId, category, row.item, member.email);
+    }
   }
-  return officers;
+  return [...deliveries.values()];
 }
 
 async function claimDigestSlot(
@@ -229,7 +265,7 @@ async function writeNotification(
   deptId: VerifiedDeptId,
   recipientId: string,
   category: string,
-  items: readonly DigestNotificationItem[],
+  items: readonly ReminderItem[],
   now: number,
 ): Promise<void> {
   const notification = buildNotificationItem(
@@ -243,22 +279,23 @@ async function writeNotification(
   await ddb.send(new PutCommand({ TableName: tableName, Item: notification }));
 }
 
-async function sendDigestToMember(
+async function sendDigest(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   deptId: VerifiedDeptId,
-  memberId: string,
-  items: readonly DigestNotificationItem[],
+  delivery: Delivery,
   today: string,
   now: number,
   correlationId: string,
 ): Promise<void> {
+  const { memberId, category } = delivery;
+  const items = [...delivery.items.values()];
   const claim = await claimDigestSlot(
     ddb,
     tableName,
     deptId,
     memberId,
-    CERT_EXPIRY_CATEGORY,
+    category,
     today,
     now,
     correlationId,
@@ -268,148 +305,62 @@ async function sendDigestToMember(
     return;
   }
 
-  const [member, preference] = await Promise.all([
-    ddb.send(
-      new GetCommand({
-        TableName: tableName,
-        Key: { pk: buildDeptScopedPk(deptId, 'MEMBER', memberId), sk: 'METADATA' },
-      }),
-    ),
-    ddb.send(
-      new GetCommand({
-        TableName: tableName,
-        Key: {
-          pk: buildDeptScopedPk(deptId, 'MEMBER', memberId),
-          sk: `NOTIFPREF#${memberId}#${CERT_EXPIRY_CATEGORY}`,
-        },
-      }),
-    ),
-  ]);
-
-  const email = member.Item?.email as string | undefined;
-  const channels = parsePreferenceItem(preference.Item)?.channels;
-  const pushMuted = channels?.push === true;
-  const emailMuted = channels?.email === true;
+  let email = delivery.email;
+  let mutes: { push: boolean; email: boolean };
+  try {
+    const [storedEmail, storedMutes] = await Promise.all([
+      email ? Promise.resolve(email) : readMemberEmail(ddb, tableName, deptId, memberId),
+      readChannelMutes(ddb, tableName, deptId, memberId, categoryConfig(category).muteKey),
+    ]);
+    email = storedEmail;
+    mutes = storedMutes;
+  } catch (error) {
+    logError('notification.digest.recipient_read_failed', error, correlationId, {
+      memberId,
+      category,
+    });
+    await releaseDigestSlot(ddb, tableName, deptId, memberId, category, today, correlationId);
+    throw error;
+  }
 
   try {
-    if (!pushMuted) {
-      await sendPushDigest(process.env, { memberId, email }, items, correlationId);
+    if (!mutes.push) {
+      await sendPushDigest(
+        process.env,
+        { memberId, email },
+        items,
+        correlationId,
+        undefined,
+        category,
+      );
     }
-    if (!emailMuted) {
-      await sendEmailDigest(process.env, { memberId, email }, items, correlationId);
+    if (!mutes.email) {
+      await sendEmailDigest(
+        process.env,
+        { memberId, email },
+        items,
+        correlationId,
+        undefined,
+        category,
+      );
     }
   } catch (error) {
-    logError('notification.digest.send_failed', error, correlationId, {
-      memberId,
-      category: CERT_EXPIRY_CATEGORY,
-    });
+    logError('notification.digest.send_failed', error, correlationId, { memberId, category });
     emitOutcomeMetric(METRIC_NAMESPACE, 'DigestSendFailed');
-    await releaseDigestSlot(
-      ddb,
-      tableName,
-      deptId,
-      memberId,
-      CERT_EXPIRY_CATEGORY,
-      today,
-      correlationId,
-    );
+    await releaseDigestSlot(ddb, tableName, deptId, memberId, category, today, correlationId);
     throw error;
   }
 
   try {
-    await writeNotification(ddb, tableName, deptId, memberId, CERT_EXPIRY_CATEGORY, items, now);
+    await writeNotification(ddb, tableName, deptId, memberId, category, items, now);
   } catch (error) {
-    logError('notification.digest.write_failed', error, correlationId, { memberId });
+    logError('notification.digest.write_failed', error, correlationId, { memberId, category });
     emitOutcomeMetric(METRIC_NAMESPACE, 'DigestFailed');
-    await releaseDigestSlot(
-      ddb,
-      tableName,
-      deptId,
-      memberId,
-      CERT_EXPIRY_CATEGORY,
-      today,
-      correlationId,
-    );
+    await releaseDigestSlot(ddb, tableName, deptId, memberId, category, today, correlationId);
     throw error;
   }
 
-  emitOutcomeMetric(METRIC_NAMESPACE, pushMuted || emailMuted ? 'DigestMuted' : 'DigestSent');
-}
-
-async function sendDigestToTrainingOfficer(
-  ddb: DynamoDBDocumentClient,
-  tableName: string,
-  deptId: VerifiedDeptId,
-  officer: RosterOfficer,
-  items: readonly DigestNotificationItem[],
-  today: string,
-  now: number,
-  correlationId: string,
-): Promise<void> {
-  const claim = await claimDigestSlot(
-    ddb,
-    tableName,
-    deptId,
-    officer.memberId,
-    TRAINING_OFFICER_DIGEST_CATEGORY,
-    today,
-    now,
-    correlationId,
-  );
-  if (claim === 'AlreadyClaimed') {
-    emitOutcomeMetric(METRIC_NAMESPACE, 'DigestSkipped');
-    return;
-  }
-
-  try {
-    await sendPushDigest(process.env, officer, items, correlationId);
-    await sendEmailDigest(process.env, officer, items, correlationId);
-  } catch (error) {
-    logError('notification.digest.send_failed', error, correlationId, {
-      memberId: officer.memberId,
-      category: TRAINING_OFFICER_DIGEST_CATEGORY,
-    });
-    emitOutcomeMetric(METRIC_NAMESPACE, 'DigestSendFailed');
-    await releaseDigestSlot(
-      ddb,
-      tableName,
-      deptId,
-      officer.memberId,
-      TRAINING_OFFICER_DIGEST_CATEGORY,
-      today,
-      correlationId,
-    );
-    throw error;
-  }
-
-  try {
-    await writeNotification(
-      ddb,
-      tableName,
-      deptId,
-      officer.memberId,
-      TRAINING_OFFICER_DIGEST_CATEGORY,
-      items,
-      now,
-    );
-  } catch (error) {
-    logError('notification.digest.write_failed', error, correlationId, {
-      memberId: officer.memberId,
-    });
-    emitOutcomeMetric(METRIC_NAMESPACE, 'DigestFailed');
-    await releaseDigestSlot(
-      ddb,
-      tableName,
-      deptId,
-      officer.memberId,
-      TRAINING_OFFICER_DIGEST_CATEGORY,
-      today,
-      correlationId,
-    );
-    throw error;
-  }
-
-  emitOutcomeMetric(METRIC_NAMESPACE, 'DigestSent');
+  emitOutcomeMetric(METRIC_NAMESPACE, mutes.push || mutes.email ? 'DigestMuted' : 'DigestSent');
 }
 
 export const handler = async (payload: unknown): Promise<{ processed: number }> => {
@@ -439,59 +390,22 @@ export const handler = async (payload: unknown): Promise<{ processed: number }> 
     return { processed: 0 };
   }
 
-  let processed = 0;
-  for (const group of groupByRecipient(pendingItems)) {
-    if (group.recipientType === 'MEMBER') {
-      try {
-        await sendDigestToMember(
-          ddb,
-          tableName,
-          deptId,
-          group.recipientId,
-          group.items,
-          today,
-          now,
-          correlationId,
-        );
-        processed += 1;
-      } catch (error) {
-        logError('notification.digest.recipient_failed', error, correlationId, {
-          memberId: group.recipientId,
-        });
-        emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
-      }
-      continue;
-    }
+  const pending = pendingItems
+    .map(normalize)
+    .filter((row): row is PendingReminder => row !== undefined);
+  const deliveries = await planDeliveries(ddb, tableName, deptId, pending, correlationId);
 
-    let officers: RosterOfficer[];
+  let processed = 0;
+  for (const delivery of deliveries) {
     try {
-      officers = await resolveTrainingOfficers(ddb, tableName, deptId, correlationId);
+      await sendDigest(ddb, tableName, deptId, delivery, today, now, correlationId);
+      processed += 1;
     } catch (error) {
       logError('notification.digest.recipient_failed', error, correlationId, {
-        recipientType: 'ROLE',
+        memberId: delivery.memberId,
+        category: delivery.category,
       });
       emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
-      continue;
-    }
-    for (const officer of officers) {
-      try {
-        await sendDigestToTrainingOfficer(
-          ddb,
-          tableName,
-          deptId,
-          officer,
-          group.items,
-          today,
-          now,
-          correlationId,
-        );
-        processed += 1;
-      } catch (error) {
-        logError('notification.digest.recipient_failed', error, correlationId, {
-          memberId: officer.memberId,
-        });
-        emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRecipientFailed');
-      }
     }
   }
 

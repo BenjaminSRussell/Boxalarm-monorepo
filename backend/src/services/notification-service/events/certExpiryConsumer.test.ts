@@ -183,4 +183,30 @@ describe('certExpiryConsumer (entrypoint-test obligation)', () => {
       certId: 'CERT-0091',
     });
   });
+
+  it('records the eventId in the same transaction, so a redelivery is refused even on a later day', async () => {
+    const send = vi.fn().mockResolvedValue({});
+    mockDdb(send);
+    const { handler } = await import('./certExpiryConsumer.js');
+
+    await handler(
+      sqsEvent({
+        deptId: 'NICHOLS',
+        memberId: 'MBR-1',
+        certId: 'CERT-1',
+        expiryDate: '2027-01-10',
+      }),
+    );
+
+    const call = send.mock.calls[0]?.[0] as {
+      input: {
+        TransactItems: { Put: { Item: Record<string, unknown>; ConditionExpression: string } }[];
+      };
+    };
+    const marker = call.input.TransactItems.find((t) => t.Put.Item.sk === 'SEEN');
+    expect(marker?.Put.Item.pk).toBe('DEPT#NICHOLS#NOTIF_EVENT#evt-1');
+    for (const t of call.input.TransactItems) {
+      expect(t.Put.ConditionExpression).toBe('attribute_not_exists(sk)');
+    }
+  });
 });
