@@ -28,8 +28,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
     FirebaseApp.configure()
 
     // Installed before notifee and React Native Firebase, which hook in on
-    // UIApplicationDidFinishLaunchingNotification (after this method returns). Both wrap this
-    // delegate and forward notifications they do not own (raw APNs pages) down to it.
+    // UIApplicationDidFinishLaunchingNotification (after this method returns) and wrap this
+    // delegate. notifee forwards only notifications it did not create. React Native Firebase
+    // forwards everything, including FCM-delivered pages it has already reported to JS itself.
     UNUserNotificationCenter.current().delegate = self
 
     let delegate = ReactNativeDelegate()
@@ -83,9 +84,11 @@ extension AppDelegate {
     completionHandler(category == "digest" ? [.banner, .list] : [.banner, .list, .sound])
   }
 
-  // A tap on a dispatch records its dispatchId for the JS router. It is read on launch (cold
-  // start) and reported as a settings change while running (background/foreground), so the
-  // member lands on the alert they need to answer.
+  // A tap on a raw-APNs dispatch records its dispatchId for the JS router. It is read on launch
+  // (cold start) and reported as a settings change while running (background/foreground), so
+  // the member lands on the alert they need to answer. An FCM-delivered page (gcm.message_id,
+  // a legacy iOS FCM token) is skipped: React Native Firebase has already routed it through
+  // getInitialNotification / onNotificationOpenedApp, and recording it again would navigate twice.
   func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     didReceive response: UNNotificationResponse,
@@ -93,6 +96,7 @@ extension AppDelegate {
   ) {
     let userInfo = response.notification.request.content.userInfo
     if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+      userInfo["gcm.message_id"] == nil,
       (userInfo["category"] as? String) != "digest",
       let dispatchId = userInfo["dispatchId"] as? String,
       !dispatchId.isEmpty
