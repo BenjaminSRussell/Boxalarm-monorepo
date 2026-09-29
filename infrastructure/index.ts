@@ -500,6 +500,7 @@ export const notificationReminders = new NotificationReminders("notification-rem
   platformBusName: platformBus.busName,
   platformBusArn: platformBus.busArn,
   pushTopicArn: notificationDigest.pushTopic.arn,
+  sesFromAddress: notificationSesFromAddress,
   logGroup: notificationLogGroup,
 });
 

@@ -1,4 +1,5 @@
 import * as pulumi from "@pulumi/pulumi";
+import * as aws from "@pulumi/aws";
 import { ServiceLambda } from "../observability/service-lambda";
 import { ServiceLogGroup } from "../observability/service-log-group";
 import { QueueConsumer } from "../messaging/queue-consumer";
@@ -15,7 +16,16 @@ export interface RemindersArgs {
   platformBusArn: pulumi.Input<string>;
   /** Digest's notification-owned standard topic; the only topic any consumer publishes to. */
   pushTopicArn: pulumi.Input<string>;
+  /** Verified SES sender (digest.ts's); the defect consumer emails out-of-service units at once. */
+  sesFromAddress: pulumi.Input<string>;
   logGroup: ServiceLogGroup;
+}
+
+interface GrantContext {
+  tableArn: string;
+  topicArn: string;
+  fromAddress: string;
+  sesIdentityArn: string;
 }
 
 interface ReminderConsumerSpec {
@@ -25,11 +35,11 @@ interface ReminderConsumerSpec {
   detailTypes: string[];
   timeout: number;
   environment?: Record<string, pulumi.Input<string>>;
-  statements: (tableArn: string, topicArn: string) => IamPolicyStatement[];
+  statements: (ctx: GrantContext) => IamPolicyStatement[];
 }
 
 /** One TransactWrite of conditional Puts (pending rows + eventId marker): PutItem only. */
-const pendingWriteOnly = (tableArn: string): IamPolicyStatement[] => [
+const pendingWriteOnly = ({ tableArn }: GrantContext): IamPolicyStatement[] => [
   {
     Sid: "NotificationPendingWrite",
     Effect: "Allow",
@@ -50,8 +60,9 @@ const pendingWriteOnly = (tableArn: string): IamPolicyStatement[] => [
  *   ppe.expiry.due            (PPE expiry scanner)       -> ppeExpiryConsumer.ts
  *
  * The defect consumer also delivers an out-of-service defect immediately: it reads the
- * roster (GSI3) and each officer's mute (GetItem), writes their inbox record (PutItem,
- * DeleteItem to release it if the push fails) and publishes to the notification push topic.
+ * roster (GSI3) and each officer's mutes (GetItem), writes their inbox record and per-channel
+ * claim markers (PutItem; DeleteItem releases a claim whose send failed), publishes to the
+ * notification push topic and sends the email through SES — as digest.ts's job does.
  * Like every notification Lambda, none of them touches the alerting plane.
  */
 export class Reminders extends pulumi.ComponentResource {
@@ -62,6 +73,8 @@ export class Reminders extends pulumi.ComponentResource {
     requireEnv("Reminders", args.env);
     super("boxalarm:notification:Reminders", name, {}, opts);
     const { env } = args;
+    const region = aws.getRegionOutput({}, { parent: this });
+    const caller = aws.getCallerIdentityOutput({}, { parent: this });
 
     const specs: ReminderConsumerSpec[] = [
       {
@@ -78,8 +91,11 @@ export class Reminders extends pulumi.ComponentResource {
         // Roster query plus a sequential inbox write + push per officer; still under the
         // queue's default 30s visibility timeout.
         timeout: 25,
-        environment: { NOTIFICATION_PUSH_TOPIC_ARN: args.pushTopicArn },
-        statements: (tableArn, topicArn) => [
+        environment: {
+          NOTIFICATION_PUSH_TOPIC_ARN: args.pushTopicArn,
+          NOTIFICATION_SES_FROM_ADDRESS: args.sesFromAddress,
+        },
+        statements: ({ tableArn, topicArn, fromAddress, sesIdentityArn }) => [
           {
             Sid: "NotificationDefectTableAccess",
             Effect: "Allow",
@@ -98,6 +114,17 @@ export class Reminders extends pulumi.ComponentResource {
             Effect: "Allow",
             Action: ["sns:Publish"],
             Resource: [topicArn],
+          },
+          {
+            // SES authorizes SendEmail against the sending identity: the address itself, or
+            // its domain when the domain is the verified identity (digest.ts).
+            Sid: "NotificationEmailSend",
+            Effect: "Allow",
+            Action: ["ses:SendEmail"],
+            Resource: [
+              `${sesIdentityArn}/${fromAddress}`,
+              `${sesIdentityArn}/${fromAddress.split("@")[1] ?? fromAddress}`,
+            ],
           },
         ],
       },
@@ -134,8 +161,21 @@ export class Reminders extends pulumi.ComponentResource {
             ...spec.environment,
           },
           additionalPolicyStatements: pulumi
-            .all([args.platformTableArn, args.pushTopicArn])
-            .apply(([tableArn, topicArn]) => spec.statements(tableArn, topicArn)),
+            .all([
+              args.platformTableArn,
+              args.pushTopicArn,
+              args.sesFromAddress,
+              region.name,
+              caller.accountId,
+            ])
+            .apply(([tableArn, topicArn, fromAddress, regionName, accountId]) =>
+              spec.statements({
+                tableArn,
+                topicArn,
+                fromAddress,
+                sesIdentityArn: `arn:aws:ses:${regionName}:${accountId}:identity`,
+              }),
+            ),
         },
         { parent: this },
       );

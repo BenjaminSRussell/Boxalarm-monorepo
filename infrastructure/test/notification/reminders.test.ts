@@ -27,6 +27,8 @@ const GSI2 = `${TABLE}/index/GSI2`;
 const GSI3 = `${TABLE}/index/GSI3`;
 const BUS_ARN = `arn:aws:events:${REGION}:${ACCOUNT_ID}:event-bus/boxalarm-dev-platform-bus`;
 const PUSH_TOPIC = `arn:aws:sns:${REGION}:${ACCOUNT_ID}:boxalarm-dev-notification-push`;
+const FROM = "notifications@nichols.example";
+const SES_IDENTITY = `arn:aws:ses:${REGION}:${ACCOUNT_ID}:identity`;
 
 const fn = (key: string) => `boxalarm-dev-notification-${key}-consumer`;
 const DIGEST_ONLY = ["apparatus-test-due", "inventory-reorder", "ppe-expiry"];
@@ -48,6 +50,7 @@ async function build() {
     platformBusName: "boxalarm-dev-platform-bus",
     platformBusArn: BUS_ARN,
     pushTopicArn: pulumi.output(PUSH_TOPIC),
+    sesFromAddress: FROM,
     logGroup,
   });
   await settle();
@@ -118,11 +121,12 @@ describe("notification reminder consumers", { timeout: 30_000 }, () => {
         expect(isGranted(s, "dynamodb:Query", index), index).toBe(false);
       }
       expect(isGranted(s, "sns:Publish", (r) => r.length > 0)).toBe(false);
+      expect(isGranted(s, "ses:SendEmail", (r) => r.length > 0)).toBe(false);
       expect(lambdaEnv(fn(key)).PLATFORM_SERVICE_TABLE_NAME).toBe("boxalarm-dev-platform-service");
     },
   );
 
-  it("apparatus-defect: reads the roster and mutes, writes/releases inbox rows, and pushes on the notification topic only", async () => {
+  it("apparatus-defect: reads the roster and mutes, writes inbox rows and releasable claims, pushes on the notification topic and emails", async () => {
     await build();
     const s = statementsForRole(fn("apparatus-defect"));
     expect(isGranted(s, "dynamodb:Query", GSI3)).toBe(true);
@@ -135,11 +139,15 @@ describe("notification reminder consumers", { timeout: 30_000 }, () => {
     expect(isGranted(s, "sns:Publish", (r) => r.includes("alerting") || r.endsWith("*"))).toBe(
       false,
     );
-    expect(isGranted(s, "ses:SendEmail", (r) => r.length > 0)).toBe(false);
+    // Out-of-service units are emailed at once (review M1), on the digest's sender identity only.
+    expect(isGranted(s, "ses:SendEmail", `${SES_IDENTITY}/${FROM}`)).toBe(true);
+    expect(isGranted(s, "ses:SendEmail", `${SES_IDENTITY}/nichols.example`)).toBe(true);
+    expect(isGranted(s, "ses:SendEmail", (r) => r.endsWith("*"))).toBe(false);
     expect(s.find((st) => st.Sid === "DenyAuditMutations")?.Effect).toBe("Deny");
     const env = lambdaEnv(fn("apparatus-defect"));
     expect(env.PLATFORM_SERVICE_TABLE_NAME).toBe("boxalarm-dev-platform-service");
     expect(env.NOTIFICATION_PUSH_TOPIC_ARN).toBe(PUSH_TOPIC);
+    expect(env.NOTIFICATION_SES_FROM_ADDRESS).toBe(FROM);
   });
 
   it("no reminder consumer reserves concurrency or touches the alerting plane", async () => {

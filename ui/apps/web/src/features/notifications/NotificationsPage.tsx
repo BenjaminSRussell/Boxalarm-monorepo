@@ -142,7 +142,7 @@ function InboxSection() {
         <EmptyState
           icon={Bell}
           title="No notifications"
-          description="Reminders — certifications and PPE expiring, apparatus tests due, defects, supplies to reorder — arrive here as a once-a-day digest; an apparatus reported out of service arrives at once. Dispatch alerts never appear in this inbox."
+          description="Reminders — certifications and PPE expiring, apparatus tests due, defects, supplies to reorder — arrive here as a once-a-day digest; an apparatus reported out of service is also emailed and added here straight away. Dispatch alerts never appear in this inbox."
         />
       ) : (
         <ul className={styles.list}>

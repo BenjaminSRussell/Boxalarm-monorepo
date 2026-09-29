@@ -122,14 +122,18 @@ function fakeTable(mutes: Record<string, { push: boolean; email: boolean }> = {}
   return { rows, send };
 }
 
-async function load(send: ReturnType<typeof vi.fn>, push: ReturnType<typeof vi.fn>) {
+async function load(
+  send: ReturnType<typeof vi.fn>,
+  push: ReturnType<typeof vi.fn>,
+  email: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(undefined),
+) {
   vi.doMock('../dynamoClient.js', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../dynamoClient.js')>();
     return { ...actual, createDynamoClient: () => ({ send }) as unknown as DynamoDBDocumentClient };
   });
   vi.doMock('../channelSender.js', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../channelSender.js')>();
-    return { ...actual, sendPushDigest: push };
+    return { ...actual, sendPushDigest: push, sendEmailDigest: email };
   });
   return import('./apparatusDefectConsumer.js');
 }
@@ -195,11 +199,12 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
         'apparatus-defect',
         'apparatus-defect',
       ]);
+      // It is also recorded for the digest, so it reaches every channel a minor defect does.
       expect(
         table.send.mock.calls.some(
           (call) => (call[0] as CommandLike).constructor.name === 'TransactWriteCommand',
         ),
-      ).toBe(false);
+      ).toBe(true);
     },
   );
 
@@ -351,7 +356,13 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
   });
 
   it('rejects when the roster cannot be read, delivering to nobody', async () => {
-    const send = vi.fn().mockRejectedValue(new Error('roster unavailable'));
+    const send = vi
+      .fn()
+      .mockImplementation((command: CommandLike) =>
+        command.constructor.name === 'QueryCommand'
+          ? Promise.reject(new Error('roster unavailable'))
+          : Promise.resolve({}),
+      );
     const push = vi.fn();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { handler } = await load(send, push);
@@ -360,6 +371,77 @@ describe('apparatusDefectConsumer — out-of-service defect (immediate path)', (
       'roster unavailable',
     );
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe('apparatusDefectConsumer — out-of-service email (review M1)', () => {
+  it('emails every APPARATUS/OFFICER recipient at once, to their roster address', async () => {
+    const table = fakeTable();
+    const email = vi.fn().mockResolvedValue(undefined);
+    const { handler } = await load(table.send, vi.fn().mockResolvedValue(undefined), email);
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(email.mock.calls.map((call) => call[1] as unknown)).toEqual([
+      { memberId: 'APP-1', email: 'app1@example.com' },
+      { memberId: 'LT-1', email: 'lt1@example.com' },
+    ]);
+    expect(email.mock.calls.map((call) => String(call[5]))).toEqual([
+      'apparatus-defect',
+      'apparatus-defect',
+    ]);
+  });
+
+  it('records the defect for the digest before the immediate send, so a failed email still arrives tomorrow', async () => {
+    const table = fakeTable();
+    const email = vi.fn().mockRejectedValue(new Error('SES down'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await load(table.send, vi.fn().mockResolvedValue(undefined), email);
+
+    await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow();
+
+    const transact = table.send.mock.calls
+      .map((call) => call[0] as CommandLike)
+      .find((command) => command.constructor.name === 'TransactWriteCommand');
+    const pks = (transact?.input.TransactItems as { Put: { Item: { pk: string } } }[]).map(
+      (t) => t.Put.Item.pk,
+    );
+    expect(pks).toEqual([
+      'DEPT#NICHOLS#ROLE#APPARATUS',
+      'DEPT#NICHOLS#ROLE#OFFICER',
+      'DEPT#NICHOLS#NOTIF_EVENT#evt-9',
+    ]);
+    // The failed email's claim is released; the sent push's is not.
+    expect(table.rows.has('DEPT#NICHOLS#MEMBER#LT-1|DEFECTEMAIL#evt-9')).toBe(false);
+    expect(table.rows.get('DEPT#NICHOLS#MEMBER#LT-1|DEFECTPUSH#evt-9')?.sentAt).toBeDefined();
+  });
+
+  it('a retried email is sent once more and the already-sent push is not repeated', async () => {
+    const table = fakeTable();
+    const push = vi.fn().mockResolvedValue(undefined);
+    const email = vi.fn().mockRejectedValueOnce(new Error('SES down')).mockResolvedValue(undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { handler } = await load(table.send, push, email);
+
+    await expect(handler(sqsEvent(defect({ outOfService: true })))).rejects.toThrow();
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(email).toHaveBeenCalledTimes(3);
+  });
+
+  it('respects an email mute without affecting the push', async () => {
+    const table = fakeTable({ 'NOTIFPREF#LT-1#apparatus-defect': { push: false, email: true } });
+    const push = vi.fn().mockResolvedValue(undefined);
+    const email = vi.fn().mockResolvedValue(undefined);
+    const { handler } = await load(table.send, push, email);
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(email.mock.calls.map((call) => (call[1] as { memberId: string }).memberId)).toEqual([
+      'APP-1',
+    ]);
   });
 });
 

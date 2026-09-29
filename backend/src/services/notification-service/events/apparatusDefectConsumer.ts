@@ -2,7 +2,7 @@ import { DeleteCommand, PutCommand, type DynamoDBDocumentClient } from '@aws-sdk
 import { buildDeptScopedPk, toVerifiedDeptId, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { emitOutcomeMetric } from '@boxalarm/metrics';
 import type { SQSEvent } from 'aws-lambda';
-import { sendPushDigest } from '../channelSender.js';
+import { sendEmailDigest, sendPushDigest } from '../channelSender.js';
 import { createDynamoClient, readNotificationConfig } from '../dynamoClient.js';
 import {
   APPARATUS_DEFECT_CATEGORY,
@@ -24,7 +24,7 @@ import {
 const LABEL = 'apparatus.defect.reported';
 const LOG_PREFIX = 'notification.apparatusDefect';
 
-/** Severities that take a unit off the road: delivered at once, never held for the digest. */
+/** Severities that take a unit off the road: inbox + email now, as well as the digest. */
 const IMMEDIATE_SEVERITIES: ReadonlySet<string> = new Set(['OUT_OF_SERVICE', 'CRITICAL']);
 
 interface DefectReminder extends ReminderRecord {
@@ -207,7 +207,23 @@ async function deliverTo(
         ),
       );
   emitOutcomeMetric(METRIC_NAMESPACE, `ApparatusDefectPush${push}`);
-  return push === 'Failed' ? 'Failed' : 'Delivered';
+
+  // Nothing subscribes to the push topic yet, so email is the channel that actually reaches
+  // an officer away from the app — it must not wait for tomorrow's digest.
+  const emailed: ChannelOutcome = mutes.email
+    ? 'Muted'
+    : await sendOnce(ddb, tableName, deptId, memberId, 'DEFECTEMAIL', envelope, () =>
+        sendEmailDigest(
+          process.env,
+          { memberId, email },
+          [item],
+          envelope.correlationId ?? envelope.eventId,
+          undefined,
+          APPARATUS_DEFECT_CATEGORY,
+        ),
+      );
+  emitOutcomeMetric(METRIC_NAMESPACE, `ApparatusDefectEmail${emailed}`);
+  return push === 'Failed' || emailed === 'Failed' ? 'Failed' : 'Delivered';
 }
 
 async function deliverImmediately(
@@ -250,10 +266,12 @@ async function deliverImmediately(
 
 /**
  * apparatus.defect.reported (apparatus-service outbox, F4.3) -> the APPARATUS role and
- * officers. A defect that takes the unit out of service (outOfService, or an
- * OUT_OF_SERVICE/CRITICAL severity) is written to their inboxes and pushed now, on the
- * non-critical notification channel — never an interruption-level alert. Any other defect
- * waits for the daily digest.
+ * officers. Every defect is recorded for the daily digest (push + email + inbox). A defect
+ * that takes the unit out of service (outOfService, or an OUT_OF_SERVICE/CRITICAL severity)
+ * is additionally written to their inboxes and emailed now, with a push on the
+ * non-critical notification channel (published, though no device subscriber exists yet) —
+ * never an interruption-level alert. Recording it for the digest too means an out-of-service
+ * defect reaches at least every channel a minor one does, even if the immediate email fails.
  */
 export const handler = async (event: SQSEvent): Promise<void> => {
   const { tableName } = readNotificationConfig(process.env);
@@ -270,19 +288,6 @@ export const handler = async (event: SQSEvent): Promise<void> => {
       throw error;
     }
     const deptId = toVerifiedDeptId({ deptId: reminder.deptId });
-
-    if (reminder.immediate) {
-      try {
-        await deliverImmediately(ddb, tableName, deptId, reminder, envelope);
-      } catch (error) {
-        logError(`${LOG_PREFIX}.immediate_failed`, error, envelope.eventId, {
-          defectId: reminder.item.subjectId,
-        });
-        emitOutcomeMetric(METRIC_NAMESPACE, 'ApparatusDefectImmediateFailed');
-        throw error;
-      }
-      continue;
-    }
 
     try {
       const outcome = await recordReminder(
@@ -305,6 +310,18 @@ export const handler = async (event: SQSEvent): Promise<void> => {
       });
       emitOutcomeMetric(METRIC_NAMESPACE, 'ApparatusDefectPendingFailed');
       throw error;
+    }
+
+    if (reminder.immediate) {
+      try {
+        await deliverImmediately(ddb, tableName, deptId, reminder, envelope);
+      } catch (error) {
+        logError(`${LOG_PREFIX}.immediate_failed`, error, envelope.eventId, {
+          defectId: reminder.item.subjectId,
+        });
+        emitOutcomeMetric(METRIC_NAMESPACE, 'ApparatusDefectImmediateFailed');
+        throw error;
+      }
     }
   }
 };

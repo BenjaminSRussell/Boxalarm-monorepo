@@ -290,7 +290,7 @@ describe('apparatus.defect.reported (outbox) -> apparatusDefectConsumer', () => 
     expect(rows[0]?.item).toMatchObject({ title: 'E1', link: { kind: 'apparatus', id: 'E1' } });
   });
 
-  it('an OUT_OF_SERVICE defect reaches the officers’ inboxes and push immediately', async () => {
+  it('an OUT_OF_SERVICE defect reaches the officers’ inboxes, email and push immediately', async () => {
     const event = await reportedDefect('OUT_OF_SERVICE');
 
     const writes: Array<Record<string, unknown>> = [];
@@ -313,9 +313,10 @@ describe('apparatus.defect.reported (outbox) -> apparatusDefectConsumer', () => 
       };
     });
     const push = vi.fn().mockResolvedValue(undefined);
+    const email = vi.fn().mockResolvedValue(undefined);
     vi.doMock('../channelSender.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../channelSender.js')>();
-      return { ...actual, sendPushDigest: push };
+      return { ...actual, sendPushDigest: push, sendEmailDigest: email };
     });
     const { handler } = await import('./apparatusDefectConsumer.js');
 
@@ -329,5 +330,6 @@ describe('apparatus.defect.reported (outbox) -> apparatusDefectConsumer', () => 
       }),
     ]);
     expect(push).toHaveBeenCalledTimes(1);
+    expect(email).toHaveBeenCalledTimes(1);
   });
 });
