@@ -36,10 +36,6 @@ const LATCH_SK = 'TRIPPED';
 
 export class MassTokenInvalidationError extends Error {}
 
-function guardPk(deptId: VerifiedDeptId): string {
-  return buildDeptScopedPk(deptId, 'PUSH_TOKEN_INVALIDATION');
-}
-
 /**
  * Admits one invalidation of `token`, or throws MassTokenInvalidationError when the guard is
  * (or now becomes) tripped. The same token rejected again (a redelivery) is counted once. Any
@@ -53,7 +49,7 @@ export async function admitTokenInvalidation(
   nowMs: number = Date.now(),
 ): Promise<void> {
   const nowSeconds = Math.floor(nowMs / 1000);
-  const pk = guardPk(deptId);
+  const pk = buildDeptScopedPk(deptId, 'PUSH_TOKEN_INVALIDATION');
 
   // TTL deletion lags by up to days, so expiry is checked here, not left to DynamoDB.
   const latch = await ddb.send(
