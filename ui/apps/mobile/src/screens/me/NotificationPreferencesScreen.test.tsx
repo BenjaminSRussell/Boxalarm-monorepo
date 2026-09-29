@@ -120,3 +120,41 @@ test('a failed save reverts the optimistic toggle and tells the member (M11)', a
   );
   expect((await findByLabelText('Certification expiry push notifications')).props.value).toBe(true);
 });
+
+test('lists only the reminders a MEMBER can receive', async () => {
+  mockApiRequest.mockImplementation(async () => ({ json: async () => ({ preferences: [] }) }));
+
+  const { findByLabelText, queryByLabelText } = await render(<NotificationPreferencesScreen />);
+
+  expect(await findByLabelText('PPE expiry push notifications')).toBeTruthy();
+  expect(queryByLabelText('Apparatus defects push notifications')).toBeNull();
+});
+
+test('an apparatus officer can mute each apparatus reminder under its own category', async () => {
+  mockUseOptionalAuth.mockReturnValue({ ...mockAuthValue, roles: ['MEMBER', 'APPARATUS'] });
+  let saved: unknown;
+  mockApiRequest.mockImplementation(async (path: string, _tokens: unknown, init?: RequestInit) => {
+    if (path === 'notifications/preferences' && init?.method === 'PUT') {
+      saved = JSON.parse(String(init.body));
+      return { json: async () => ({}) };
+    }
+    return {
+      json: async () => ({
+        preferences: [{ category: 'inventory-reorder', channels: { push: true, email: false } }],
+      }),
+    };
+  });
+
+  const { findByLabelText } = await render(<NotificationPreferencesScreen />);
+
+  expect(await findByLabelText('Apparatus tests due push notifications')).toBeTruthy();
+  await waitFor(async () =>
+    expect((await findByLabelText('Supply reorders push notifications')).props.value).toBe(false),
+  );
+  const defects = await findByLabelText('Apparatus defects push notifications');
+  await act(async () => {
+    fireEvent(defects, 'valueChange', false);
+  });
+
+  expect(saved).toEqual({ category: 'apparatus-defect', channels: { push: true, email: false } });
+});

@@ -39,11 +39,15 @@ function makeManager(groups: string[]): UserManager {
   } as unknown as UserManager;
 }
 
-function renderWithProviders(element: React.ReactElement, path = '/notifications') {
+function renderWithProviders(
+  element: React.ReactElement,
+  path = '/notifications',
+  groups: string[] = ['MEMBER'],
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <AuthProvider userManager={makeManager(['MEMBER'])}>
+      <AuthProvider userManager={makeManager(groups)}>
         <MemoryRouter initialEntries={[path]}>
           <Routes>
             <Route path={path} element={<RequireRole>{element}</RequireRole>} />
@@ -74,6 +78,11 @@ const READ: InboxNotification = {
   createdAt: Date.parse('2026-09-20T12:00:00Z'),
   readAt: Date.parse('2026-09-21T12:00:00Z'),
 };
+
+/** The certification-expiry preference group; every category has its own push/email pair. */
+async function certGroup() {
+  return within(await screen.findByRole('group', { name: 'Certification-expiry reminders' }));
+}
 
 const NO_PREFS = http.get('/api/v1/notifications/preferences', () =>
   HttpResponse.json({ preferences: [] }),
@@ -226,8 +235,9 @@ test('preferences: nothing stored means both channels on; unchecking push saves 
   );
   renderWithProviders(<NotificationsPage />);
 
-  const push = await screen.findByRole('checkbox', { name: 'Push notification' });
-  const email = screen.getByRole('checkbox', { name: 'Email' });
+  const group = await certGroup();
+  const push = group.getByRole('checkbox', { name: 'Push notification' });
+  const email = group.getByRole('checkbox', { name: 'Email' });
   expect(push.getAttribute('aria-checked')).toBe('true');
   expect(email.getAttribute('aria-checked')).toBe('true');
 
@@ -238,7 +248,7 @@ test('preferences: nothing stored means both channels on; unchecking push saves 
   );
   expect(await screen.findByText('Preferences saved.')).toBeTruthy();
   expect(
-    screen.getByRole('checkbox', { name: 'Push notification' }).getAttribute('aria-checked'),
+    group.getByRole('checkbox', { name: 'Push notification' }).getAttribute('aria-checked'),
   ).toBe('false');
 });
 
@@ -253,10 +263,10 @@ test('preferences: a stored email mute renders Email unchecked', async () => {
   );
   renderWithProviders(<NotificationsPage />);
 
-  const email = await screen.findByRole('checkbox', { name: 'Email' });
-  expect(email.getAttribute('aria-checked')).toBe('false');
+  const group = await certGroup();
+  expect(group.getByRole('checkbox', { name: 'Email' }).getAttribute('aria-checked')).toBe('false');
   expect(
-    screen.getByRole('checkbox', { name: 'Push notification' }).getAttribute('aria-checked'),
+    group.getByRole('checkbox', { name: 'Push notification' }).getAttribute('aria-checked'),
   ).toBe('true');
 });
 
@@ -273,13 +283,14 @@ test('preferences: a failed save is reported and the toggle reverts to the store
   );
   renderWithProviders(<NotificationsPage />);
 
-  await userEvent.click(await screen.findByRole('checkbox', { name: 'Email' }));
+  const group = await certGroup();
+  await userEvent.click(group.getByRole('checkbox', { name: 'Email' }));
 
   expect(
     await screen.findByText('Your change was not saved. Check your connection and try again.'),
   ).toBeTruthy();
   await waitFor(() =>
-    expect(screen.getByRole('checkbox', { name: 'Email' }).getAttribute('aria-checked')).toBe(
+    expect(group.getByRole('checkbox', { name: 'Email' }).getAttribute('aria-checked')).toBe(
       'true',
     ),
   );
@@ -299,6 +310,182 @@ test('preferences: a load failure shows an error, not default toggles', async ()
 
   expect(await screen.findByText('Something went wrong loading this page')).toBeTruthy();
   expect(screen.queryByRole('checkbox', { name: 'Push notification' })).toBeNull();
+});
+
+test('renders each reminder category with its title, what is due, and a link where the member may go', async () => {
+  const items: InboxNotification[] = [
+    {
+      notificationId: 'n-oos',
+      category: 'apparatus-defect',
+      summary: '1 defect reported',
+      items: [
+        {
+          subjectId: 'DEF-1',
+          title: 'E1',
+          detail: 'reported out of service',
+          link: { kind: 'apparatus', id: 'E1' },
+        },
+      ],
+      createdAt: Date.parse('2026-09-29T14:03:00Z'),
+      readAt: null,
+    },
+    {
+      notificationId: 'n-test',
+      category: 'apparatus-test-due',
+      summary: '1 test due',
+      items: [
+        {
+          subjectId: 'APP-E1:HOSE',
+          title: 'APP-E1',
+          detail: 'hose test due 2026-10-20',
+          dueDate: '2026-10-20',
+          link: { kind: 'apparatus' },
+        },
+      ],
+      createdAt: Date.parse('2026-09-29T12:00:00Z'),
+      readAt: null,
+    },
+    {
+      notificationId: 'n-reorder',
+      category: 'inventory-reorder',
+      summary: '1 item below reorder level',
+      items: [
+        {
+          subjectId: 'GLOVES-L',
+          title: 'Gloves (Large)',
+          detail: '3 on hand, reorder at 5',
+          link: { kind: 'consumables' },
+        },
+      ],
+      createdAt: Date.parse('2026-09-29T12:00:00Z'),
+      readAt: null,
+    },
+    {
+      notificationId: 'n-ppe',
+      category: 'ppe-expiry',
+      summary: '1 PPE item expiring',
+      items: [
+        {
+          subjectId: 'MBR-34:COAT',
+          title: 'TURNOUT-COAT',
+          detail: 'held by MBR-34, expires 2026-10-14',
+          link: { kind: 'member', id: 'MBR-34' },
+        },
+      ],
+      createdAt: Date.parse('2026-09-29T12:00:00Z'),
+      readAt: null,
+    },
+  ];
+  server.use(
+    http.get('/api/v1/notifications', () => HttpResponse.json({ items, nextCursor: null })),
+    NO_PREFS,
+  );
+  renderWithProviders(<NotificationsPage />, '/notifications', ['MEMBER', 'APPARATUS']);
+
+  expect(await screen.findByText('Apparatus defects reported')).toBeTruthy();
+  expect(screen.getByText('Apparatus tests due')).toBeTruthy();
+  expect(screen.getByText('Supplies to reorder')).toBeTruthy();
+  expect(screen.getByText('PPE expiring')).toBeTruthy();
+
+  const oos = screen.getByRole('link', { name: 'E1 reported out of service' });
+  expect(oos.getAttribute('href')).toBe('/apparatus/E1');
+  expect(
+    screen.getByRole('link', { name: 'APP-E1 hose test due 2026-10-20' }).getAttribute('href'),
+  ).toBe('/apparatus');
+  expect(
+    screen
+      .getByRole('link', { name: 'Gloves (Large) 3 on hand, reorder at 5' })
+      .getAttribute('href'),
+  ).toBe('/inventory');
+  // An APPARATUS member cannot open /personnel/:id, so the PPE item is text, not a dead link.
+  expect(screen.getByText('TURNOUT-COAT held by MBR-34, expires 2026-10-14')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: /TURNOUT-COAT/ })).toBeNull();
+});
+
+test('a MEMBER without the apparatus role sees reminder items as text, never links they cannot open', async () => {
+  server.use(
+    http.get('/api/v1/notifications', () =>
+      HttpResponse.json({
+        items: [
+          {
+            notificationId: 'n-test',
+            category: 'apparatus-test-due',
+            summary: '1 test due',
+            items: [
+              {
+                subjectId: 'X',
+                title: 'APP-E1',
+                detail: 'hose test due',
+                link: { kind: 'apparatus' },
+              },
+            ],
+            createdAt: 1,
+            readAt: null,
+          },
+        ],
+        nextCursor: null,
+      }),
+    ),
+    NO_PREFS,
+  );
+  renderWithProviders(<NotificationsPage />);
+
+  expect(await screen.findByText('APP-E1 hose test due')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: /APP-E1/ })).toBeNull();
+});
+
+test('preferences: a MEMBER is offered only the reminders about their own records', async () => {
+  server.use(
+    http.get('/api/v1/notifications', () => HttpResponse.json({ items: [], nextCursor: null })),
+    NO_PREFS,
+  );
+  renderWithProviders(<NotificationsPage />);
+
+  await certGroup();
+  const legends = screen.getAllByRole('group').map((g) => g.querySelector('legend')?.textContent);
+  expect(legends).toEqual(['Certification-expiry reminders', 'PPE expiry reminders']);
+});
+
+test('preferences: an apparatus officer can mute each apparatus reminder category on its own key', async () => {
+  const puts: unknown[] = [];
+  server.use(
+    http.get('/api/v1/notifications', () => HttpResponse.json({ items: [], nextCursor: null })),
+    http.get('/api/v1/notifications/preferences', () =>
+      HttpResponse.json({
+        preferences: [{ category: 'inventory-reorder', channels: { push: true, email: false } }],
+      }),
+    ),
+    http.put('/api/v1/notifications/preferences', async ({ request }) => {
+      const body = await request.json();
+      puts.push(body);
+      return HttpResponse.json(body);
+    }),
+  );
+  renderWithProviders(<NotificationsPage />, '/notifications', ['MEMBER', 'APPARATUS']);
+
+  await certGroup();
+  const legends = screen.getAllByRole('group').map((g) => g.querySelector('legend')?.textContent);
+  expect(legends).toEqual([
+    'Certification-expiry reminders',
+    'PPE expiry reminders',
+    'Apparatus test reminders',
+    'Apparatus defect reports',
+    'Supply reorder reminders',
+  ]);
+
+  const reorder = within(screen.getByRole('group', { name: 'Supply reorder reminders' }));
+  expect(
+    reorder.getByRole('checkbox', { name: 'Push notification' }).getAttribute('aria-checked'),
+  ).toBe('false');
+
+  const defects = within(screen.getByRole('group', { name: 'Apparatus defect reports' }));
+  await userEvent.click(defects.getByRole('checkbox', { name: 'Email' }));
+
+  await waitFor(() =>
+    expect(puts).toEqual([
+      { category: 'apparatus-defect', channels: { push: false, email: true } },
+    ]),
+  );
 });
 
 function renderBell() {

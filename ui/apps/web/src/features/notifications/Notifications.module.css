@@ -90,6 +90,29 @@
   color: var(--bx-fg-muted);
 }
 
+.dueList li {
+  min-height: 24px;
+}
+
+.dueLink {
+  display: inline-block;
+  min-height: 44px;
+  padding: 10px 0;
+  color: var(--bx-fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.dueLink:focus-visible {
+  outline: 2px solid var(--bx-fg);
+  outline-offset: 2px;
+}
+
+.prefList {
+  display: grid;
+  gap: var(--bx-space-lg);
+}
+
 .prefGroup {
   display: grid;
   gap: var(--bx-space-sm);

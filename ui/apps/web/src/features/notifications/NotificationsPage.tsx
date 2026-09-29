@@ -1,21 +1,34 @@
 import { useState } from 'react';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiErrorState } from '../../components/ApiErrorState';
 import { ForbiddenState } from '../../components/ForbiddenState';
 import { Button, Card, Checkbox, EmptyState, PageHeader, Skeleton } from '../../components/ui';
 import { Bell } from '../../components/ui/icons';
 import { ApiError } from '../../lib/apiClient';
+import { canAccessPath } from '../../routing/routeTable';
 import {
   getNotificationPreferences,
   listNotifications,
   markNotificationRead,
   putNotificationPreference,
 } from './api';
-import { CERT_EXPIRY_CATEGORY, categoryLabel } from './labels';
+import {
+  categoryLabel,
+  itemPath,
+  itemText,
+  preferencesFor,
+  type ReminderPreference,
+} from './labels';
 import { UNREAD_SUMMARY_QUERY_KEY } from './NotificationBell';
 import styles from './Notifications.module.css';
-import type { InboxNotification, NotificationChannelMutes, NotificationPreference } from './types';
+import type {
+  InboxNotification,
+  NotificationChannelMutes,
+  NotificationDigestItem,
+  NotificationPreference,
+} from './types';
 
 const INBOX_QUERY_KEY = ['notifications', 'inbox'] as const;
 const PREFERENCES_QUERY_KEY = ['notifications', 'preferences'] as const;
@@ -25,6 +38,22 @@ function SectionError({ error, onRetry }: { error: unknown; onRetry: () => void 
     return <ForbiddenState problem={error.problem} embedded headingLevel="h2" />;
   }
   return <ApiErrorState embedded headingLevel="h2" onRetry={onRetry} />;
+}
+
+function DueItem({ item }: { item: NotificationDigestItem }) {
+  const auth = useAuth();
+  const text = itemText(item);
+  const path = itemPath(item);
+  // Only link where this member's roles can open the page; otherwise plain text.
+  return path && canAccessPath(path, auth.roles) ? (
+    <li>
+      <Link to={path} className={styles.dueLink}>
+        {text}
+      </Link>
+    </li>
+  ) : (
+    <li>{text}</li>
+  );
 }
 
 function NotificationRow({ notification }: { notification: InboxNotification }) {
@@ -53,10 +82,11 @@ function NotificationRow({ notification }: { notification: InboxNotification }) 
         </p>
         {notification.items.length > 0 ? (
           <ul className={styles.dueList} aria-label={`${title}: items`}>
-            {notification.items.map((item) => (
-              <li key={`${item.certId}-${item.expiryDate}`}>
-                {item.certId} expires {item.expiryDate}
-              </li>
+            {notification.items.map((item, index) => (
+              <DueItem
+                key={item.subjectId ?? `${item.certId}-${item.expiryDate}-${index}`}
+                item={item}
+              />
             ))}
           </ul>
         ) : null}
@@ -112,7 +142,7 @@ function InboxSection() {
         <EmptyState
           icon={Bell}
           title="No notifications"
-          description="Certification-expiry reminders arrive here as a once-a-day digest. Dispatch alerts never appear in this inbox."
+          description="Reminders — certifications and PPE expiring, apparatus tests due, defects, supplies to reorder — arrive here as a once-a-day digest; an apparatus reported out of service arrives at once. Dispatch alerts never appear in this inbox."
         />
       ) : (
         <ul className={styles.list}>
@@ -139,27 +169,68 @@ function InboxSection() {
   );
 }
 
-function PreferencesSection() {
+function CategoryPreference({
+  preference,
+  stored,
+}: {
+  preference: ReminderPreference;
+  stored: NotificationChannelMutes;
+}) {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [saveError, setSaveError] = useState(false);
-  const preferences = useQuery({
-    queryKey: PREFERENCES_QUERY_KEY,
-    queryFn: () => getNotificationPreferences(auth),
-  });
+  const { category, legend } = preference;
   const save = useMutation({
     mutationFn: (channels: NotificationChannelMutes) =>
-      putNotificationPreference(auth, CERT_EXPIRY_CATEGORY, channels),
+      putNotificationPreference(auth, category, channels),
     onMutate: () => setSaveError(false),
     onSuccess: (_result, channels) =>
       queryClient.setQueryData<NotificationPreference[]>(PREFERENCES_QUERY_KEY, (previous) => [
-        ...(previous ?? []).filter((p) => p.category !== CERT_EXPIRY_CATEGORY),
-        { category: CERT_EXPIRY_CATEGORY, channels },
+        ...(previous ?? []).filter((p) => p.category !== category),
+        { category, channels },
       ]),
     onError: () => {
       setSaveError(true);
       void queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY });
     },
+  });
+
+  // While a save is in flight show what was asked for; a failed save falls back to what the
+  // server still has.
+  const mutes = save.isPending && save.variables ? save.variables : stored;
+
+  return (
+    <fieldset className={styles.prefGroup} aria-busy={save.isPending || undefined}>
+      <legend>{legend}</legend>
+      <Checkbox
+        label="Push notification"
+        checked={!mutes.push}
+        onCheckedChange={(on) => save.mutate({ ...mutes, push: !on })}
+      />
+      <Checkbox
+        label="Email"
+        checked={!mutes.email}
+        onCheckedChange={(on) => save.mutate({ ...mutes, email: !on })}
+      />
+      {saveError ? (
+        <p role="alert" className={styles.itemMeta}>
+          Your change was not saved. Check your connection and try again.
+        </p>
+      ) : null}
+      {save.isSuccess && !saveError ? (
+        <p role="status" className={styles.itemMeta}>
+          Preferences saved.
+        </p>
+      ) : null}
+    </fieldset>
+  );
+}
+
+function PreferencesSection() {
+  const auth = useAuth();
+  const preferences = useQuery({
+    queryKey: PREFERENCES_QUERY_KEY,
+    queryFn: () => getNotificationPreferences(auth),
   });
 
   if (preferences.isLoading) {
@@ -177,43 +248,27 @@ function PreferencesSection() {
     );
   }
 
-  // Stored flags are mutes; no stored row means nothing is muted. While a save is in flight
-  // show what was asked for; a failed save falls back to what the server still has.
-  const stored = preferences.data?.find((p) => p.category === CERT_EXPIRY_CATEGORY)?.channels ?? {
-    push: false,
-    email: false,
-  };
-  const mutes = save.isPending && save.variables ? save.variables : stored;
-
   return (
     <Card title="Notification preferences">
       <p className={styles.prefHint}>
-        Applies to your own certification-expiry reminders. Dispatch alerts are delivered separately
-        and cannot be muted here.
+        Muting a channel stops that reminder&apos;s push or email; it still arrives in your inbox.
+        Dispatch alerts are delivered separately and cannot be muted here.
       </p>
-      <fieldset className={styles.prefGroup} aria-busy={save.isPending || undefined}>
-        <legend>Certification-expiry reminders</legend>
-        <Checkbox
-          label="Push notification"
-          checked={!mutes.push}
-          onCheckedChange={(on) => save.mutate({ ...mutes, push: !on })}
-        />
-        <Checkbox
-          label="Email"
-          checked={!mutes.email}
-          onCheckedChange={(on) => save.mutate({ ...mutes, email: !on })}
-        />
-      </fieldset>
-      {saveError ? (
-        <p role="alert" className={styles.itemMeta}>
-          Your change was not saved. Check your connection and try again.
-        </p>
-      ) : null}
-      {save.isSuccess && !saveError ? (
-        <p role="status" className={styles.itemMeta}>
-          Preferences saved.
-        </p>
-      ) : null}
+      <div className={styles.prefList}>
+        {preferencesFor(auth.roles).map((preference) => (
+          <CategoryPreference
+            key={preference.category}
+            preference={preference}
+            // Stored flags are mutes; no stored row means nothing is muted.
+            stored={
+              preferences.data?.find((p) => p.category === preference.category)?.channels ?? {
+                push: false,
+                email: false,
+              }
+            }
+          />
+        ))}
+      </div>
     </Card>
   );
 }

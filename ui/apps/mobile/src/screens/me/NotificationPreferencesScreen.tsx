@@ -4,12 +4,13 @@ import Config from 'react-native-config';
 import { ScrollView, Switch, Text, View, useColorScheme } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useOptionalAuth } from '../../auth/AuthContext';
+import { preferencesFor } from '../../features/notifications/categories';
 import { getNotificationPreferences, putNotificationPreference } from '../../features/training/api';
 import type { NotificationPreference } from '../../features/training/types';
 
-// notification-service's category key (repository.ts CERT_EXPIRY_CATEGORY). Its stored
-// channels are MUTES - true means that channel is muted - so the switch shows the inverse.
-const CERT_EXPIRY_CATEGORY = 'cert-expiry';
+// Stored channels are MUTES (notification-service repository.ts) - true means that channel is
+// muted for the category - so each switch shows the inverse. No stored row: nothing is muted.
+const UNMUTED: NotificationPreference['channels'] = { push: false, email: false };
 
 export function NotificationPreferencesScreen() {
   const scheme = useColorScheme();
@@ -40,28 +41,24 @@ export function NotificationPreferencesScreen() {
     };
   }, [auth, apiBaseUrl]);
 
-  const certExpiry = preferences.find((p) => p.category === CERT_EXPIRY_CATEGORY) ?? {
-    category: CERT_EXPIRY_CATEGORY,
-    // No stored preference means nothing is muted.
-    channels: { push: false, email: false },
-  };
-  const pushEnabled = !certExpiry.channels.push;
+  const channelsFor = (category: string) =>
+    preferences.find((p) => p.category === category)?.channels ?? UNMUTED;
 
-  const togglePush = async (enabled: boolean) => {
+  const togglePush = async (category: string, enabled: boolean) => {
     if (!auth || !apiBaseUrl) return;
-    const previous = certExpiry.channels;
+    const previous = channelsFor(category);
     const next = { ...previous, push: !enabled };
     const withChannels = (channels: NotificationPreference['channels']) =>
       setPreferences((prev) => [
-        ...prev.filter((p) => p.category !== CERT_EXPIRY_CATEGORY),
-        { category: CERT_EXPIRY_CATEGORY, channels },
+        ...prev.filter((p) => p.category !== category),
+        { category, channels },
       ]);
     setSaveError(null);
     withChannels(next);
     try {
-      await putNotificationPreference(auth, apiBaseUrl, CERT_EXPIRY_CATEGORY, next);
+      await putNotificationPreference(auth, apiBaseUrl, category, next);
     } catch {
-      // Revert the optimistic toggle: the member must not believe an expiry alert was muted or
+      // Revert the optimistic toggle: the member must not believe a reminder was muted or
       // unmuted when nothing was saved (PR #321 review M11).
       withChannels(previous);
       setSaveError('Your change was not saved. Check your connection and try again.');
@@ -95,23 +92,37 @@ export function NotificationPreferencesScreen() {
             {loadError}
           </Text>
         ) : null}
-        <View
+        <Text
           style={{
-            minHeight: touchTarget.baseline.ios,
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
+            color: tokens.foreground,
+            opacity: 0.7,
+            fontSize: typography.size.sm,
+            marginBottom: spacing.md,
           }}
         >
-          <Text style={{ color: tokens.foreground, fontSize: typography.size.base }}>
-            Certification expiry
-          </Text>
-          <Switch
-            accessibilityLabel="Certification expiry push notifications"
-            value={pushEnabled}
-            onValueChange={(value) => void togglePush(value)}
-          />
-        </View>
+          Muting push still delivers the reminder to your inbox. Dispatch alerts cannot be muted
+          here.
+        </Text>
+        {preferencesFor(auth?.roles ?? []).map(({ category, label }) => (
+          <View
+            key={category}
+            style={{
+              minHeight: touchTarget.baseline.ios,
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={{ color: tokens.foreground, fontSize: typography.size.base }}>
+              {label}
+            </Text>
+            <Switch
+              accessibilityLabel={`${label} push notifications`}
+              value={!channelsFor(category).push}
+              onValueChange={(value) => void togglePush(category, value)}
+            />
+          </View>
+        ))}
       </ScrollView>
     </SafeAreaView>
   );
