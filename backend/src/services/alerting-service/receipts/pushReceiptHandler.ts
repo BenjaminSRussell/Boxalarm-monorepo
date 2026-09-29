@@ -1,10 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { badRequestProblem } from '@boxalarm/authz';
-import { assertNoDelimiter, buildDeptScopedPk, toVerifiedDeptId } from '@boxalarm/dept-scope';
-import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { assertNoDelimiter, toVerifiedDeptId } from '@boxalarm/dept-scope';
 import { createDynamoClient, readAlertingConfig } from '../eligibility/dynamoClient.js';
+import { invalidatePushToken, PERMANENT_INVALID_TOKEN_CODES } from './invalidatePushToken.js';
 
 function unauthorizedProblem(traceId: string): APIGatewayProxyResultV2 {
   return {
@@ -18,13 +17,6 @@ function unauthorizedProblem(traceId: string): APIGatewayProxyResultV2 {
       traceId,
     }),
   };
-}
-
-interface ContactChannelSnapshot {
-  readonly channel: string;
-  readonly platform?: string;
-  readonly token?: string;
-  readonly valid?: boolean;
 }
 
 export interface PushReceiptConfig {
@@ -73,13 +65,6 @@ export function parseReceiptBody(raw: string | undefined | null): PushReceiptBod
     errorCode: body.errorCode,
   };
 }
-
-const PERMANENT_INVALID_TOKEN_CODES = new Set([
-  'BadDeviceToken',
-  'Unregistered',
-  'UNREGISTERED',
-  'INVALID_ARGUMENT',
-]);
 
 function secretsMatch(provided: string, expected: string): boolean {
   const providedDigest = createHash('sha256').update(provided).digest();
@@ -151,84 +136,52 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
   const deptId = toVerifiedDeptId({ deptId: body.deptId });
   assertNoDelimiter(body.memberId, 'memberId');
-  const pk = buildDeptScopedPk(deptId, 'ELIGIBILITY');
-  const sk = `MEMBER#${body.memberId}`;
   const client = createDynamoClient(process.env);
   const tableName = readAlertingConfig(process.env).tableName;
 
-  const MAX_ATTEMPTS = 3;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    const existing = await client.send(new GetCommand({ TableName: tableName, Key: { pk, sk } }));
-    const currentChannels =
-      (existing.Item?.contactChannels as ContactChannelSnapshot[] | undefined) ?? [];
-    const pushEntry = currentChannels.find((entry) => entry.channel === 'PUSH');
-    if (!existing.Item || !pushEntry || pushEntry.token !== body.token) {
-      console.log(
-        JSON.stringify({
-          event: 'alerting.pushToken.invalidate.no_match',
-          service: 'alerting-service',
-          correlationId: traceId,
-          memberId: body.memberId,
-        }),
-      );
-      return noopResponse(body.memberId);
-    }
-
-    const snapshotUpdatedAt = existing.Item.snapshotUpdatedAt as number | undefined;
-    const contactChannels = currentChannels.map((entry) =>
-      entry.channel === 'PUSH' ? { ...entry, valid: false } : entry,
+  let result: Awaited<ReturnType<typeof invalidatePushToken>>;
+  try {
+    result = await invalidatePushToken(client, tableName, deptId, body.memberId, body.token);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: 'alerting.pushToken.invalidate.failed',
+        service: 'alerting-service',
+        correlationId: traceId,
+        memberId: body.memberId,
+        reason: error instanceof Error ? error.constructor.name : 'UnknownError',
+        message: error instanceof Error ? error.message : String(error),
+      }),
     );
+    emitInvalidTokenMetric('Failed');
+    throw error;
+  }
 
-    try {
-      await client.send(
-        new UpdateCommand({
-          TableName: tableName,
-          Key: { pk, sk },
-          UpdateExpression: 'SET contactChannels = :contactChannels',
-          ConditionExpression:
-            snapshotUpdatedAt === undefined
-              ? 'attribute_exists(pk) AND attribute_not_exists(snapshotUpdatedAt)'
-              : 'attribute_exists(pk) AND snapshotUpdatedAt = :snapshotUpdatedAt',
-          ExpressionAttributeValues:
-            snapshotUpdatedAt === undefined
-              ? { ':contactChannels': contactChannels }
-              : { ':contactChannels': contactChannels, ':snapshotUpdatedAt': snapshotUpdatedAt },
-        }),
-      );
-    } catch (error) {
-      if (error instanceof ConditionalCheckFailedException) {
-        continue;
-      }
-      console.error(
-        JSON.stringify({
-          event: 'alerting.pushToken.invalidate.failed',
-          service: 'alerting-service',
-          correlationId: traceId,
-          memberId: body.memberId,
-          reason: error instanceof Error ? error.constructor.name : 'UnknownError',
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      emitInvalidTokenMetric('Failed');
-      throw error;
-    }
-
+  if (result === 'no_match') {
     console.log(
       JSON.stringify({
-        event: 'alerting.pushToken.invalidated',
+        event: 'alerting.pushToken.invalidate.no_match',
         service: 'alerting-service',
         correlationId: traceId,
         memberId: body.memberId,
       }),
     );
-    emitInvalidTokenMetric('Invalidated');
-
-    return {
-      statusCode: 200,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ memberId: body.memberId, invalidated: true }),
-    };
+    return noopResponse(body.memberId);
   }
 
-  throw new Error(`push token invalidation for member ${body.memberId} lost a repeated write race`);
+  console.log(
+    JSON.stringify({
+      event: 'alerting.pushToken.invalidated',
+      service: 'alerting-service',
+      correlationId: traceId,
+      memberId: body.memberId,
+    }),
+  );
+  emitInvalidTokenMetric('Invalidated');
+
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ memberId: body.memberId, invalidated: true }),
+  };
 };
