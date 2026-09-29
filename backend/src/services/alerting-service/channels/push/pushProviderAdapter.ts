@@ -2,7 +2,12 @@ import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { createChannelSecretsClient } from '../httpProviderAdapter.js';
 import { sendViaApns, type Http2Transport } from './apnsAdapter.js';
 import { sendViaFcm } from './fcmAdapter.js';
-import { readPushSecretId, type PushPlatform } from './pushCredentials.js';
+import {
+  loadApnsCredentials,
+  readPushSecretId,
+  type ApnsInterruptionLevel,
+  type PushPlatform,
+} from './pushCredentials.js';
 import type { PushNotification } from './pushPayload.js';
 import type { PushSendResult } from './pushResult.js';
 
@@ -60,9 +65,32 @@ export async function sendPush(
       ...(options.apnsOrigin ? { origin: options.apnsOrigin } : {}),
     });
   }
+  const apnsInterruptionLevel = await apnsInterruptionLevelFor(env, isTest, secretsClient);
   return sendViaFcm(notification, {
     ...common,
+    ...(apnsInterruptionLevel ? { apnsInterruptionLevel } : {}),
     ...(options.fcmOrigin ? { fcmOrigin: options.fcmOrigin } : {}),
     ...(options.oauthTokenUrl ? { oauthTokenUrl: options.oauthTokenUrl } : {}),
   });
+}
+
+/**
+ * The interruption level lives in one place: the APNs secret's `interruptionLevel`. FCM's apns
+ * block (for iOS devices still on a legacy FCM token) takes it from there too. An operator who
+ * switches the APNs secret to `time-sensitive` until #4 is granted therefore switches both
+ * paths. Best effort: an Android page must never fail because the APNs secret is unset or
+ * unreadable, so FCM then falls back to its own secret's `apnsInterruptionLevel`, then
+ * `critical`. The read is cached and coalesced like every other credential read.
+ */
+async function apnsInterruptionLevelFor(
+  env: NodeJS.ProcessEnv,
+  isTest: boolean,
+  secretsClient: SecretsManagerClient,
+): Promise<ApnsInterruptionLevel | undefined> {
+  try {
+    const apnsSecretId = readPushSecretId('APNS', env, { isTest });
+    return (await loadApnsCredentials(apnsSecretId, secretsClient, { isTest })).interruptionLevel;
+  } catch {
+    return undefined;
+  }
 }

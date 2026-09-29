@@ -243,6 +243,89 @@ describe('credential reads are coalesced across concurrent sends (review minor 5
     );
     const tokenCalls = fetchSpy.mock.calls.filter(([url]) => (url as string).endsWith('/token'));
     expect(tokenCalls).toHaveLength(1);
-    expect(secrets.send).toHaveBeenCalledTimes(1);
+    // One read of the FCM secret (the APNs secret is also read once, for the interruption level).
+    const fcmReads = (
+      secrets.send.mock.calls as unknown as [{ input: { SecretId: string } }][]
+    ).filter(([command]) => command.input.SecretId === 'fcm-prod');
+    expect(fcmReads).toHaveLength(1);
+  });
+});
+
+describe('one interruption level for both gateways (review round 2 m9)', () => {
+  function fcmServiceAccount(extra: Record<string, unknown> = {}) {
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({
+      type: 'pkcs8',
+      format: 'pem',
+    });
+    return JSON.stringify({
+      project_id: 'p',
+      client_email: 'sa@p.iam.gserviceaccount.com',
+      private_key: rsa.toString(),
+      ...extra,
+    });
+  }
+
+  async function fcmApnsLevel(
+    secrets: Record<string, string>,
+    envOverride: NodeJS.ProcessEnv = env,
+  ) {
+    const { sendPush } = await import('./pushProviderAdapter.js');
+    const client = {
+      send: vi.fn((command: { input: { SecretId: string } }) => {
+        const value = secrets[command.input.SecretId];
+        return value
+          ? Promise.resolve({ SecretString: value })
+          : Promise.reject(new Error('ResourceNotFoundException'));
+      }),
+    } as unknown as SecretsManagerClient;
+    let body: { message: { apns: { payload: { aps: Record<string, unknown> } } } } | undefined;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+        if ((url as string).endsWith('/token')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: 'a', expires_in: 3599 }), { status: 200 }),
+          );
+        }
+        body = JSON.parse(init?.body as string) as typeof body;
+        return Promise.resolve(new Response(JSON.stringify({ name: 'm' }), { status: 200 }));
+      });
+    await sendPush({ ...notification, token: 'fcm' }, 'FCM', envOverride, {
+      secretsClient: client,
+      fcmOrigin: 'https://fcm.test',
+      oauthTokenUrl: 'https://oauth.test/token',
+    });
+    fetchSpy.mockRestore();
+    return body?.message.apns.payload.aps['interruption-level'];
+  }
+
+  const apnsSecret = (level: string) =>
+    JSON.stringify({
+      teamId: 'TEAM',
+      keyId: 'KEY',
+      privateKey: P8,
+      bundleId: 'org.nicholsfd.boxalarm',
+      interruptionLevel: level,
+    });
+
+  it('FCM follows the APNs secret, which wins over a conflicting FCM secret value', async () => {
+    await expect(
+      fcmApnsLevel({
+        'apns-prod': apnsSecret('time-sensitive'),
+        'fcm-prod': fcmServiceAccount({ apnsInterruptionLevel: 'critical' }),
+      }),
+    ).resolves.toBe('time-sensitive');
+  });
+
+  it('an unreadable APNs secret never blocks an Android page: FCM falls back to its own value', async () => {
+    await expect(
+      fcmApnsLevel({ 'fcm-prod': fcmServiceAccount({ apnsInterruptionLevel: 'time-sensitive' }) }),
+    ).resolves.toBe('time-sensitive');
+  });
+
+  it('with no APNs secret configured at all, FCM defaults to critical', async () => {
+    await expect(
+      fcmApnsLevel({ 'fcm-prod': fcmServiceAccount() }, { FCM_SECRET_ID: 'fcm-prod' }),
+    ).resolves.toBe('critical');
   });
 });

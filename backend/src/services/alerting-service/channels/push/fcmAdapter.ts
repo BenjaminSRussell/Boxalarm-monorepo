@@ -25,6 +25,12 @@ export const FCM_ORIGIN = 'https://fcm.googleapis.com';
 
 export interface SendViaFcmOptions {
   readonly secretId: string;
+  /**
+   * Interruption level for the apns block, taken from the APNs secret (the single source of
+   * truth, see pushProviderAdapter.sendPush). Falls back to the FCM secret's own
+   * `apnsInterruptionLevel`, then `critical`, only when the APNs secret cannot be read.
+   */
+  readonly apnsInterruptionLevel?: ApnsInterruptionLevel;
   readonly isTest: boolean;
   readonly secretsClient: SecretsManagerClient;
   readonly timeoutMs: number;
@@ -149,7 +155,7 @@ async function sendViaFcmOnce(
           notification,
           options.isTest,
           Date.now(),
-          credentials.apnsInterruptionLevel,
+          options.apnsInterruptionLevel ?? credentials.apnsInterruptionLevel,
         ),
       ),
       signal: AbortSignal.timeout(nextRequestTimeout(options.timeoutMs, deadlineMs)),
