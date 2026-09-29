@@ -3,12 +3,15 @@ import React
 import React_RCTAppDelegate
 import ReactAppDependencyProvider
 import FirebaseCore
+import UserNotifications
 // RNAppAuthAuthorizationFlowManager(Delegate) come in via the Objective-C bridging header
 // (Boxalarm-Bridging-Header.h) — react-native-app-auth is a plain static-lib pod with no
 // Swift module map, so `import` can't see its headers here.
 
 @main
-class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlowManager {
+class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlowManager,
+  UNUserNotificationCenterDelegate
+{
   var window: UIWindow?
 
   var reactNativeDelegate: ReactNativeDelegate?
@@ -23,6 +26,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     FirebaseApp.configure()
+
+    // Installed before notifee and React Native Firebase, which hook in on
+    // UIApplicationDidFinishLaunchingNotification (after this method returns) and wrap this
+    // delegate. notifee forwards only notifications it did not create. React Native Firebase
+    // forwards everything, including FCM-delivered pages it has already reported to JS itself.
+    UNUserNotificationCenter.current().delegate = self
 
     let delegate = ReactNativeDelegate()
     let factory = RCTReactNativeFactory(delegate: delegate)
@@ -52,6 +61,52 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
       return true
     }
     return false
+  }
+}
+
+/// NSUserDefaults key the JS router reads through React Native's Settings API
+/// (src/features/alerts/pushRouting.ts, IOS_PENDING_ALERT_TAP_KEY).
+let pendingAlertTapKey = "boxalarm.pendingAlertTap"
+
+// Dispatch notifications. Our pages come straight from APNs, with no FCM marker, so React
+// Native Firebase neither chooses their foreground presentation nor reports taps on them.
+// Mirrors the app's fail-loud rule (pushChannel.ts): anything but an explicit `digest` is a
+// dispatch.
+// Requires device verification: foreground presentation, plus taps from cold start,
+// background and foreground.
+extension AppDelegate {
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let category = notification.request.content.userInfo["category"] as? String
+    completionHandler(category == "digest" ? [.banner, .list] : [.banner, .list, .sound])
+  }
+
+  // A tap on a raw-APNs dispatch records its dispatchId for the JS router. It is read on launch
+  // (cold start) and reported as a settings change while running (background/foreground), so
+  // the member lands on the alert they need to answer. An FCM-delivered page (gcm.message_id,
+  // a legacy iOS FCM token) is skipped: React Native Firebase has already routed it through
+  // getInitialNotification / onNotificationOpenedApp, and recording it again would navigate twice.
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    let userInfo = response.notification.request.content.userInfo
+    if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+      userInfo["gcm.message_id"] == nil,
+      (userInfo["category"] as? String) != "digest",
+      let dispatchId = userInfo["dispatchId"] as? String,
+      !dispatchId.isEmpty
+    {
+      UserDefaults.standard.set(
+        ["dispatchId": dispatchId, "tappedAt": Date().timeIntervalSince1970],
+        forKey: pendingAlertTapKey
+      )
+    }
+    completionHandler()
   }
 }
 

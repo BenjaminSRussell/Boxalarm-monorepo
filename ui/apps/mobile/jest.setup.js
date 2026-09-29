@@ -102,6 +102,54 @@ jest.mock('@op-engineering/op-sqlite', () => {
   return { open: () => createFakeDb() };
 });
 
+// React Native's Settings (NSUserDefaults on iOS) needs the native SettingsManager, which Jest
+// does not link. This stand-in models what Settings.ios.js really does. `get` reads a JS-side copy
+// taken from the native constants at module load (`__coldStart`) and refreshed only by the
+// native settingsUpdated event (`__emitChange`). A native NSUserDefaults write (`__nativeWrite`,
+// e.g. AppDelegate recording a tap) is invisible to `get` until that event arrives. `set` writes
+// both copies without an event, as RCTSettingsManager ignores its own writes.
+jest.mock('react-native/Libraries/Settings/Settings', () => {
+  let native = {};
+  let js = {};
+  const watchers = [];
+  const merge = (target, next) => {
+    const merged = { ...target, ...next };
+    Object.keys(next).forEach((key) => {
+      if (next[key] === null || next[key] === undefined) delete merged[key];
+    });
+    return merged;
+  };
+  return {
+    __esModule: true,
+    default: {
+      get: jest.fn((key) => js[key]),
+      set: jest.fn((next) => {
+        js = { ...js, ...next };
+        native = merge(native, next);
+      }),
+      watchKeys: jest.fn((_keys, callback) => watchers.push(callback) - 1),
+      clearWatch: jest.fn((id) => {
+        watchers[id] = null;
+      }),
+      __reset: () => {
+        native = {};
+        js = {};
+        watchers.length = 0;
+      },
+      __nativeWrite: (next) => {
+        native = merge(native, next);
+      },
+      __coldStart: () => {
+        js = { ...native };
+      },
+      __emitChange: () => {
+        js = { ...native };
+        watchers.forEach((callback) => callback && callback());
+      },
+    },
+  };
+});
+
 // No Firebase/notifee native modules are linked in Jest - every push-path test supplies its own
 // jest.mock for these with the behavior it needs; this default keeps every other test (which
 // only imports something that transitively pulls in the push modules) from crashing on load.

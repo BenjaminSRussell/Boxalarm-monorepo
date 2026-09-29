@@ -1,7 +1,11 @@
 import { Platform } from 'react-native';
 import notifee from '@notifee/react-native';
 import { CRITICAL_CHANNEL_ID, DEFAULT_CHANNEL_ID } from './pushChannel';
-import { displayPushNotification, handleBackgroundPushMessage } from './pushNotificationDisplay';
+import {
+  displayPushNotification,
+  handleBackgroundPushMessage,
+  handleForegroundPushMessage,
+} from './pushNotificationDisplay';
 
 const displayNotification = notifee.displayNotification as jest.Mock;
 const createChannel = notifee.createChannel as jest.Mock;
@@ -92,4 +96,27 @@ test('background handler never throws, even when the fallback also fails', async
 
   expect(displayNotification).toHaveBeenCalledTimes(2);
   expect(consoleError).toHaveBeenCalledTimes(2);
+});
+
+test('foreground handler creates the channels, then posts a dispatch on the critical channel with full-screen intent', async () => {
+  Platform.OS = 'android';
+
+  await handleForegroundPushMessage({ dispatchId: 'DISP-9', title: 'Structure fire' });
+
+  expect(createChannel).toHaveBeenCalledWith(expect.objectContaining({ id: CRITICAL_CHANNEL_ID }));
+  const channelOrder = createChannel.mock.invocationCallOrder[0]!;
+  expect(channelOrder).toBeLessThan(displayNotification.mock.invocationCallOrder[0]!);
+  const call = displayNotification.mock.calls[0][0];
+  expect(call.android.channelId).toBe(CRITICAL_CHANNEL_ID);
+  expect(call.android.fullScreenAction).toBeDefined();
+});
+
+test('foreground handler still displays the dispatch when channel creation fails, and never throws', async () => {
+  Platform.OS = 'android';
+  createChannel.mockRejectedValueOnce(new Error('channel create failed'));
+
+  await expect(handleForegroundPushMessage({ dispatchId: 'DISP-9' })).resolves.toBeUndefined();
+
+  expect(displayNotification).toHaveBeenCalledTimes(1);
+  expect(consoleError).toHaveBeenCalled();
 });

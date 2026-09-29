@@ -13,16 +13,56 @@ import {
 } from "./messaging-alerting";
 import { grantAlertingCmk } from "./alerting-cmk";
 
+/** Channels still on the generic HTTP vendor adapter (channels/httpProviderAdapter.ts). */
+type VendorChannel = Exclude<AlertingChannel, "push">;
+
 // OQ-3 (SMS/voice vendor selection) is open — placeholder endpoints until a vendor is
 // chosen. Values are read verbatim by channels/httpProviderAdapter.ts at send time, which
 // POSTs the member's target, the dispatch narrative and the Bearer provider secret. The
 // placeholders therefore use the RFC 2606 reserved `.invalid` TLD, which can never resolve,
-// so nothing is ever sent to a domain the project does not control.
-const PLACEHOLDER_ENDPOINT_URL: Record<AlertingChannel, string> = {
-  push: "https://push-provider.not-yet-selected.invalid",
+// so nothing is ever sent to a domain the project does not control. Push has no endpoint:
+// it goes to APNs and FCM directly (see PushGatewaySecrets).
+const PLACEHOLDER_ENDPOINT_URL: Record<VendorChannel, string> = {
   sms: "https://sms-provider.not-yet-selected.invalid",
   voice: "https://voice-provider.not-yet-selected.invalid",
 };
+
+/**
+ * Push gateway credentials (architecture §Alerting: "Push uses APNs/FCM directly"). Values are
+ * set out-of-band; the push worker (channels/push/pushCredentials.ts) reads them as JSON.
+ *
+ * APNs (`apns`, `apnsSandbox`) — token-based auth with an Apple .p8 key:
+ *   {
+ *     "teamId": "ABCDE12345",             // Apple Developer Team ID
+ *     "keyId": "KEY1234567",              // APNs auth key ID
+ *     "privateKey": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+ *     "bundleId": "org.example.boxalarm", // apns-topic
+ *     "environment": "production",        // optional; "sandbox" for dev-signed app builds
+ *     "interruptionLevel": "critical"     // optional; "time-sensitive" until the Critical
+ *   }                                     //   Alerts entitlement (#4) is granted
+ *   `time-sensitive` relies on the app's Time Sensitive Notifications capability
+ *   (ui/apps/mobile/ios/Boxalarm/Boxalarm.entitlements); `critical` on #4.
+ *   The sandbox secret always targets api.sandbox.push.apple.com and is refused if it
+ *   declares "production".
+ *
+ * FCM (`fcm`, `fcmSandbox`) — the Firebase service-account key JSON exactly as downloaded
+ * (project_id, private_key_id, private_key, client_email, ...), for a service account with
+ * the Firebase Cloud Messaging API Admin role. FCM's apns block (iOS devices still on a legacy
+ * FCM token) takes its interruption level from the APNs secret's `interruptionLevel`; an
+ * optional `"apnsInterruptionLevel"` key here is only a fallback for when the APNs secret
+ * cannot be read (default "critical"). Sandbox sends are `validate_only`; the sandbox
+ * service account must be in the app's own Firebase project (another project gets
+ * SENDER_ID_MISMATCH on every self-test).
+ *
+ * Self-test and canary messages (isTest) read only the sandbox secrets and fail closed when
+ * one is unset (architecture §1.3).
+ */
+export interface PushGatewaySecrets {
+  apns: aws.secretsmanager.Secret;
+  apnsSandbox: aws.secretsmanager.Secret;
+  fcm: aws.secretsmanager.Secret;
+  fcmSandbox: aws.secretsmanager.Secret;
+}
 
 /**
  * Reserved concurrency per channel worker. The SQS event source mapping's
@@ -47,15 +87,17 @@ export interface ChannelWorkersArgs {
 
 /**
  * Push/SMS/voice channel worker Lambdas (E1-S2/S3-INFRA). Each has its own queue, DLQ,
- * reserved concurrency and provider secret — no worker can read another channel's queue
- * or secret (E1-S11-INFRA isolation). Self-test sandbox secrets (E1-S8-INFRA) are
- * provisioned alongside and passed as `{CH}_PROVIDER_SANDBOX_SECRET_ID`; the worker
- * selects them for `isTest` messages (channels/httpProviderAdapter.ts).
+ * reserved concurrency and provider secrets — no worker can read another channel's queue
+ * or secret (E1-S11-INFRA isolation). SMS/voice get `{CH}_PROVIDER_*` for the generic
+ * vendor adapter; push gets the APNs/FCM gateway secrets. Self-test sandbox secrets
+ * (E1-S8-INFRA) are provisioned alongside every production secret; the worker selects them
+ * for `isTest` messages.
  */
 export class ChannelWorkers extends pulumi.ComponentResource {
   public readonly workers: Record<AlertingChannel, ServiceLambda>;
-  public readonly providerSecrets: Record<AlertingChannel, aws.secretsmanager.Secret>;
-  public readonly sandboxSecrets: Record<AlertingChannel, aws.secretsmanager.Secret>;
+  public readonly providerSecrets: Record<VendorChannel, aws.secretsmanager.Secret>;
+  public readonly sandboxSecrets: Record<VendorChannel, aws.secretsmanager.Secret>;
+  public readonly pushSecrets: PushGatewaySecrets;
 
   constructor(name: string, args: ChannelWorkersArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("ChannelWorkers", args.env);
@@ -63,31 +105,34 @@ export class ChannelWorkers extends pulumi.ComponentResource {
     const { env } = args;
 
     const workers: Partial<Record<AlertingChannel, ServiceLambda>> = {};
-    const providerSecrets: Partial<Record<AlertingChannel, aws.secretsmanager.Secret>> = {};
-    const sandboxSecrets: Partial<Record<AlertingChannel, aws.secretsmanager.Secret>> = {};
+    const providerSecrets: Partial<Record<VendorChannel, aws.secretsmanager.Secret>> = {};
+    const sandboxSecrets: Partial<Record<VendorChannel, aws.secretsmanager.Secret>> = {};
+
+    const pushSecret = (key: string, description: string) =>
+      new aws.secretsmanager.Secret(
+        `${name}-push-${key}-secret`,
+        { name: `boxalarm-${env}-alerting-push-${key}-credentials`, description },
+        { parent: this },
+      );
+    const pushSecrets: PushGatewaySecrets = {
+      apns: pushSecret("apns", "APNs .p8 token-auth key (values set out-of-band)"),
+      apnsSandbox: pushSecret(
+        "apns-sandbox",
+        "APNs sandbox credentials for self-test/canary (E1-S8)",
+      ),
+      fcm: pushSecret("fcm", "FCM service-account JSON (values set out-of-band)"),
+      fcmSandbox: pushSecret(
+        "fcm-sandbox",
+        "FCM service-account JSON for validate_only self-test/canary (E1-S8)",
+      ),
+    };
 
     for (const channel of ALERTING_CHANNELS) {
-      const providerSecret = new aws.secretsmanager.Secret(
-        `${name}-${channel}-secret`,
-        {
-          name: `boxalarm-${env}-alerting-${channel}-provider-credentials`,
-          description: `${channel} provider credentials (values set out-of-band)`,
-        },
-        { parent: this },
-      );
-      const sandboxSecret = new aws.secretsmanager.Secret(
-        `${name}-${channel}-sandbox-secret`,
-        {
-          name: `boxalarm-${env}-alerting-${channel}-provider-sandbox-credentials`,
-          description: `${channel} provider sandbox/loopback credentials for self-test (E1-S8)`,
-        },
-        { parent: this },
-      );
-      providerSecrets[channel] = providerSecret;
-      sandboxSecrets[channel] = sandboxSecret;
-
-      const channelUpper = channel.toUpperCase();
       const queue = args.channelQueues[channel].queue;
+      const credentials =
+        channel === "push"
+          ? pushWorkerCredentials(pushSecrets)
+          : vendorWorkerCredentials(this, name, env, channel, providerSecrets, sandboxSecrets);
 
       const worker = new ServiceLambda(
         `${name}-${channel}-fn`,
@@ -100,15 +145,11 @@ export class ChannelWorkers extends pulumi.ComponentResource {
           logGroup: args.logGroup,
           environment: {
             ALERTING_TABLE_NAME: args.alertingTableName,
-            [`${channelUpper}_PROVIDER_ENDPOINT_URL`]: PLACEHOLDER_ENDPOINT_URL[channel],
-            [`${channelUpper}_PROVIDER_SECRET_ID`]: providerSecret.name,
-            // Self-test and canary messages (isTest=true) must authenticate with the
-            // sandbox/loopback credentials, never the prod ones (architecture §1.3).
-            [`${channelUpper}_PROVIDER_SANDBOX_SECRET_ID`]: sandboxSecret.name,
+            ...credentials.environment,
           },
           additionalPolicyStatements: pulumi
-            .all([providerSecret.arn, sandboxSecret.arn, queue.arn])
-            .apply(([prodArn, sandboxArn, queueArn]) => [
+            .all([pulumi.all(credentials.secretArns), queue.arn])
+            .apply(([secretArns, queueArn]) => [
               {
                 // The SQS event source mapping polls as this role; without these,
                 // CreateEventSourceMapping is rejected and the channel never drains.
@@ -127,7 +168,7 @@ export class ChannelWorkers extends pulumi.ComponentResource {
                 Sid: "OwnProviderSecretOnly",
                 Effect: "Allow" as const,
                 Action: ["secretsmanager:GetSecretValue"],
-                Resource: [prodArn, sandboxArn],
+                Resource: secretArns,
               },
             ]),
           reservedConcurrentExecutions: WORKER_RESERVED_CONCURRENCY,
@@ -153,8 +194,9 @@ export class ChannelWorkers extends pulumi.ComponentResource {
     }
 
     this.workers = workers as Record<AlertingChannel, ServiceLambda>;
-    this.providerSecrets = providerSecrets as Record<AlertingChannel, aws.secretsmanager.Secret>;
-    this.sandboxSecrets = sandboxSecrets as Record<AlertingChannel, aws.secretsmanager.Secret>;
+    this.providerSecrets = providerSecrets as Record<VendorChannel, aws.secretsmanager.Secret>;
+    this.sandboxSecrets = sandboxSecrets as Record<VendorChannel, aws.secretsmanager.Secret>;
+    this.pushSecrets = pushSecrets;
 
     grantAlertingCmk(
       name,
@@ -165,4 +207,69 @@ export class ChannelWorkers extends pulumi.ComponentResource {
 
     this.registerOutputs({ workers: this.workers });
   }
+}
+
+interface WorkerCredentials {
+  environment: Record<string, pulumi.Input<string>>;
+  /** Exactly the secrets this worker may read — nothing else. */
+  secretArns: pulumi.Input<string>[];
+}
+
+/** Push: APNs + FCM gateway secrets and their sandbox twins; no vendor endpoint. */
+function pushWorkerCredentials(secrets: PushGatewaySecrets): WorkerCredentials {
+  return {
+    environment: {
+      APNS_SECRET_ID: secrets.apns.name,
+      FCM_SECRET_ID: secrets.fcm.name,
+      // Self-test and canary messages (isTest=true) must use the sandbox credentials, never
+      // the prod ones (architecture §1.3).
+      APNS_SANDBOX_SECRET_ID: secrets.apnsSandbox.name,
+      FCM_SANDBOX_SECRET_ID: secrets.fcmSandbox.name,
+    },
+    secretArns: [
+      secrets.apns.arn,
+      secrets.apnsSandbox.arn,
+      secrets.fcm.arn,
+      secrets.fcmSandbox.arn,
+    ],
+  };
+}
+
+function vendorWorkerCredentials(
+  parent: pulumi.Resource,
+  name: string,
+  env: string,
+  channel: VendorChannel,
+  providerSecrets: Partial<Record<VendorChannel, aws.secretsmanager.Secret>>,
+  sandboxSecrets: Partial<Record<VendorChannel, aws.secretsmanager.Secret>>,
+): WorkerCredentials {
+  const providerSecret = new aws.secretsmanager.Secret(
+    `${name}-${channel}-secret`,
+    {
+      name: `boxalarm-${env}-alerting-${channel}-provider-credentials`,
+      description: `${channel} provider credentials (values set out-of-band)`,
+    },
+    { parent },
+  );
+  const sandboxSecret = new aws.secretsmanager.Secret(
+    `${name}-${channel}-sandbox-secret`,
+    {
+      name: `boxalarm-${env}-alerting-${channel}-provider-sandbox-credentials`,
+      description: `${channel} provider sandbox/loopback credentials for self-test (E1-S8)`,
+    },
+    { parent },
+  );
+  providerSecrets[channel] = providerSecret;
+  sandboxSecrets[channel] = sandboxSecret;
+  const channelUpper = channel.toUpperCase();
+  return {
+    environment: {
+      [`${channelUpper}_PROVIDER_ENDPOINT_URL`]: PLACEHOLDER_ENDPOINT_URL[channel],
+      [`${channelUpper}_PROVIDER_SECRET_ID`]: providerSecret.name,
+      // Self-test and canary messages (isTest=true) must authenticate with the
+      // sandbox/loopback credentials, never the prod ones (architecture §1.3).
+      [`${channelUpper}_PROVIDER_SANDBOX_SECRET_ID`]: sandboxSecret.name,
+    },
+    secretArns: [providerSecret.arn, sandboxSecret.arn],
+  };
 }

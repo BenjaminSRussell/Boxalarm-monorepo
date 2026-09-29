@@ -140,6 +140,12 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
       { FunctionName: "boxalarm-dev-alerting-member-updated-consumer" },
     ],
     ["boxalarm-dev-alerting-push-delivery-failure-rate", "SendFailed", { Reason: "push" }],
+    ["boxalarm-dev-alerting-push-token-invalid-rate", "TokenInvalid", { Reason: "push" }],
+    [
+      "boxalarm-dev-alerting-push-mass-invalidation-blocked",
+      "MassInvalidationBlocked",
+      { Reason: "push" },
+    ],
     ["boxalarm-dev-alerting-sms-delivery-failure-rate", "SendFailed", { Reason: "sms" }],
     ["boxalarm-dev-alerting-voice-delivery-failure-rate", "SendFailed", { Reason: "voice" }],
     [
@@ -169,6 +175,34 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
     ]) {
       expect(description).toContain(referenced);
       expect(fs.existsSync(path.join(repoRoot, referenced)), referenced).toBe(true);
+    }
+  });
+
+  // Review minor 2: production gateway misconfigurations dead-letter on purpose; the page must
+  // say so, so on-call fixes the secret instead of chasing a vendor outage.
+  it("the push DLQ page names the configuration faults that dead-letter on purpose", async () => {
+    await build();
+    const description = String(
+      alarmByName("boxalarm-dev-alerting-push-dlq-not-empty").inputs.alarmDescription,
+    );
+    for (const cause of [
+      "DeviceTokenNotForTopic",
+      "SENDER_ID_MISMATCH",
+      "credentials",
+      "environment",
+      "redrive",
+    ]) {
+      expect(description).toContain(cause);
+    }
+    // Review round 2 m6/m7: the benign causes are named too, so on-call does not "fix" a
+    // healthy secret for one member's stale token or a few uninstalls.
+    expect(description).toContain("ONE member");
+    expect(description).toContain("uninstalled");
+    for (const alarmName of [
+      "boxalarm-dev-alerting-push-token-invalid-rate",
+      "boxalarm-dev-alerting-push-mass-invalidation-blocked",
+    ]) {
+      expect(String(alarmByName(alarmName).inputs.alarmDescription)).toContain("uninstalled");
     }
   });
 

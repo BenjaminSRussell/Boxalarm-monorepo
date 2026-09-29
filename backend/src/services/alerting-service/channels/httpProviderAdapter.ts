@@ -1,11 +1,13 @@
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { captureAWSv3Client } from 'aws-xray-sdk-core';
+import { ALERTING_SDK_CLIENT_CONFIG } from '../awsClientConfig.js';
 import type { ChannelName } from './channelEnvelope.js';
 
 let cachedSecretsClient: SecretsManagerClient | undefined;
 
 export function createChannelSecretsClient(client?: SecretsManagerClient): SecretsManagerClient {
-  cachedSecretsClient ??= client ?? captureAWSv3Client(new SecretsManagerClient({}));
+  cachedSecretsClient ??=
+    client ?? captureAWSv3Client(new SecretsManagerClient(ALERTING_SDK_CLIENT_CONFIG));
   return cachedSecretsClient;
 }
 
@@ -14,7 +16,14 @@ export interface ChannelProviderConfig {
   readonly secretId: string;
 }
 
-const ENV_PREFIX: Record<ChannelName, string> = { push: 'PUSH', sms: 'SMS', voice: 'VOICE' };
+/**
+ * The generic vendor adapter serves SMS and voice only, pending their vendor choice (OQ-3).
+ * Push goes to APNs/FCM directly (push/pushProviderAdapter.ts); excluding it here makes a
+ * regression back onto this path a compile error.
+ */
+export type HttpProviderChannel = Exclude<ChannelName, 'push'>;
+
+const ENV_PREFIX: Record<HttpProviderChannel, string> = { sms: 'SMS', voice: 'VOICE' };
 
 /**
  * `isTest` (self-test and canary dispatches) selects the vendor sandbox/loopback credentials
@@ -23,7 +32,7 @@ const ENV_PREFIX: Record<ChannelName, string> = { push: 'PUSH', sms: 'SMS', voic
  * rather than falling back to the prod credentials.
  */
 export function readChannelProviderConfig(
-  channel: ChannelName,
+  channel: HttpProviderChannel,
   env: NodeJS.ProcessEnv,
   options: { readonly isTest?: boolean } = {},
 ): ChannelProviderConfig {
@@ -82,7 +91,7 @@ export interface SendViaHttpProviderOptions {
 }
 
 export async function sendViaHttpProvider(
-  channel: ChannelName,
+  channel: HttpProviderChannel,
   target: string,
   message: string,
   env: NodeJS.ProcessEnv,

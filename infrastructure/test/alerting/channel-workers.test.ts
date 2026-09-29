@@ -55,7 +55,7 @@ describe("ChannelWorkers — each worker can drain only its own queue", { timeou
 });
 
 describe("ChannelWorkers — placeholder provider endpoints", { timeout: 30_000 }, () => {
-  it.each(["push", "sms", "voice"])(
+  it.each(["sms", "voice"])(
     "%s worker's default endpoint is on the RFC 2606 reserved .invalid TLD",
     async (channel) => {
       await buildWorkers();
@@ -70,8 +70,65 @@ describe("ChannelWorkers — placeholder provider endpoints", { timeout: 30_000 
   );
 });
 
+const secretArn = (name: string) => `arn:aws:secretsmanager:us-east-1:123456789012:secret:${name}`;
+const PUSH_SECRET_NAMES = [
+  "boxalarm-dev-alerting-push-apns-credentials",
+  "boxalarm-dev-alerting-push-apns-sandbox-credentials",
+  "boxalarm-dev-alerting-push-fcm-credentials",
+  "boxalarm-dev-alerting-push-fcm-sandbox-credentials",
+];
+const VENDOR_SECRET_NAMES = ["sms", "voice"].flatMap((channel) => [
+  `boxalarm-dev-alerting-${channel}-provider-credentials`,
+  `boxalarm-dev-alerting-${channel}-provider-sandbox-credentials`,
+]);
+
+describe("ChannelWorkers — push goes to APNs/FCM directly", { timeout: 30_000 }, () => {
+  it("the push worker gets the APNs/FCM secret IDs and sandbox twins, and no vendor endpoint", async () => {
+    await buildWorkers();
+    const env = lambdaEnv("boxalarm-dev-alerting-push-worker");
+    expect(env.APNS_SECRET_ID).toBe("boxalarm-dev-alerting-push-apns-credentials");
+    expect(env.APNS_SANDBOX_SECRET_ID).toBe("boxalarm-dev-alerting-push-apns-sandbox-credentials");
+    expect(env.FCM_SECRET_ID).toBe("boxalarm-dev-alerting-push-fcm-credentials");
+    expect(env.FCM_SANDBOX_SECRET_ID).toBe("boxalarm-dev-alerting-push-fcm-sandbox-credentials");
+    // The placeholder push endpoint (and the generic vendor path) is gone.
+    expect(Object.keys(env).filter((key) => key.startsWith("PUSH_PROVIDER_"))).toEqual([]);
+    expect(Object.values(env).some((value) => String(value).includes(".invalid"))).toBe(false);
+  });
+
+  it("the push worker can read exactly its four gateway secrets and no other channel's", async () => {
+    await buildWorkers();
+    const statements = statementsForRole("boxalarm-dev-alerting-push-worker");
+    for (const name of PUSH_SECRET_NAMES) {
+      expect(isGranted(statements, "secretsmanager:GetSecretValue", secretArn(name))).toBe(true);
+    }
+    for (const name of VENDOR_SECRET_NAMES) {
+      expect(isGranted(statements, "secretsmanager:GetSecretValue", secretArn(name))).toBe(false);
+    }
+    const secretStatements = statements.filter((statement) =>
+      [statement.Action].flat().some((action) => String(action).startsWith("secretsmanager:")),
+    );
+    expect(secretStatements.flatMap((statement) => [statement.Action].flat())).toEqual([
+      "secretsmanager:GetSecretValue",
+    ]);
+    expect(secretStatements.flatMap((statement) => [statement.Resource].flat()).sort()).toEqual(
+      PUSH_SECRET_NAMES.map(secretArn).sort(),
+    );
+  });
+
+  it.each(["sms", "voice"])(
+    "the %s worker cannot read the push gateway secrets",
+    async (channel) => {
+      await buildWorkers();
+      const statements = statementsForRole(`boxalarm-dev-alerting-${channel}-worker`);
+      for (const name of PUSH_SECRET_NAMES) {
+        expect(isGranted(statements, "secretsmanager:GetSecretValue", secretArn(name))).toBe(false);
+      }
+    },
+  );
+});
+
 describe("ChannelWorkers — sandbox credentials reach each worker", { timeout: 30_000 }, () => {
-  it.each(["push", "sms", "voice"])(
+  it.each(["sms", "voice"])(
     "%s worker gets its own prod and sandbox secret IDs, and can read both",
     async (channel) => {
       await buildWorkers();

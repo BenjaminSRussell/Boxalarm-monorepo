@@ -73,3 +73,21 @@ export async function handleBackgroundPushMessage(
     console.error('[push] fallback dispatch notification also failed; alert not displayed', error);
   }
 }
+
+/**
+ * Foreground entry for data pushes (wired in index.js via onMessage). FCM delivers a data-only
+ * message to setBackgroundMessageHandler only while the app is backgrounded or quit; with the
+ * app open it goes to onMessage instead, and without this handler a dispatch that arrives while
+ * a member has Boxalarm open is never shown. Same fail-safe display path as the background
+ * handler, after making sure the channels exist. Never throws.
+ */
+export async function handleForegroundPushMessage(
+  data: PushMessageData | undefined,
+): Promise<void> {
+  try {
+    await ensureNotificationChannels();
+  } catch (error) {
+    console.error('[push] creating notification channels before a foreground push failed', error);
+  }
+  await handleBackgroundPushMessage(data);
+}

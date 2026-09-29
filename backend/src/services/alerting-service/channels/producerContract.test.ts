@@ -13,6 +13,7 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { SNSClient } from '@aws-sdk/client-sns';
 import type { DynamoDBStreamEvent, SQSEvent } from 'aws-lambda';
+import type { PushNotification, PushSendResult } from './push/pushProviderAdapter.js';
 import {
   parseChannelEnvelope,
   parseMutualAidPromptEnvelope,
@@ -233,10 +234,35 @@ function mockAwsClients(ddb: DynamoDBDocumentClient, sns: SNSClient): void {
 
 type ProviderSpy = ReturnType<typeof providerSpy>;
 
+/**
+ * The two provider seams a worker can reach: the generic SMS/voice adapter and the direct
+ * APNs/FCM gateway. They are separate spies, so a push that regressed onto the HTTP adapter
+ * (or an SMS onto the push gateway) shows up as a call on the wrong one. `calls()` gives the
+ * uniform [channel, target, text] view the chain assertions compare.
+ */
 function providerSpy() {
-  return vi
+  const http = vi
     .fn<(channel: string, target: string, message: string, env: unknown) => Promise<void>>()
     .mockResolvedValue(undefined);
+  const push = vi
+    .fn<
+      (
+        notification: PushNotification,
+        platform: string,
+        env: unknown,
+        options: { isTest?: boolean },
+      ) => Promise<PushSendResult>
+    >()
+    .mockResolvedValue({ outcome: 'sent' });
+  return {
+    http,
+    push,
+    calls: (): unknown[][] => [
+      ...http.mock.calls.map((call) => call.slice(0, 3)),
+      ...push.mock.calls.map(([notification]) => ['push', notification.token, notification.body]),
+    ],
+    count: (): number => http.mock.calls.length + push.mock.calls.length,
+  };
 }
 
 /**
@@ -245,9 +271,13 @@ function providerSpy() {
  */
 async function deliverThroughWorker(
   publish: PublishInput,
-  sendViaHttpProvider: ProviderSpy,
+  provider: ProviderSpy,
 ): Promise<{ batchItemFailures: { itemIdentifier: string }[] }> {
-  vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider }));
+  vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider: provider.http }));
+  vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+    sendPush: provider.push,
+  }));
   const { createChannelWorkerHandler } = await import('./deliverChannelMessage.js');
   const worker = createChannelWorkerHandler(routedChannel(publish));
   const event = {
@@ -274,6 +304,7 @@ describe('alerting topic producer -> channel worker contract', () => {
     vi.doUnmock('../escalation/scheduleEscalation.js');
     vi.doUnmock('../fanout/fanOut.js');
     vi.doUnmock('./httpProviderAdapter.js');
+    vi.doUnmock('./push/pushProviderAdapter.js');
     vi.restoreAllMocks();
   });
 
@@ -412,15 +443,23 @@ describe('alerting topic producer -> channel worker contract', () => {
     mockAwsClients(ddb.client, sns.client);
     const { handler } = await import('../fanout/handler.js');
     await handler(dispatchAlertInsertEvent());
-    const sendViaHttpProvider = providerSpy();
+    const provider = providerSpy();
 
     for (const publish of sns.published) {
-      expect(await deliverThroughWorker(publish, sendViaHttpProvider)).toEqual({
+      expect(await deliverThroughWorker(publish, provider)).toEqual({
         batchItemFailures: [],
       });
     }
 
-    expect(sendViaHttpProvider.mock.calls.map((call) => call.slice(0, 3)).sort()).toEqual([
+    // Push reached the APNs/FCM gateway, SMS the vendor adapter - never the other way round.
+    expect(provider.http.mock.calls.map((call) => call[0])).toEqual(['sms']);
+    expect(provider.push.mock.calls[0]![0]).toMatchObject({
+      alertKind: 'dispatch',
+      toneSequence: 1,
+      idempotencyKey: `${DISPATCH_ID}#1#mbr-1#PUSH`,
+      collapseKey: `${DISPATCH_ID}#1`,
+    });
+    expect(provider.calls().sort()).toEqual([
       ['push', 'tok-mbr-1', 'STRUCTURE_FIRE — 123 Main St'],
       ['sms', '+15551234567', 'STRUCTURE_FIRE — 123 Main St'],
     ]);
@@ -443,14 +482,15 @@ describe('alerting topic producer -> channel worker contract', () => {
       channel: 'voice' as const,
     };
     expect(await handler(escalation)).toEqual({ outcome: 'ESCALATED' });
-    const sendViaHttpProvider = providerSpy();
+    const provider = providerSpy();
 
-    expect(await deliverThroughWorker(sns.published[0]!, sendViaHttpProvider)).toEqual({
+    expect(await deliverThroughWorker(sns.published[0]!, provider)).toEqual({
       batchItemFailures: [],
     });
 
-    expect(sendViaHttpProvider).toHaveBeenCalledTimes(1);
-    expect(sendViaHttpProvider.mock.calls[0]!.slice(0, 3)).toEqual([
+    expect(provider.push).not.toHaveBeenCalled();
+    expect(provider.http).toHaveBeenCalledTimes(1);
+    expect(provider.http.mock.calls[0]!.slice(0, 3)).toEqual([
       'voice',
       '+15557654321',
       'STRUCTURE_FIRE — 123 Main St',
@@ -501,15 +541,26 @@ describe('alerting topic producer -> channel worker contract', () => {
     // A misrouted prompt is rejected, not silently delivered as a page.
     expect(() => parseMutualAidPromptEnvelope(prompt.Message, 'sms')).toThrow(/channel=push/);
 
-    const sendViaHttpProvider = providerSpy();
+    const provider = providerSpy();
     for (const publish of sns.published) {
-      expect(await deliverThroughWorker(publish, sendViaHttpProvider)).toEqual({
+      expect(await deliverThroughWorker(publish, provider)).toEqual({
         batchItemFailures: [],
       });
     }
+    // The prompt is its own notification: own alertKind, no tone, its own collapse identity,
+    // so it never replaces the officer's tone-3 page on the device.
+    const pushed = provider.push.mock.calls.map(([notification]) => notification);
+    expect(pushed.find((n) => n.alertKind === 'mutual_aid_prompt')).toMatchObject({
+      toneSequence: undefined,
+      collapseKey: `${DISPATCH_ID}#MUTUALAID`,
+    });
+    expect(pushed.find((n) => n.alertKind === 'dispatch')).toMatchObject({
+      toneSequence: 3,
+      collapseKey: `${DISPATCH_ID}#3`,
+    });
     // The officer's tone-3 push and the mutual-aid prompt are both delivered: neither guard
     // suppresses the other.
-    expect(sendViaHttpProvider.mock.calls.map((call) => call.slice(0, 3)).sort()).toEqual([
+    expect(provider.calls().sort()).toEqual([
       ['push', 'tok-officer-1', 'MUTUAL AID REQUESTED — STRUCTURE_FIRE — 123 Main St'],
       ['push', 'tok-officer-1', 'STRUCTURE_FIRE — 123 Main St'],
       ['sms', '+15551234567', 'STRUCTURE_FIRE — 123 Main St'],
@@ -517,9 +568,9 @@ describe('alerting topic producer -> channel worker contract', () => {
 
     // Redelivery of the same SQS messages is absorbed by the worker guards.
     for (const publish of sns.published) {
-      await deliverThroughWorker(publish, sendViaHttpProvider);
+      await deliverThroughWorker(publish, provider);
     }
-    expect(sendViaHttpProvider).toHaveBeenCalledTimes(3);
+    expect(provider.count()).toBe(3);
   });
 
   // POST /tone-ladder/advance (F1.14) must reach the channel workers exactly like a
@@ -632,12 +683,13 @@ describe('alerting topic producer -> channel worker contract', () => {
     // eventId/eventTime differ per publish by design; the page itself does not.
     expect(manual.envelopes).toEqual(scheduled.envelopes);
     // Both reach the provider once per channel through the real workers, and no more.
-    expect(manual.provider.mock.calls.map((call) => call.slice(0, 3)).sort()).toEqual([
+    expect(manual.provider.calls().sort()).toEqual([
       ['push', 'tok-mbr-1', 'STRUCTURE_FIRE — 123 Main St'],
       ['sms', '+15551234567', 'STRUCTURE_FIRE — 123 Main St'],
     ]);
-    expect(manual.provider.mock.calls.map((call) => call.slice(0, 3))).toEqual(
-      scheduled.provider.mock.calls.map((call) => call.slice(0, 3)),
+    expect(manual.provider.calls()).toEqual(scheduled.provider.calls());
+    expect(manual.provider.push.mock.calls.map(([n]) => n)).toEqual(
+      scheduled.provider.push.mock.calls.map(([n]) => n),
     );
     // Same producer-side receipt rows (the tone-2 keys), and the fire-guard is committed so
     // the later T+180s schedule self-skips instead of paging tone 2 a second time.

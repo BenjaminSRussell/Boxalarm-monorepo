@@ -230,6 +230,8 @@ export function noTargetReason(channel: ChannelName): string {
 export interface ContactChannelSnapshot {
   readonly channel: string;
   readonly valid?: boolean;
+  /** PUSH only: `APNS` or `FCM`, as registerToken.ts writes it — picks the push gateway. */
+  readonly platform?: string;
   readonly token?: string;
   readonly phoneNumber?: string;
 }

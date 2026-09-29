@@ -6,8 +6,8 @@ const originalEnv = { ...process.env };
 beforeEach(() => {
   vi.resetModules();
   process.env.ALERTING_TABLE_NAME = 'alerting-table';
-  process.env.PUSH_PROVIDER_ENDPOINT_URL = 'https://push.example';
-  process.env.PUSH_PROVIDER_SECRET_ID = 'push-secret';
+  process.env.APNS_SECRET_ID = 'apns-secret';
+  process.env.FCM_SECRET_ID = 'fcm-secret';
   process.env.SMS_PROVIDER_ENDPOINT_URL = 'https://sms.example';
   process.env.SMS_PROVIDER_SECRET_ID = 'sms-secret';
   process.env.VOICE_PROVIDER_ENDPOINT_URL = 'https://voice.example';
@@ -54,6 +54,7 @@ const CONTACT_CHANNELS = [
 
 function mockDeps(sendFor: Record<string, () => Promise<void>>): {
   sendMock: ReturnType<typeof vi.fn>;
+  pushMock: ReturnType<typeof vi.fn>;
   ddbSendMock: ReturnType<typeof vi.fn>;
 } {
   const ddbSendMock = vi.fn().mockImplementation((command: { constructor: { name: string } }) => {
@@ -72,6 +73,8 @@ function mockDeps(sendFor: Record<string, () => Promise<void>>): {
       return { ...actual, createDynamoClient: () => ({ send: ddbSendMock }) };
     },
   );
+  // SMS and voice reach the generic vendor adapter; push reaches the APNs/FCM gateway. Each is
+  // its own spy, fault-injected through the same per-channel switch.
   const sendMock = vi.fn().mockImplementation((channel: string) => {
     const impl = sendFor[channel];
     return impl ? impl() : Promise.resolve(undefined);
@@ -79,7 +82,21 @@ function mockDeps(sendFor: Record<string, () => Promise<void>>): {
   vi.doMock('../src/services/alerting-service/channels/httpProviderAdapter.js', () => ({
     sendViaHttpProvider: sendMock,
   }));
-  return { sendMock, ddbSendMock };
+  const pushMock = vi.fn().mockImplementation(async () => {
+    const impl = sendFor.push;
+    if (impl) await impl();
+    return { outcome: 'sent' as const };
+  });
+  vi.doMock(
+    '../src/services/alerting-service/channels/push/pushProviderAdapter.js',
+    async (importOriginal) => ({
+      ...(await importOriginal<
+        typeof import('../src/services/alerting-service/channels/push/pushProviderAdapter.js')
+      >()),
+      sendPush: pushMock,
+    }),
+  );
+  return { sendMock, pushMock, ddbSendMock };
 }
 
 function putCallsFor(ddbSendMock: ReturnType<typeof vi.fn>): number {
@@ -90,7 +107,7 @@ function putCallsFor(ddbSendMock: ReturnType<typeof vi.fn>): number {
 
 describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S11)', () => {
   it('push fault-injected to fail 100% does not affect sms delivery for the same dispatch (AC1)', async () => {
-    const { sendMock, ddbSendMock } = mockDeps({
+    const { sendMock, pushMock, ddbSendMock } = mockDeps({
       push: () => Promise.reject(new Error('push provider down')),
     });
     const { handler: pushHandler } =
@@ -103,6 +120,9 @@ describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S1
     });
     await expect(smsHandler(dispatchEvent('sms'))).resolves.toEqual({ batchItemFailures: [] });
 
+    // The push attempt reached the APNs/FCM gateway (and failed there), not the SMS adapter.
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
     expect(sendMock).toHaveBeenCalledWith(
       'sms',
       '+12035550100',
@@ -114,7 +134,7 @@ describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S1
   });
 
   it('sms provider saturation/errors do not affect push or voice delivery (AC2 — independent queue/DLQ per channel)', async () => {
-    const { sendMock, ddbSendMock } = mockDeps({
+    const { sendMock, pushMock, ddbSendMock } = mockDeps({
       sms: () => Promise.reject(new Error('sms provider saturated')),
     });
     const { handler: pushHandler } =
@@ -130,12 +150,18 @@ describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S1
     await expect(pushHandler(dispatchEvent('push'))).resolves.toEqual({ batchItemFailures: [] });
     await expect(voiceHandler(dispatchEvent('voice'))).resolves.toEqual({ batchItemFailures: [] });
 
-    expect(sendMock).toHaveBeenCalledWith(
-      'push',
-      'push-token',
-      expect.any(String),
+    expect(pushMock).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'push-token', alertKind: 'dispatch', toneSequence: 1 }),
+      'FCM',
       expect.anything(),
       { isTest: false },
+    );
+    expect(sendMock).not.toHaveBeenCalledWith(
+      'push',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
     );
     expect(sendMock).toHaveBeenCalledWith(
       'voice',
@@ -148,7 +174,7 @@ describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S1
   });
 
   it('one channel provider removed entirely still lets delivery complete via a remaining channel (AC3 — no SPOF at the channel layer)', async () => {
-    const { sendMock, ddbSendMock } = mockDeps({
+    const { sendMock, pushMock, ddbSendMock } = mockDeps({
       voice: () => Promise.reject(new Error('ENOTFOUND voice.example')),
     });
     const { handler: pushHandler } =
@@ -161,12 +187,18 @@ describe('channel failure-domain isolation and no-SPOF chaos verification (E1-S1
     });
     await expect(pushHandler(dispatchEvent('push'))).resolves.toEqual({ batchItemFailures: [] });
 
-    expect(sendMock).toHaveBeenCalledWith(
-      'push',
-      'push-token',
-      expect.any(String),
+    expect(pushMock).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'push-token', alertKind: 'dispatch', toneSequence: 1 }),
+      'FCM',
       expect.anything(),
       { isTest: false },
+    );
+    expect(sendMock).not.toHaveBeenCalledWith(
+      'push',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
     );
     expect(putCallsFor(ddbSendMock)).toBe(2);
   });

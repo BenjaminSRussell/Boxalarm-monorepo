@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { AppState, Platform, Settings } from 'react-native';
 import notifee, { EventType } from '@notifee/react-native';
 import * as messaging from '@react-native-firebase/messaging';
 import { navigateToAlertDetail } from '../../navigation/navigationRef';
@@ -7,11 +7,41 @@ import { dispatchIdFromNotificationData, subscribePushNotificationRouting } from
 const getInitialNotification = messaging.getInitialNotification as jest.Mock;
 const onNotificationOpenedApp = messaging.onNotificationOpenedApp as jest.Mock;
 
+let mockNavigationReady = true;
+let mockNavigationListener: (() => void) | undefined;
 jest.mock('../../navigation/navigationRef', () => ({
   navigateToAlertDetail: jest.fn(),
+  isNavigationReady: jest.fn(() => mockNavigationReady),
+  onNavigationStateChange: jest.fn((listener: () => void) => {
+    mockNavigationListener = listener;
+    return () => {};
+  }),
 }));
 
+// NSUserDefaults via the Settings stand-in from jest.setup.js, which keeps React Native's
+// native store and JS-side copy apart. AppDelegate's tap record is a native write
+// (`nativeWrite`), visible to JS only at cold start (`coldStart`, the constants snapshot) or
+// through the settingsUpdated event (`settingsWatcher`).
+const settingsStub = Settings as typeof Settings & {
+  __reset: () => void;
+  __nativeWrite: (values: Record<string, unknown>) => void;
+  __coldStart: () => void;
+  __emitChange: () => void;
+};
+const nativeWrite = (values: Record<string, unknown>) => settingsStub.__nativeWrite(values);
+const coldStart = () => settingsStub.__coldStart();
+const settingsWatcher = () => settingsStub.__emitChange();
+let appStateListener: ((status: string) => void) | undefined;
+
 beforeEach(() => {
+  settingsStub.__reset();
+  (Settings.get as jest.Mock).mockClear();
+  mockNavigationReady = true;
+  mockNavigationListener = undefined;
+  jest.spyOn(AppState, 'addEventListener').mockImplementation((_type, listener) => {
+    appStateListener = listener as (status: string) => void;
+    return { remove: () => {} } as ReturnType<typeof AppState.addEventListener>;
+  });
   (navigateToAlertDetail as jest.Mock).mockClear();
   getInitialNotification.mockClear();
   (notifee.getInitialNotification as jest.Mock).mockClear();
@@ -95,4 +125,90 @@ test('a non-press foreground event (e.g. dismissed) does not navigate', () => {
   });
 
   expect(navigateToAlertDetail).not.toHaveBeenCalled();
+});
+
+describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () => {
+  const nowSeconds = () => Date.now() / 1000;
+  const tap = (dispatchId: string, tappedAt = nowSeconds()) => ({
+    'boxalarm.pendingAlertTap': { dispatchId, tappedAt },
+  });
+
+  beforeEach(() => {
+    Platform.OS = 'ios';
+  });
+
+  test('cold start: a tap recorded before JS loaded routes once the navigator mounts, then is cleared', () => {
+    nativeWrite(tap('DISP-COLD'));
+    coldStart();
+    mockNavigationReady = false;
+
+    subscribePushNotificationRouting();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
+    mockNavigationReady = true;
+    mockNavigationListener?.();
+
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-COLD');
+    expect(Settings.get('boxalarm.pendingAlertTap')).toBeNull();
+  });
+
+  test('background/foreground: a native tap record reaches JS only through the settings change event', () => {
+    subscribePushNotificationRouting();
+    nativeWrite(tap('DISP-WARM'));
+    // Not visible to Settings.get yet - React Native only learns of it from settingsUpdated.
+    appStateListener?.('active');
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
+    settingsWatcher();
+
+    expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-WARM');
+    // Clearing the record does not echo (RCTSettingsManager ignores its own writes), and a later
+    // unrelated settings change must not navigate again.
+    settingsWatcher();
+    expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
+  });
+
+  test('resume retries a tap that reached JS while navigation could not take it', () => {
+    mockNavigationReady = false;
+    subscribePushNotificationRouting();
+    nativeWrite(tap('DISP-RESUME'));
+    settingsWatcher();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
+    mockNavigationReady = true;
+    appStateListener?.('active');
+
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-RESUME');
+  });
+
+  test('a stale tap (older than 10 minutes) is discarded without navigating', () => {
+    nativeWrite(tap('DISP-OLD', nowSeconds() - 601));
+    coldStart();
+
+    subscribePushNotificationRouting();
+
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+    expect(Settings.get('boxalarm.pendingAlertTap')).toBeNull();
+  });
+
+  test('a malformed record is discarded without navigating', () => {
+    nativeWrite({ 'boxalarm.pendingAlertTap': { dispatchId: 7, tappedAt: nowSeconds() } });
+    coldStart();
+
+    subscribePushNotificationRouting();
+
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+  });
+
+  test('Android never reads the iOS tap record', () => {
+    Platform.OS = 'android';
+    nativeWrite(tap('DISP-IOS-ONLY'));
+    coldStart();
+
+    subscribePushNotificationRouting();
+
+    expect(Settings.get).not.toHaveBeenCalled();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+  });
 });
