@@ -519,6 +519,17 @@ export const LAMBDA_ENTRIES = [
     entry: 'src/services/apparatus-service/getTestingSchedules.ts',
   },
   {
+    // Daily scheduled scanners (no HTTP route) that publish apparatus.test.due.
+    service: 'apparatus-service',
+    function: 'test-due-scanner',
+    entry: 'src/services/apparatus-service/testDueScanner/handler.ts',
+  },
+  {
+    service: 'apparatus-service',
+    function: 'scba-test-due-scanner',
+    entry: 'src/services/apparatus-service/apparatusTestingScanner/handler.ts',
+  },
+  {
     service: 'apparatus-service',
     function: 'inventory-list',
     entry: 'src/services/apparatus-service/inventory-list/handler.ts',
@@ -737,6 +748,26 @@ export const LAMBDA_ENTRIES = [
     service: 'notification-service',
     function: 'digest-job',
     entry: 'src/services/notification-service/digest/digestJob.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'apparatus-test-due-consumer',
+    entry: 'src/services/notification-service/events/apparatusTestDueConsumer.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'apparatus-defect-consumer',
+    entry: 'src/services/notification-service/events/apparatusDefectConsumer.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'inventory-reorder-consumer',
+    entry: 'src/services/notification-service/events/inventoryReorderDueConsumer.ts',
+  },
+  {
+    service: 'notification-service',
+    function: 'ppe-expiry-consumer',
+    entry: 'src/services/notification-service/events/ppeExpiryConsumer.ts',
   },
   // One health Lambda per service serves GET health/liveness and health/readiness.
   {
