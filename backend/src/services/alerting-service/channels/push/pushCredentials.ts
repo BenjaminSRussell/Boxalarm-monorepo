@@ -1,5 +1,6 @@
 import { createPrivateKey, sign } from 'node:crypto';
 import { GetSecretValueCommand, type SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { fetchRetryingConnectionLoss } from './pushResult.js';
 
 /**
  * Credentials for the direct APNs / FCM push adapters (architecture §Alerting: "Push uses
@@ -247,7 +248,10 @@ const fcmAccessTokenCache = new Map<string, CachedToken>();
 
 export interface FcmAccessTokenOptions {
   readonly tokenUrl?: string;
+  /** Per-request timeout; a connection-loss retry gets a fresh one from nextTimeoutMs. */
   readonly timeoutMs: number;
+  /** When set, each request's timeout (the retry's included); defaults to timeoutMs. */
+  readonly nextTimeoutMs?: () => number;
   readonly now?: number;
 }
 
@@ -292,15 +296,18 @@ async function fetchFcmAccessToken(
     credentials.privateKey,
     'RS256',
   );
-  const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion,
-    }).toString(),
-    signal: AbortSignal.timeout(options.timeoutMs),
-  });
+  const response = await fetchRetryingConnectionLoss(
+    tokenUrl,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }).toString(),
+    },
+    options.nextTimeoutMs ?? (() => options.timeoutMs),
+  );
   if (!response.ok) {
     const message = `FCM OAuth token endpoint responded ${response.status}`;
     // 400 invalid_grant / 401 invalid_client: the service-account key itself was refused.

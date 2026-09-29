@@ -15,6 +15,7 @@ import {
   type PushNotification,
 } from './pushPayload.js';
 import {
+  fetchRetryingConnectionLoss,
   isNonRetryableRefusal,
   nextRequestTimeout,
   PUSH_SEND_BUDGET_REQUESTS,
@@ -137,12 +138,14 @@ async function sendViaFcmOnce(
   deadlineMs: number,
 ): Promise<PushSendResult> {
   const credentials = await loadFcmCredentials(options.secretId, options.secretsClient);
+  const nextTimeoutMs = () => nextRequestTimeout(options.timeoutMs, deadlineMs);
   const accessToken = await fcmAccessToken(options.secretId, credentials, {
-    timeoutMs: nextRequestTimeout(options.timeoutMs, deadlineMs),
+    timeoutMs: nextTimeoutMs(),
+    nextTimeoutMs,
     ...(options.oauthTokenUrl ? { tokenUrl: options.oauthTokenUrl } : {}),
   });
   const origin = options.fcmOrigin ?? FCM_ORIGIN;
-  const response = await fetch(
+  const response = await fetchRetryingConnectionLoss(
     `${origin}/v1/projects/${encodeURIComponent(credentials.projectId)}/messages:send`,
     {
       method: 'POST',
@@ -158,8 +161,8 @@ async function sendViaFcmOnce(
           options.apnsInterruptionLevel ?? credentials.apnsInterruptionLevel,
         ),
       ),
-      signal: AbortSignal.timeout(nextRequestTimeout(options.timeoutMs, deadlineMs)),
     },
+    nextTimeoutMs,
   );
   const text = await response.text();
   if (response.ok) {

@@ -529,3 +529,84 @@ describe('sendViaFcm shares one deadline across the credential retry (review rou
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('sendViaFcm survives a stale keep-alive connection (review round 2 m11)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetPushCredentialCaches();
+  });
+
+  const socketClosed = () =>
+    Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    });
+
+  const send = () =>
+    sendViaFcm(dispatch, {
+      secretId: 'fcm-stale',
+      isTest: false,
+      secretsClient: secretsClient(),
+      timeoutMs: 4_000,
+      fcmOrigin: 'https://fcm.test',
+      oauthTokenUrl: 'https://oauth.test/token',
+    });
+
+  it('a send whose reused connection was closed is retried once in-process and succeeds', async () => {
+    let sends = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request) => {
+        if ((url as string).endsWith('/token')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: 'a', expires_in: 3599 }), { status: 200 }),
+          );
+        }
+        sends += 1;
+        return sends === 1
+          ? Promise.reject(socketClosed())
+          : Promise.resolve(new Response(JSON.stringify({ name: 'm' }), { status: 200 }));
+      });
+
+    await expect(send()).resolves.toMatchObject({ outcome: 'sent' });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('the OAuth call is retried the same way', async () => {
+    let tokenCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url: string | URL | Request) => {
+      if ((url as string).endsWith('/token')) {
+        tokenCalls += 1;
+        return tokenCalls === 1
+          ? Promise.reject(socketClosed())
+          : Promise.resolve(
+              new Response(JSON.stringify({ access_token: 'a', expires_in: 3599 }), {
+                status: 200,
+              }),
+            );
+      }
+      return Promise.resolve(new Response(JSON.stringify({ name: 'm' }), { status: 200 }));
+    });
+
+    await expect(send()).resolves.toMatchObject({ outcome: 'sent' });
+    expect(tokenCalls).toBe(2);
+  });
+
+  it('a timeout is not retried in-process (the budget is spent); it throws for SQS', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request) =>
+        (url as string).endsWith('/token')
+          ? Promise.resolve(
+              new Response(JSON.stringify({ access_token: 'a', expires_in: 3599 }), {
+                status: 200,
+              }),
+            )
+          : Promise.reject(
+              new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+            ),
+      );
+
+    await expect(send()).rejects.toThrow('timeout');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});

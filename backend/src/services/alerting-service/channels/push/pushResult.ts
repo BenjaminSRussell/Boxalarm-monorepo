@@ -44,3 +44,40 @@ export function nextRequestTimeout(timeoutMs: number, deadlineMs: number): numbe
   }
   return Math.min(timeoutMs, remaining);
 }
+
+const FETCH_CONNECTION_ERROR_CODES = new Set([
+  'UND_ERR_SOCKET',
+  'UND_ERR_CLOSED',
+  'ECONNRESET',
+  'EPIPE',
+  'ECONNABORTED',
+]);
+
+/**
+ * `fetch` (undici) reuses keep-alive sockets. One the far side or a NAT closed while the
+ * Lambda was frozen fails the next POST with "other side closed", and undici does not retry a
+ * POST itself. True only for that connection loss, never for a timeout or an HTTP error.
+ */
+export function isFetchConnectionLoss(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: unknown } } | undefined)?.cause;
+  const code = cause?.code ?? (error as { code?: unknown } | undefined)?.code;
+  return typeof code === 'string' && FETCH_CONNECTION_ERROR_CODES.has(code);
+}
+
+/**
+ * POST once, and once more on a fresh connection if the first attempt lost its connection
+ * (isFetchConnectionLoss). Each attempt's timeout comes from `nextTimeoutMs`, so a retry never
+ * outlives the send's deadline. For a page, a duplicate is the safe side of a miss.
+ */
+export async function fetchRetryingConnectionLoss(
+  url: string,
+  init: Omit<RequestInit, 'signal'>,
+  nextTimeoutMs: () => number,
+): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(nextTimeoutMs()) });
+  } catch (error) {
+    if (!isFetchConnectionLoss(error)) throw error;
+    return fetch(url, { ...init, signal: AbortSignal.timeout(nextTimeoutMs()) });
+  }
+}
