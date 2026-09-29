@@ -248,6 +248,19 @@ async function deliverThroughWorker(
   sendViaHttpProvider: ProviderSpy,
 ): Promise<{ batchItemFailures: { itemIdentifier: string }[] }> {
   vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider }));
+  // Push goes to APNs/FCM directly; record it on the same spy so one assertion sees every
+  // provider send, push and SMS alike.
+  vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+    sendPush: async (
+      notification: { token: string; body: string },
+      _platform: string,
+      env: unknown,
+    ) => {
+      await sendViaHttpProvider('push', notification.token, notification.body, env);
+      return { outcome: 'sent' as const };
+    },
+  }));
   const { createChannelWorkerHandler } = await import('./deliverChannelMessage.js');
   const worker = createChannelWorkerHandler(routedChannel(publish));
   const event = {
@@ -274,6 +287,7 @@ describe('alerting topic producer -> channel worker contract', () => {
     vi.doUnmock('../escalation/scheduleEscalation.js');
     vi.doUnmock('../fanout/fanOut.js');
     vi.doUnmock('./httpProviderAdapter.js');
+    vi.doUnmock('./push/pushProviderAdapter.js');
     vi.restoreAllMocks();
   });
 

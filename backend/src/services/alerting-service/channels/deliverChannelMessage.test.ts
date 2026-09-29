@@ -10,8 +10,27 @@ function fakeDdb(send: ReturnType<typeof vi.fn>): DynamoDBDocumentClient {
   return { send } as unknown as DynamoDBDocumentClient;
 }
 
+/**
+ * One spy for every provider send: SMS/voice call the generic adapter directly, and push
+ * (APNs/FCM) is forwarded onto the same spy as ('push', token, body, env, { isTest }) so the
+ * send-guard tests below stay channel-agnostic.
+ */
 function mockAdapter(sendViaHttpProvider: ReturnType<typeof vi.fn>): void {
   vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider }));
+  vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+    sendPush: async (
+      notification: { token: string; body: string },
+      _platform: string,
+      env: unknown,
+      options: { isTest?: boolean },
+    ) => {
+      await sendViaHttpProvider('push', notification.token, notification.body, env, {
+        isTest: options.isTest === true,
+      });
+      return { outcome: 'sent' as const };
+    },
+  }));
 }
 
 const baseParams: DeliverChannelMessageParams = {
@@ -26,6 +45,8 @@ const baseParams: DeliverChannelMessageParams = {
 };
 
 afterEach(() => {
+  vi.doUnmock('./httpProviderAdapter.js');
+  vi.doUnmock('./push/pushProviderAdapter.js');
   vi.resetModules();
 });
 
@@ -293,6 +314,226 @@ describe('deliverChannelMessage', () => {
 
     expect(sendViaHttpProvider).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
+
+describe('deliverChannelMessage — direct APNs/FCM push path', () => {
+  type SendPushSpy = ReturnType<typeof vi.fn>;
+
+  function mockPush(sendPush: SendPushSpy, sendViaHttpProvider = vi.fn()): void {
+    vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider }));
+    vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+      sendPush,
+    }));
+  }
+
+  function commandsNamed(send: ReturnType<typeof vi.fn>, name: string) {
+    return send.mock.calls
+      .map((call) => call[0] as { constructor: { name: string }; input: Record<string, unknown> })
+      .filter((command) => command.constructor.name === name);
+  }
+
+  /** Guard claim succeeds; the eligibility snapshot read returns the given push entry. */
+  function tableWithSnapshot(pushEntry: Record<string, unknown>) {
+    return vi.fn().mockImplementation((command: { constructor: { name: string } }) => {
+      if (command.constructor.name === 'GetCommand') {
+        return Promise.resolve({
+          Item: { contactChannels: [pushEntry, { channel: 'sms', token: '+12035550100' }] },
+        });
+      }
+      return Promise.resolve({});
+    });
+  }
+
+  it('builds a critical dispatch push with a per-tone collapse key and the exactly-once idempotency key, routed by the registered platform', async () => {
+    const sendPush = vi.fn().mockResolvedValue({ outcome: 'sent' });
+    mockPush(sendPush);
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(vi.fn().mockResolvedValue({})), 'alerting-table', {
+      ...baseParams,
+      toneSequence: 2,
+      title: 'structure-fire',
+      contactChannels: [{ channel: 'PUSH', platform: 'APNS', token: 'tok-1', valid: true }],
+    });
+
+    expect(sendPush).toHaveBeenCalledWith(
+      {
+        token: 'tok-1',
+        alertKind: 'dispatch',
+        dispatchId: 'dispatch-1',
+        toneSequence: 2,
+        title: 'structure-fire',
+        body: 'structure-fire — 12 Main St',
+        idempotencyKey: 'dispatch-1#2#mbr-1#PUSH',
+        collapseKey: 'dispatch-1#2',
+      },
+      'APNS',
+      baseParams.env,
+      { isTest: false },
+    );
+  });
+
+  it('sends an Android (FCM) token via FCM', async () => {
+    const sendPush = vi.fn().mockResolvedValue({ outcome: 'sent' });
+    mockPush(sendPush);
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(vi.fn().mockResolvedValue({})), 'alerting-table', {
+      ...baseParams,
+      contactChannels: [{ channel: 'PUSH', platform: 'FCM', token: 'fcm-tok', valid: true }],
+    });
+
+    expect(sendPush.mock.calls[0]?.[1]).toBe('FCM');
+  });
+
+  it('sends the officer mutual-aid prompt as its own notification, with no toneSequence', async () => {
+    const sendPush = vi.fn().mockResolvedValue({ outcome: 'sent' });
+    mockPush(sendPush);
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(vi.fn().mockResolvedValue({})), 'alerting-table', {
+      deptId,
+      dispatchId: 'dispatch-1',
+      memberId: 'officer-1',
+      channel: 'push',
+      alertKind: 'mutual_aid_prompt',
+      title: 'MUTUAL AID REQUESTED',
+      contactChannels: [{ channel: 'PUSH', token: 'tok-o', valid: true }],
+      message: 'MUTUAL AID REQUESTED — structure-fire — 12 Main St',
+      env: {},
+    });
+
+    expect(sendPush.mock.calls[0]?.[0]).toMatchObject({
+      alertKind: 'mutual_aid_prompt',
+      toneSequence: undefined,
+      idempotencyKey: 'dispatch-1#MUTUALAID#officer-1#PUSH#SEND',
+      collapseKey: 'dispatch-1#MUTUALAID',
+    });
+  });
+
+  it('SMS stays on the generic vendor adapter and never touches APNs/FCM', async () => {
+    const sendPush = vi.fn();
+    const sendViaHttpProvider = vi.fn().mockResolvedValue(undefined);
+    mockPush(sendPush, sendViaHttpProvider);
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(vi.fn().mockResolvedValue({})), 'alerting-table', {
+      ...baseParams,
+      channel: 'sms',
+      contactChannels: [{ channel: 'sms', token: '+12035550100' }],
+    });
+
+    expect(sendPush).not.toHaveBeenCalled();
+    expect(sendViaHttpProvider).toHaveBeenCalledWith(
+      'sms',
+      '+12035550100',
+      baseParams.message,
+      baseParams.env,
+      { isTest: false },
+    );
+  });
+
+  it('a dead token is terminal: guard recorded FAILED, the contact entry marked invalid, nothing thrown (no redelivery)', async () => {
+    const sendPush = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'invalid_token', reason: 'APNS_BadDeviceToken' });
+    mockPush(sendPush);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const send = tableWithSnapshot({
+      channel: 'PUSH',
+      platform: 'APNS',
+      token: 'tok-1',
+      valid: true,
+    });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
+    ).resolves.toBeUndefined();
+
+    const updates = commandsNamed(send, 'UpdateCommand');
+    const guardFailure = updates.find(
+      (command) => (command.input.Key as { sk: string }).sk === 'RECEIPT#mbr-1#PUSH#1',
+    );
+    expect(guardFailure?.input.ExpressionAttributeValues).toEqual({
+      ':reason': 'PUSH_TOKEN_INVALID APNS_BadDeviceToken',
+      ':failed': 'FAILED',
+    });
+    // Never marked SENT.
+    expect(
+      updates.some(
+        (command) =>
+          (command.input.ExpressionAttributeValues as Record<string, unknown>)[':sent'] === 'SENT',
+      ),
+    ).toBe(false);
+    const invalidation = updates.find(
+      (command) => (command.input.Key as { sk: string }).sk === 'MEMBER#mbr-1',
+    );
+    expect(invalidation?.input.Key).toEqual({ pk: 'DEPT#NICHOLS#ELIGIBILITY', sk: 'MEMBER#mbr-1' });
+    expect(
+      (invalidation?.input.ExpressionAttributeValues as Record<string, unknown>)[
+        ':contactChannels'
+      ],
+    ).toEqual([
+      { channel: 'PUSH', platform: 'APNS', token: 'tok-1', valid: false },
+      { channel: 'sms', token: '+12035550100' },
+    ]);
+    expect(logSpy.mock.calls.some(([line]) => String(line).includes('"TokenInvalid"'))).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('a self-test that hits a token rejection never invalidates the member’s real token', async () => {
+    const sendPush = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'invalid_token', reason: 'APNS_BadDeviceToken' });
+    mockPush(sendPush);
+    const send = tableWithSnapshot({ channel: 'PUSH', token: 'tok-1', valid: true });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(send), 'alerting-table', { ...baseParams, isTest: true });
+
+    expect(sendPush.mock.calls[0]?.[3]).toEqual({ isTest: true });
+    const touchedSnapshot = [
+      ...commandsNamed(send, 'UpdateCommand'),
+      ...commandsNamed(send, 'GetCommand'),
+    ].some((command) => (command.input.Key as { sk: string }).sk === 'MEMBER#mbr-1');
+    expect(touchedSnapshot).toBe(false);
+  });
+
+  it('does not invalidate a token the member has since replaced', async () => {
+    const sendPush = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'invalid_token', reason: 'FCM_UNREGISTERED' });
+    mockPush(sendPush);
+    const send = tableWithSnapshot({ channel: 'PUSH', token: 'tok-new', valid: true });
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams);
+
+    expect(
+      commandsNamed(send, 'UpdateCommand').some(
+        (command) => (command.input.Key as { sk: string }).sk === 'MEMBER#mbr-1',
+      ),
+    ).toBe(false);
+  });
+
+  it('a retryable provider error (429/5xx/timeout) is recorded FAILED and rethrown so SQS redelivers', async () => {
+    const sendPush = vi.fn().mockRejectedValue(new Error('APNs responded 503 ServiceUnavailable'));
+    mockPush(sendPush);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const send = vi.fn().mockResolvedValue({});
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
+    ).rejects.toThrow('APNs responded 503');
+    expect(commandsNamed(send, 'UpdateCommand')[0]?.input.ExpressionAttributeValues).toEqual({
+      ':reason': 'APNs responded 503 ServiceUnavailable',
+      ':failed': 'FAILED',
+    });
     errorSpy.mockRestore();
   });
 });

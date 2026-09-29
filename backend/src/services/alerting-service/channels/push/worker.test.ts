@@ -6,12 +6,15 @@ const originalEnv = { ...process.env };
 beforeEach(() => {
   vi.resetModules();
   process.env.ALERTING_TABLE_NAME = 'alerting-table';
-  process.env.PUSH_PROVIDER_ENDPOINT_URL = 'https://push.example';
-  process.env.PUSH_PROVIDER_SECRET_ID = 'push-secret';
+  process.env.APNS_SECRET_ID = 'apns-secret';
+  process.env.FCM_SECRET_ID = 'fcm-secret';
 });
 
 afterEach(() => {
   process.env = { ...originalEnv };
+  vi.doUnmock('../httpProviderAdapter.js');
+  vi.doUnmock('./pushProviderAdapter.js');
+  vi.doUnmock('../../eligibility/dynamoClient.js');
 });
 
 function sqsEvent(channel: string, memberId = 'mbr-1', isTest = false): SQSEvent {
@@ -48,6 +51,21 @@ function mockDeps(
   send: ReturnType<typeof vi.fn>,
 ): void {
   vi.doMock('../httpProviderAdapter.js', () => ({ sendViaHttpProvider }));
+  // The push worker sends via APNs/FCM directly; forward onto the same spy.
+  vi.doMock('./pushProviderAdapter.js', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./pushProviderAdapter.js')>()),
+    sendPush: async (
+      notification: { token: string; body: string },
+      _platform: string,
+      env: unknown,
+      options: { isTest?: boolean },
+    ) => {
+      await sendViaHttpProvider('push', notification.token, notification.body, env, {
+        isTest: options.isTest === true,
+      });
+      return { outcome: 'sent' as const };
+    },
+  }));
   vi.doMock('../../eligibility/dynamoClient.js', () => ({
     createDynamoClient: () => ({ send }),
     readAlertingConfig: () => ({ tableName: 'alerting-table' }),

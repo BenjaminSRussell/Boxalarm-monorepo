@@ -20,6 +20,9 @@ import {
   type MutualAidPromptPayload,
 } from './channelEnvelope.js';
 import { sendViaHttpProvider } from './httpProviderAdapter.js';
+import { resolvePushPlatform, sendPush, type PushSendResult } from './push/pushProviderAdapter.js';
+import { findContactEntry } from '../eligibility/resolvePushTarget.js';
+import { invalidatePushToken } from '../receipts/invalidatePushToken.js';
 
 const METRIC_NAMESPACE = 'Boxalarm/AlertingChannel';
 
@@ -55,6 +58,8 @@ interface DeliverChannelMessageCommon {
   readonly channel: ChannelName;
   readonly contactChannels: readonly ContactChannelSnapshot[] | undefined;
   readonly message: string;
+  /** Push notification title; the message is the body. SMS/voice send the message alone. */
+  readonly title?: string;
   readonly env: NodeJS.ProcessEnv;
   /** Self-test/canary message — sent with the sandbox provider credentials. */
   readonly isTest?: boolean;
@@ -108,7 +113,7 @@ export async function deliverChannelMessage(
   tableName: string,
   params: DeliverChannelMessageParams,
 ): Promise<void> {
-  const { deptId, dispatchId, memberId, channel, contactChannels, message, env } = params;
+  const { deptId, dispatchId, memberId, channel, contactChannels } = params;
   const isTest = params.isTest === true;
   const correlationId = dispatchId;
   const resolved = resolveChannelTarget(channel, contactChannels);
@@ -168,8 +173,9 @@ export async function deliverChannelMessage(
     }
   }
 
+  let result: PushSendResult;
   try {
-    await sendViaHttpProvider(channel, resolved.target, message, env, { isTest });
+    result = await sendToProvider(params, resolved.target, idempotencyKey, isTest);
   } catch (error) {
     logError('alerting.channel.send_failed', error, { correlationId, memberId, channel });
     emitOutcomeMetric(METRIC_NAMESPACE, 'SendFailed', channel);
@@ -177,8 +183,92 @@ export async function deliverChannelMessage(
     throw error;
   }
 
+  if (result.outcome === 'invalid_token') {
+    // Terminal: the gateway says this device token is dead, so retrying it can never page the
+    // member. Recorded FAILED (not thrown - no redelivery), and the contact entry is marked
+    // invalid so producers stop publishing to it until the device re-registers. The parallel
+    // SMS page and the voice escalation are unaffected.
+    logInfo('alerting.channel.token_invalid', {
+      correlationId,
+      memberId,
+      channel,
+      reason: result.reason,
+      isTest,
+    });
+    emitOutcomeMetric(METRIC_NAMESPACE, 'TokenInvalid', channel);
+    await recordClaimedFailure(
+      ddb,
+      tableName,
+      pk,
+      sk,
+      new Error(`PUSH_TOKEN_INVALID ${result.reason}`),
+    );
+    // A self-test goes to the APNs sandbox host, which rejects every production token: that
+    // says nothing about the token's validity for a real page, so it must never disable one.
+    if (!isTest) {
+      await invalidateDeadToken(ddb, tableName, deptId, memberId, resolved.target, correlationId);
+    }
+    return;
+  }
+
   emitOutcomeMetric(METRIC_NAMESPACE, 'Sent', channel);
   await recordSent(ddb, tableName, pk, sk);
+}
+
+/**
+ * Push goes to APNs/FCM directly (architecture §Alerting); SMS and voice stay on the generic
+ * vendor adapter until OQ-3 picks their vendors.
+ */
+async function sendToProvider(
+  params: DeliverChannelMessageParams,
+  target: string,
+  idempotencyKey: string,
+  isTest: boolean,
+): Promise<PushSendResult> {
+  const { channel, message, env, dispatchId } = params;
+  if (channel !== 'push') {
+    await sendViaHttpProvider(channel, target, message, env, { isTest });
+    return { outcome: 'sent' };
+  }
+  const platform = resolvePushPlatform(
+    findContactEntry(params.contactChannels, 'PUSH')?.platform,
+    target,
+  );
+  const isPrompt = params.alertKind === 'mutual_aid_prompt';
+  return sendPush(
+    {
+      token: target,
+      alertKind: isPrompt ? 'mutual_aid_prompt' : 'dispatch',
+      dispatchId,
+      toneSequence: isPrompt ? undefined : params.toneSequence,
+      title: params.title ?? (isPrompt ? 'MUTUAL AID REQUESTED' : 'DISPATCH'),
+      body: message,
+      idempotencyKey,
+      // Per-tone notification identity (architecture §5.1 B4): tone 2 never collapses into 1.
+      collapseKey: isPrompt ? `${dispatchId}#MUTUALAID` : `${dispatchId}#${params.toneSequence}`,
+    },
+    platform,
+    env,
+    { isTest },
+  );
+}
+
+async function invalidateDeadToken(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  deptId: VerifiedDeptId,
+  memberId: string,
+  token: string,
+  correlationId: string,
+): Promise<void> {
+  try {
+    const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token);
+    logInfo('alerting.pushToken.invalidated_by_send', { correlationId, memberId, outcome });
+  } catch (error) {
+    // The page already failed terminally; a failed invalidation only means the next page
+    // tries the dead token again and re-attempts this write.
+    logError('alerting.pushToken.invalidate_failed', error, { correlationId, memberId });
+  }
 }
 
 async function reattemptClaimedFailure(
@@ -350,9 +440,15 @@ export function createChannelWorkerHandler(
           ? {
               ...common,
               alertKind: 'mutual_aid_prompt',
+              title: 'MUTUAL AID REQUESTED',
               message: `MUTUAL AID REQUESTED — ${incidentText}`,
             }
-          : { ...common, toneSequence: envelope.toneSequence, message: incidentText },
+          : {
+              ...common,
+              toneSequence: envelope.toneSequence,
+              title: envelope.incidentType,
+              message: incidentText,
+            },
       );
     }
 

@@ -7,8 +7,9 @@ import type { DeliverChannelMessageParams } from './deliverChannelMessage.js';
 
 const TABLE_NAME = 'alerting-channels-test';
 
-vi.mock('./httpProviderAdapter.js', () => ({
-  sendViaHttpProvider: vi.fn().mockResolvedValue(undefined),
+vi.mock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+  sendPush: vi.fn().mockResolvedValue({ outcome: 'sent' }),
 }));
 
 describe('deliverChannelMessage receipt write (real DynamoDB, exactly-once idempotency)', () => {
@@ -79,8 +80,8 @@ describe('deliverChannelMessage receipt write (real DynamoDB, exactly-once idemp
 
   it('recovers a claimed-but-failed receipt on redelivery against the real ConditionExpression', async () => {
     const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
-    const { sendViaHttpProvider } = await import('./httpProviderAdapter.js');
-    const send = vi.mocked(sendViaHttpProvider);
+    const { sendPush } = await import('./push/pushProviderAdapter.js');
+    const send = vi.mocked(sendPush);
     send.mockClear();
 
     const params: DeliverChannelMessageParams = {
@@ -92,7 +93,7 @@ describe('deliverChannelMessage receipt write (real DynamoDB, exactly-once idemp
     send.mockRejectedValueOnce(new Error('provider 503'));
     await expect(deliverChannelMessage(client, TABLE_NAME, params)).rejects.toThrow('provider 503');
 
-    send.mockResolvedValueOnce(undefined);
+    send.mockResolvedValueOnce({ outcome: 'sent' });
     await deliverChannelMessage(client, TABLE_NAME, params);
 
     const item = await client.send(
