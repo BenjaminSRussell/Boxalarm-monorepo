@@ -102,6 +102,31 @@ jest.mock('@op-engineering/op-sqlite', () => {
   return { open: () => createFakeDb() };
 });
 
+// React Native's Settings (NSUserDefaults on iOS) needs the native SettingsManager, which Jest
+// does not link. An in-memory stand-in with the same API; tests drive it through jest.fn state.
+jest.mock('react-native/Libraries/Settings/Settings', () => {
+  let values = {};
+  const watchers = [];
+  return {
+    __esModule: true,
+    default: {
+      get: jest.fn((key) => values[key]),
+      set: jest.fn((next) => {
+        values = { ...values, ...next };
+      }),
+      watchKeys: jest.fn((_keys, callback) => watchers.push(callback) - 1),
+      clearWatch: jest.fn((id) => {
+        watchers[id] = null;
+      }),
+      __reset: () => {
+        values = {};
+        watchers.length = 0;
+      },
+      __emitChange: () => watchers.forEach((callback) => callback && callback()),
+    },
+  };
+});
+
 // No Firebase/notifee native modules are linked in Jest - every push-path test supplies its own
 // jest.mock for these with the behavior it needs; this default keeps every other test (which
 // only imports something that transitively pulls in the push modules) from crashing on load.

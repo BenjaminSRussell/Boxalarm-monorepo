@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { AppState, Platform, Settings } from 'react-native';
 import notifee, { EventType } from '@notifee/react-native';
 import * as messaging from '@react-native-firebase/messaging';
 import { navigateToAlertDetail } from '../../navigation/navigationRef';
@@ -7,11 +7,36 @@ import { dispatchIdFromNotificationData, subscribePushNotificationRouting } from
 const getInitialNotification = messaging.getInitialNotification as jest.Mock;
 const onNotificationOpenedApp = messaging.onNotificationOpenedApp as jest.Mock;
 
+let mockNavigationReady = true;
+let mockNavigationListener: (() => void) | undefined;
 jest.mock('../../navigation/navigationRef', () => ({
   navigateToAlertDetail: jest.fn(),
+  isNavigationReady: jest.fn(() => mockNavigationReady),
+  onNavigationStateChange: jest.fn((listener: () => void) => {
+    mockNavigationListener = listener;
+    return () => {};
+  }),
 }));
 
+// NSUserDefaults via the in-memory Settings stand-in from jest.setup.js; __emitChange stands
+// in for the native settingsUpdated event.
+const settingsStub = Settings as typeof Settings & {
+  __reset: () => void;
+  __emitChange: () => void;
+};
+const setDefaults = (values: Record<string, unknown>) => Settings.set(values);
+const settingsWatcher = () => settingsStub.__emitChange();
+let appStateListener: ((status: string) => void) | undefined;
+
 beforeEach(() => {
+  settingsStub.__reset();
+  (Settings.get as jest.Mock).mockClear();
+  mockNavigationReady = true;
+  mockNavigationListener = undefined;
+  jest.spyOn(AppState, 'addEventListener').mockImplementation((_type, listener) => {
+    appStateListener = listener as (status: string) => void;
+    return { remove: () => {} } as ReturnType<typeof AppState.addEventListener>;
+  });
   (navigateToAlertDetail as jest.Mock).mockClear();
   getInitialNotification.mockClear();
   (notifee.getInitialNotification as jest.Mock).mockClear();
@@ -95,4 +120,76 @@ test('a non-press foreground event (e.g. dismissed) does not navigate', () => {
   });
 
   expect(navigateToAlertDetail).not.toHaveBeenCalled();
+});
+
+describe('iOS taps on raw-APNs dispatch notifications (review round 2 N3)', () => {
+  const nowSeconds = () => Date.now() / 1000;
+  const tap = (dispatchId: string, tappedAt = nowSeconds()) => ({
+    'boxalarm.pendingAlertTap': { dispatchId, tappedAt },
+  });
+
+  beforeEach(() => {
+    Platform.OS = 'ios';
+  });
+
+  test('cold start: a tap recorded before JS loaded routes once the navigator mounts, then is cleared', () => {
+    setDefaults(tap('DISP-COLD'));
+    mockNavigationReady = false;
+
+    subscribePushNotificationRouting();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+
+    mockNavigationReady = true;
+    mockNavigationListener?.();
+
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-COLD');
+    expect(Settings.get('boxalarm.pendingAlertTap')).toBeNull();
+  });
+
+  test('background/foreground: a tap recorded while running routes via the settings change', () => {
+    subscribePushNotificationRouting();
+    setDefaults(tap('DISP-WARM'));
+    settingsWatcher();
+
+    expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-WARM');
+    // The clear itself triggers another settings change, which must not navigate again.
+    settingsWatcher();
+    expect(navigateToAlertDetail).toHaveBeenCalledTimes(1);
+  });
+
+  test('resume: a tap pending when the app becomes active routes', () => {
+    subscribePushNotificationRouting();
+    setDefaults(tap('DISP-RESUME'));
+    appStateListener?.('active');
+
+    expect(navigateToAlertDetail).toHaveBeenCalledWith('DISP-RESUME');
+  });
+
+  test('a stale tap (older than 10 minutes) is discarded without navigating', () => {
+    setDefaults(tap('DISP-OLD', nowSeconds() - 601));
+
+    subscribePushNotificationRouting();
+
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+    expect(Settings.get('boxalarm.pendingAlertTap')).toBeNull();
+  });
+
+  test('a malformed record is discarded without navigating', () => {
+    setDefaults({ 'boxalarm.pendingAlertTap': { dispatchId: 7, tappedAt: nowSeconds() } });
+
+    subscribePushNotificationRouting();
+
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+  });
+
+  test('Android never reads the iOS tap record', () => {
+    Platform.OS = 'android';
+    setDefaults(tap('DISP-IOS-ONLY'));
+
+    subscribePushNotificationRouting();
+
+    expect(Settings.get).not.toHaveBeenCalled();
+    expect(navigateToAlertDetail).not.toHaveBeenCalled();
+  });
 });

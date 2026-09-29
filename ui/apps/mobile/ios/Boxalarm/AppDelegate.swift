@@ -14,11 +14,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
 {
   var window: UIWindow?
 
-  // Whatever notification-center delegate was installed before ours (a library that hooked
-  // in earlier). Everything except dispatch foreground presentation is forwarded to it, so
-  // tap routing keeps working. Libraries that install later wrap us and forward here.
-  var previousNotificationDelegate: UNUserNotificationCenterDelegate?
-
   var reactNativeDelegate: ReactNativeDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
 
@@ -32,9 +27,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
   ) -> Bool {
     FirebaseApp.configure()
 
-    let notificationCenter = UNUserNotificationCenter.current()
-    previousNotificationDelegate = notificationCenter.delegate
-    notificationCenter.delegate = self
+    // Installed before notifee and React Native Firebase, which hook in on
+    // UIApplicationDidFinishLaunchingNotification (after this method returns). Both wrap this
+    // delegate and forward notifications they do not own (raw APNs pages) down to it.
+    UNUserNotificationCenter.current().delegate = self
 
     let delegate = ReactNativeDelegate()
     let factory = RCTReactNativeFactory(delegate: delegate)
@@ -67,11 +63,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlo
   }
 }
 
-// Foreground presentation of dispatch alerts. Our pages come straight from APNs, with no FCM
-// marker, so React Native Firebase does not choose presentation options for them. Without
-// this, a dispatch that arrives while Boxalarm is open would show nothing. Mirrors the app's
-// fail-loud rule (pushChannel.ts): anything but an explicit `digest` is a dispatch.
-// Requires device verification: foreground, locked, and in Sleep Focus.
+/// NSUserDefaults key the JS router reads through React Native's Settings API
+/// (src/features/alerts/pushRouting.ts, IOS_PENDING_ALERT_TAP_KEY).
+let pendingAlertTapKey = "boxalarm.pendingAlertTap"
+
+// Dispatch notifications. Our pages come straight from APNs, with no FCM marker, so React
+// Native Firebase neither chooses their foreground presentation nor reports taps on them.
+// Mirrors the app's fail-loud rule (pushChannel.ts): anything but an explicit `digest` is a
+// dispatch.
+// Requires device verification: foreground presentation, plus taps from cold start,
+// background and foreground.
 extension AppDelegate {
   func userNotificationCenter(
     _ center: UNUserNotificationCenter,
@@ -79,29 +80,27 @@ extension AppDelegate {
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
     let category = notification.request.content.userInfo["category"] as? String
-    if category != "digest" {
-      completionHandler([.banner, .list, .sound])
-      return
-    }
-    if let forward = previousNotificationDelegate?.userNotificationCenter(
-      _:willPresent:withCompletionHandler:)
-    {
-      forward(center, notification, completionHandler)
-      return
-    }
-    completionHandler([.banner, .list])
+    completionHandler(category == "digest" ? [.banner, .list] : [.banner, .list, .sound])
   }
 
+  // A tap on a dispatch records its dispatchId for the JS router. It is read on launch (cold
+  // start) and reported as a settings change while running (background/foreground), so the
+  // member lands on the alert they need to answer.
   func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
-    if let forward = previousNotificationDelegate?.userNotificationCenter(
-      _:didReceive:withCompletionHandler:)
+    let userInfo = response.notification.request.content.userInfo
+    if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+      (userInfo["category"] as? String) != "digest",
+      let dispatchId = userInfo["dispatchId"] as? String,
+      !dispatchId.isEmpty
     {
-      forward(center, response, completionHandler)
-      return
+      UserDefaults.standard.set(
+        ["dispatchId": dispatchId, "tappedAt": Date().timeIntervalSince1970],
+        forKey: pendingAlertTapKey
+      )
     }
     completionHandler()
   }
