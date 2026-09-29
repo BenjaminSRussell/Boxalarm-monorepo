@@ -197,6 +197,39 @@ export class AlertingAlarms extends pulumi.ComponentResource {
       `boxalarm-${env}-alerting-member-updated-consumer-errors`,
     );
 
+    // Push token invalidations (review M3). APNs answers BadDeviceToken both for a dead token
+    // and for one sent to the wrong APNs environment, so a burst of invalidations usually means
+    // the stack's APNs secret `environment` (or bundle id) does not match the installed app
+    // builds, not that members' phones died. The worker stops invalidating past 3 distinct
+    // tokens per 5 minutes and throws (MassInvalidationBlocked); both are paged.
+    pageAlarm("push-token-invalid-rate-alarm", {
+      name: `boxalarm-${env}-alerting-push-token-invalid-rate`,
+      alarmDescription:
+        "More than 3 push tokens were rejected as invalid in 5 minutes. Usually a push gateway misconfiguration, not dead devices: check the APNs secret's environment (production for TestFlight/App Store builds, sandbox for Xcode-installed builds) and bundleId, and the FCM service account's project. Members whose token was invalidated get push again after re-opening the app.",
+      namespace: "Boxalarm/AlertingChannel",
+      metricName: "TokenInvalid",
+      // deliverChannelMessage emits emitOutcomeMetric(ns, "TokenInvalid", "push") → Reason=push.
+      dimensions: { Reason: "push" },
+      statistic: "Sum",
+      comparisonOperator: "GreaterThanThreshold",
+      threshold: 3,
+      period: 300,
+      evaluationPeriods: 1,
+    });
+    pageAlarm("push-mass-invalidation-blocked-alarm", {
+      name: `boxalarm-${env}-alerting-push-mass-invalidation-blocked`,
+      alarmDescription:
+        "The push worker refused to invalidate more device tokens (too many rejected at once) and is failing those pages instead. Fix the push gateway configuration (APNs environment/bundleId, FCM project); pages will retry and dead-letter until then. SMS still pages in parallel.",
+      namespace: "Boxalarm/AlertingChannel",
+      metricName: "MassInvalidationBlocked",
+      dimensions: { Reason: "push" },
+      statistic: "Sum",
+      comparisonOperator: "GreaterThanThreshold",
+      threshold: 0,
+      period: 60,
+      evaluationPeriods: 1,
+    });
+
     for (const channel of ALERTING_CHANNELS) {
       const dlq = args.channelQueues[channel].dlq;
 

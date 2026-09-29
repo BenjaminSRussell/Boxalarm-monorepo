@@ -537,3 +537,42 @@ describe('deliverChannelMessage — direct APNs/FCM push path', () => {
     errorSpy.mockRestore();
   });
 });
+
+describe('deliverChannelMessage — mass token invalidation guard (review M3)', () => {
+  it('when the guard trips, the token is NOT invalidated and the send throws so the page stays loud', async () => {
+    const sendPush = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'invalid_token', reason: 'APNS_BadDeviceToken' });
+    vi.doMock('./httpProviderAdapter.js', () => ({ sendViaHttpProvider: vi.fn() }));
+    vi.doMock('./push/pushProviderAdapter.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('./push/pushProviderAdapter.js')>()),
+      sendPush,
+    }));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const send = vi
+      .fn()
+      .mockImplementation(
+        (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+          const sk = (command.input.Key as { sk?: string } | undefined)?.sk ?? '';
+          if (command.constructor.name === 'UpdateCommand' && sk.startsWith('WINDOW#')) {
+            return Promise.resolve({
+              Attributes: { tokenHashes: new Set(['a', 'b', 'c', 'd']) },
+            });
+          }
+          return Promise.resolve({});
+        },
+      );
+    const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
+
+    await expect(
+      deliverChannelMessage(fakeDdb(send), 'alerting-table', baseParams),
+    ).rejects.toThrow('push token invalidation refused');
+
+    const touchedSnapshot = send.mock.calls.some(
+      (call) =>
+        ((call[0] as { input: { Key?: { sk?: string } } }).input.Key?.sk ?? '') === 'MEMBER#mbr-1',
+    );
+    expect(touchedSnapshot).toBe(false);
+    errorSpy.mockRestore();
+  });
+});

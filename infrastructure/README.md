@@ -40,7 +40,12 @@ Push goes to APNs and FCM directly — no push vendor. `ChannelWorkers` creates 
 | `boxalarm-{env}-alerting-push-fcm-credentials` | Firebase service-account key JSON, as downloaded |
 | `boxalarm-{env}-alerting-push-fcm-sandbox-credentials` | Service-account JSON; sends are `validate_only` (self-test/canary) |
 
-Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4), and `environment` to `sandbox` on stacks whose app builds are development-signed. The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset.
+> **⚠ One APNs environment per stack — get this right or every iOS member loses push.**
+> The APNs secret's `environment` must match how *every* iOS device on that stack got the app: `production` (the default) for TestFlight and App Store builds, `sandbox` only for builds installed from Xcode (development-signed). APNs answers a token from the other environment with `BadDeviceToken`, which is also what it says about a dead token. A stack cannot serve both kinds of build at once: keep Xcode-installed devices on `dev` only, and TestFlight/App Store devices on `qa`, `staging` and `prod`.
+> Safety net: the push worker invalidates at most 3 distinct tokens per 5 minutes per department. Beyond that it leaves tokens valid and fails the page loudly instead (`…-push-mass-invalidation-blocked` pages, then the push DLQ). A burst of invalidations also pages (`…-push-token-invalid-rate`). Invalidated members get push back when they next open the app.
+> The app does not report its APNs environment at registration. That needs a small native module to read the provisioning profile's `aps-environment`, and it is not built.
+
+Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4). The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset.
 
 ## Deploying
 

@@ -23,6 +23,10 @@ import { sendViaHttpProvider } from './httpProviderAdapter.js';
 import { resolvePushPlatform, sendPush, type PushSendResult } from './push/pushProviderAdapter.js';
 import { findContactEntry } from '../eligibility/resolvePushTarget.js';
 import { invalidatePushToken } from '../receipts/invalidatePushToken.js';
+import {
+  admitTokenInvalidation,
+  MassTokenInvalidationError,
+} from './push/massInvalidationGuard.js';
 
 const METRIC_NAMESPACE = 'Boxalarm/AlertingChannel';
 
@@ -261,6 +265,20 @@ async function invalidateDeadToken(
   token: string,
   correlationId: string,
 ): Promise<void> {
+  try {
+    await admitTokenInvalidation(ddb, tableName, deptId, token);
+  } catch (error) {
+    if (error instanceof MassTokenInvalidationError) {
+      // Too many tokens rejected at once reads as a gateway misconfiguration, not dead devices:
+      // leave every token valid and throw so the page redelivers, dead-letters and pages on-call.
+      logError('alerting.pushToken.mass_invalidation_blocked', error, { correlationId, memberId });
+      emitOutcomeMetric(METRIC_NAMESPACE, 'MassInvalidationBlocked', 'push');
+      throw error;
+    }
+    // Could not count it: keep the token (a wasted send later beats disabling a live device).
+    logError('alerting.pushToken.invalidation_guard_failed', error, { correlationId, memberId });
+    return;
+  }
   try {
     const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token);
     logInfo('alerting.pushToken.invalidated_by_send', { correlationId, memberId, outcome });

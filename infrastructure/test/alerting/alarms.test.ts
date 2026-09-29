@@ -140,6 +140,12 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
       { FunctionName: "boxalarm-dev-alerting-member-updated-consumer" },
     ],
     ["boxalarm-dev-alerting-push-delivery-failure-rate", "SendFailed", { Reason: "push" }],
+    ["boxalarm-dev-alerting-push-token-invalid-rate", "TokenInvalid", { Reason: "push" }],
+    [
+      "boxalarm-dev-alerting-push-mass-invalidation-blocked",
+      "MassInvalidationBlocked",
+      { Reason: "push" },
+    ],
     ["boxalarm-dev-alerting-sms-delivery-failure-rate", "SendFailed", { Reason: "sms" }],
     ["boxalarm-dev-alerting-voice-delivery-failure-rate", "SendFailed", { Reason: "voice" }],
     [
