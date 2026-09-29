@@ -286,12 +286,12 @@ export async function sendViaApns(
     return await sendViaApnsOnce(notification, options, deadlineMs);
   } catch (error) {
     if (!(error instanceof PushProviderAuthError)) throw error;
-    evictPushCredentials(options.secretId);
+    evictPushCredentials(options.secretId, error);
     try {
       return await sendViaApnsOnce(notification, options, deadlineMs);
     } catch (retryError) {
       if (!(retryError instanceof PushProviderAuthError)) throw retryError;
-      evictPushCredentials(options.secretId);
+      evictPushCredentials(options.secretId, retryError);
       if (options.isTest) {
         return { outcome: 'test_refused', reason: `APNS_CREDENTIALS_REFUSED` };
       }
@@ -351,7 +351,7 @@ async function sendViaApnsOnce(
   }
   const message = `APNs responded ${response.status} ${reason}`;
   if (APNS_AUTH_FAILURES.has(reason)) {
-    throw new PushProviderAuthError(message);
+    throw new PushProviderAuthError(message, jwt);
   }
   // A self-test refused for configuration (DeviceTokenNotForTopic, TopicDisallowed, BadTopic…)
   // is a test failure, not a page to retry into the DLQ. Real pages keep throwing: a

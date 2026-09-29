@@ -111,12 +111,12 @@ export async function sendViaFcm(
     return await sendViaFcmOnce(notification, options, deadlineMs);
   } catch (error) {
     if (!(error instanceof PushProviderAuthError)) throw error;
-    evictPushCredentials(options.secretId);
+    evictPushCredentials(options.secretId, error);
     try {
       return await sendViaFcmOnce(notification, options, deadlineMs);
     } catch (retryError) {
       if (!(retryError instanceof PushProviderAuthError)) throw retryError;
-      evictPushCredentials(options.secretId);
+      evictPushCredentials(options.secretId, retryError);
       if (options.isTest) {
         return { outcome: 'test_refused', reason: `FCM_CREDENTIALS_REFUSED` };
       }
@@ -180,7 +180,7 @@ async function sendViaFcmOnce(
   }
   const message = `FCM responded ${response.status} ${errorCode}`;
   if (response.status === 401 || (response.status === 403 && errorCode !== 'SENDER_ID_MISMATCH')) {
-    throw new PushProviderAuthError(message);
+    throw new PushProviderAuthError(message, accessToken);
   }
   // A self-test refused for configuration (SENDER_ID_MISMATCH when the sandbox service account
   // is in another Firebase project, a payload INVALID_ARGUMENT…) is a test failure, not a page

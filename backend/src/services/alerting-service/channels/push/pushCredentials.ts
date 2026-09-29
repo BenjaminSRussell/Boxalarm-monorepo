@@ -305,7 +305,7 @@ async function fetchFcmAccessToken(
     const message = `FCM OAuth token endpoint responded ${response.status}`;
     // 400 invalid_grant / 401 invalid_client: the service-account key itself was refused.
     throw response.status === 400 || response.status === 401
-      ? new PushProviderAuthError(message)
+      ? new PushProviderAuthError(message, undefined, credentials.privateKey)
       : new Error(message);
   }
   const body = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
@@ -324,10 +324,23 @@ async function fetchFcmAccessToken(
  * The gateway rejected our credentials (APNs InvalidProviderToken/ExpiredProviderToken, FCM
  * 401/403, or the Google token endpoint refusing the service account). The usual cause is a
  * rotated or revoked key, so dropping only the signed token is not enough: the cached secret
- * still holds the old key and would sign another bad token for up to the secret TTL. Evict
- * the secret and every token minted from it, so the next attempt reads the key afresh.
+ * still holds the old key and would sign another bad token for up to the secret TTL.
+ *
+ * Compare-and-evict: the secret and every token minted from it are evicted only while the
+ * cache still holds the credential that failed. With N concurrent pages refused by the same
+ * token, the first evicts and re-reads; the rest find a fresher credential already cached and
+ * leave it alone. Otherwise every evict would discard the credential the others just fetched,
+ * and repeated APNs provider-token changes risk TooManyProviderTokenUpdates.
  */
-export function evictPushCredentials(secretId: string): void {
+export function evictPushCredentials(secretId: string, failed: PushProviderAuthError): void {
+  const stillCached =
+    failed.failedToken !== undefined
+      ? [...apnsJwtCache, ...fcmAccessTokenCache].some(
+          ([key, cached]) => key.startsWith(`${secretId}#`) && cached.token === failed.failedToken,
+        )
+      : failed.failedPrivateKey !== undefined &&
+        privateKeyOf(secretCache.get(secretId)?.value) === failed.failedPrivateKey;
+  if (!stillCached) return;
   secretCache.delete(secretId);
   secretReads.delete(secretId);
   for (const cache of [apnsJwtCache, fcmAccessTokenCache, accessTokenFetches]) {
@@ -337,8 +350,23 @@ export function evictPushCredentials(secretId: string): void {
   }
 }
 
-/** A credential refusal — see evictPushCredentials. Retried once in-process with fresh keys. */
-export class PushProviderAuthError extends Error {}
+function privateKeyOf(secret: Record<string, unknown> | undefined): unknown {
+  return secret?.privateKey ?? secret?.private_key;
+}
+
+/**
+ * A credential refusal - see evictPushCredentials. Retried once in-process with fresh keys.
+ * Carries what failed: the signed token, or (when no token was obtained) the private key.
+ */
+export class PushProviderAuthError extends Error {
+  constructor(
+    message: string,
+    readonly failedToken?: string,
+    readonly failedPrivateKey?: string,
+  ) {
+    super(message);
+  }
+}
 
 export function resetPushCredentialCaches(): void {
   secretCache.clear();

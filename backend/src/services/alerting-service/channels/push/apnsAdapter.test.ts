@@ -604,3 +604,40 @@ describe('sendViaApns shares one deadline across the credential retry (review ro
     expect(timeouts).toHaveLength(1);
   });
 });
+
+describe('concurrent credential refusals evict once (review round 2 m2)', () => {
+  afterEach(() => resetPushCredentialCaches());
+
+  it('five pages refused with the same expired provider token re-read the secret once and mint one new token', async () => {
+    const secretsSend = vi.fn().mockResolvedValue({ SecretString: apnsSecret() });
+    const client = { send: secretsSend } as unknown as SecretsManagerClient;
+    let refusedToken: string | undefined;
+    const tokensUsed = new Set<string>();
+    const transport: Http2Transport = async (_origin, headers) => {
+      const auth = String(headers.authorization);
+      tokensUsed.add(auth);
+      refusedToken ??= auth;
+      // Let every sibling's first attempt be in flight before any refusal lands.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return auth === refusedToken
+        ? { status: 403, headers: {}, body: '{"reason":"ExpiredProviderToken"}' }
+        : { status: 200, headers: {}, body: '' };
+    };
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        sendViaApns(dispatch, {
+          secretId: 'apns-prod',
+          isTest: false,
+          secretsClient: client,
+          timeoutMs: 4_000,
+          transport,
+        }),
+      ),
+    );
+
+    expect(results.every((result) => result.outcome === 'sent')).toBe(true);
+    expect(secretsSend).toHaveBeenCalledTimes(2);
+    expect(tokensUsed.size).toBe(2);
+  });
+});
