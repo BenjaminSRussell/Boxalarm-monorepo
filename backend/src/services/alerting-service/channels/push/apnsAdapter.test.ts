@@ -18,7 +18,7 @@ import {
   type Http2Transport,
 } from './apnsAdapter.js';
 import { resetPushCredentialCaches } from './pushCredentials.js';
-import type { PushNotification } from './pushPayload.js';
+import { PUSH_TTL_SECONDS, type PushNotification } from './pushPayload.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const P8 = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -131,6 +131,10 @@ describe('sendViaApns over a local HTTP/2 server', () => {
     expect(request?.headers['apns-topic']).toBe('org.nicholsfd.boxalarm');
     expect(request?.headers['apns-push-type']).toBe('alert');
     expect(request?.headers['apns-priority']).toBe('10');
+    // Bounded expiry: an offline phone must not ring hours later for a finished call.
+    const expiration = Number(request?.headers['apns-expiration']);
+    expect(expiration - Date.now() / 1000).toBeGreaterThan(PUSH_TTL_SECONDS - 5);
+    expect(expiration - Date.now() / 1000).toBeLessThanOrEqual(PUSH_TTL_SECONDS);
     expect(request?.headers['apns-collapse-id']).toBe('NICHOLS-MANUAL-1798000000-abcd1234#2');
     expect(request?.headers['apns-id']).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,

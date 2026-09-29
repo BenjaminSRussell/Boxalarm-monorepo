@@ -157,7 +157,8 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
     expect(body.message.token).toBe('fcm-registration-token:APA91b');
     // Data-only: no top-level `notification`, so the app's background handler always runs.
     expect(body.message.notification).toBeUndefined();
-    expect(body.message.android).toEqual({ priority: 'HIGH' });
+    // Bounded TTL: an offline phone must not ring hours later for a finished call.
+    expect(body.message.android).toEqual({ priority: 'HIGH', ttl: '600s' });
     // Field names match ui/apps/mobile pushNotificationDisplay.ts (category/dispatchId/title/body).
     expect(body.message.data).toEqual({
       category: 'dispatch',
@@ -170,6 +171,7 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
     // A legacy iOS FCM token still gets a critical alert.
     const apns = body.message.apns as { headers: Record<string, string>; payload: { aps: object } };
     expect(apns.headers['apns-collapse-id']).toBe('NICHOLS-MANUAL-1798000000-abcd1234#1');
+    expect(Number(apns.headers['apns-expiration']) - Date.now() / 1000).toBeGreaterThan(595);
     expect(apns.payload.aps).toMatchObject({ 'interruption-level': 'critical' });
   });
 

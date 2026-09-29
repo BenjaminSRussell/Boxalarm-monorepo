@@ -26,6 +26,21 @@ export interface PushNotification {
  */
 export const PUSH_CATEGORY = 'dispatch';
 
+/**
+ * How long APNs and FCM keep trying to reach an offline phone. The default is up to four weeks,
+ * so a phone that comes back hours later would ring critically, through Do Not Disturb, for a
+ * call long over. On Android, which has no collapse, all three tones would arrive in one burst.
+ * Ten minutes covers the whole default tone ladder (tone 2 at T+180s, tone 3 at T+360s) with
+ * margin. A page that cannot reach the phone within that window is no longer actionable; SMS
+ * and voice run in parallel for exactly that case.
+ */
+export const PUSH_TTL_SECONDS = 600;
+
+/** Absolute APNs expiry (epoch seconds) for a push sent at `nowMs`. */
+export function apnsExpiration(nowMs: number): string {
+  return String(Math.floor(nowMs / 1000) + PUSH_TTL_SECONDS);
+}
+
 /** Bundled critical-alert sound; `default` is the system sound. */
 export const APNS_CRITICAL_SOUND_NAME = 'default';
 

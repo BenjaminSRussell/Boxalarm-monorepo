@@ -8,6 +8,7 @@ import {
 } from './pushCredentials.js';
 import {
   apnsCollapseId,
+  apnsExpiration,
   apnsIdFor,
   buildApnsPayload,
   type PushNotification,
@@ -274,6 +275,7 @@ async function sendViaApnsOnce(
     'apns-topic': credentials.bundleId,
     'apns-push-type': 'alert',
     'apns-priority': '10',
+    'apns-expiration': apnsExpiration(Date.now()),
     'apns-id': apnsIdFor(notification.idempotencyKey),
     'apns-collapse-id': apnsCollapseId(notification.collapseKey),
     'content-type': 'application/json',

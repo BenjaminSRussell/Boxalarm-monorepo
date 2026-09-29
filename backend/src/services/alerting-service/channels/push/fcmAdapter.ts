@@ -7,7 +7,9 @@ import {
 } from './pushCredentials.js';
 import {
   apnsCollapseId,
+  apnsExpiration,
   buildApnsPayload,
+  PUSH_TTL_SECONDS,
   pushDataFields,
   type PushNotification,
 } from './pushPayload.js';
@@ -35,6 +37,7 @@ export interface SendViaFcmOptions {
 export function buildFcmRequest(
   notification: PushNotification,
   isTest: boolean,
+  nowMs: number = Date.now(),
 ): Record<string, unknown> {
   return {
     // Self-test/canary: FCM validates the whole message (token included) but delivers nothing.
@@ -42,10 +45,11 @@ export function buildFcmRequest(
     message: {
       token: notification.token,
       data: pushDataFields(notification),
-      android: { priority: 'HIGH' },
+      android: { priority: 'HIGH', ttl: `${PUSH_TTL_SECONDS}s` },
       apns: {
         headers: {
           'apns-priority': '10',
+          'apns-expiration': apnsExpiration(nowMs),
           'apns-push-type': 'alert',
           'apns-collapse-id': apnsCollapseId(notification.collapseKey),
         },
