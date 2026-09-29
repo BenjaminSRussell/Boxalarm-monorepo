@@ -124,7 +124,17 @@ test('renders each reminder category by name with what is due', async () => {
 
   expect(await findByText('Apparatus defects reported · Unread')).toBeTruthy();
   expect(getByText('E1 reported out of service')).toBeTruthy();
-  expect(getByLabelText('Unread: Apparatus defects reported, 1 defect reported')).toBeTruthy();
+  // Screen readers hear which unit, not just the category (review M3).
+  expect(
+    getByLabelText(
+      'Unread: Apparatus defects reported, 1 defect reported. E1 reported out of service',
+    ),
+  ).toBeTruthy();
+  expect(
+    getByLabelText(
+      'Apparatus tests due, 4 tests due. APP-E1 hose test due 2026-10-20. APP-E2 pump test due 2026-10-21. APP-L1 aerial test due 2026-10-22. and 1 more',
+    ),
+  ).toBeTruthy();
   expect(getByText('Apparatus tests due')).toBeTruthy();
   expect(getByText('APP-L1 aerial test due 2026-10-22')).toBeTruthy();
   expect(getByText('+1 more')).toBeTruthy();

@@ -96,7 +96,15 @@ export function InboxScreen() {
             >
               <TouchableOpacity
                 accessibilityRole="button"
-                accessibilityLabel={`${item.readAt ? '' : 'Unread: '}${title}, ${item.summary}`}
+                // An explicit label replaces the children's text for screen readers, so it must
+                // carry the due items themselves, not just the category and count.
+                accessibilityLabel={[
+                  `${item.readAt ? '' : 'Unread: '}${title}, ${item.summary}`,
+                  ...shown,
+                  ...(lines.length > shown.length
+                    ? [`and ${lines.length - shown.length} more`]
+                    : []),
+                ].join('. ')}
                 accessibilityHint={item.readAt ? undefined : 'Marks this notification read'}
                 onPress={() => void onOpen(item)}
                 style={{ minHeight: touchTarget.baseline.ios, justifyContent: 'center' }}
