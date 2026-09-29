@@ -53,6 +53,12 @@ function renderDetail(groups: string[], sub = 'chief-1') {
   );
 }
 
+/** The roles section's own live region; other panels on the page have status messages too. */
+function rolesStatus(): HTMLElement {
+  const section = screen.getByRole('form', { name: 'Member roles' }).parentElement!;
+  return within(section).getByRole('status');
+}
+
 function member(roles: Member['roles']): Member {
   return {
     memberId: 'm1',
@@ -115,7 +121,7 @@ test('a chief grants and removes roles through a confirm step that names the cha
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(puts).toEqual([['MEMBER', 'OFFICER']]);
   // The server's own wording, not a client-side paraphrase.
-  expect(screen.getByRole('status').textContent).toBe(
+  expect(rolesStatus().textContent).toBe(
     "Roles saved. The change applies when the member's app next refreshes its session, within one hour.",
   );
   expect(
@@ -187,7 +193,7 @@ test('says so, and sends nothing, when no role was changed', async () => {
   const form = await screen.findByRole('form', { name: 'Member roles' });
   await user.click(within(form).getByRole('button', { name: 'Review role changes' }));
 
-  expect(screen.getByRole('status').textContent).toBe('No changes to save.');
+  expect(rolesStatus().textContent).toBe('No changes to save.');
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(puts).toEqual([]);
 });
