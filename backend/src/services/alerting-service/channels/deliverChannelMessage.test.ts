@@ -483,7 +483,23 @@ describe('deliverChannelMessage — direct APNs/FCM push path', () => {
     const send = tableWithSnapshot({ channel: 'PUSH', token: 'tok-1', valid: true });
     const { deliverChannelMessage } = await import('./deliverChannelMessage.js');
 
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await deliverChannelMessage(fakeDdb(send), 'alerting-table', { ...baseParams, isTest: true });
+
+    // Review round 2 N2: a self-test's rejection must not feed the paging TokenInvalid alarm.
+    const metricNames = logSpy.mock.calls.flatMap(([line]) => {
+      try {
+        const parsed = JSON.parse(String(line)) as {
+          _aws?: { CloudWatchMetrics: { Metrics: { Name: string }[] }[] };
+        };
+        return parsed._aws?.CloudWatchMetrics.flatMap((m) => m.Metrics.map((x) => x.Name)) ?? [];
+      } catch {
+        return [];
+      }
+    });
+    expect(metricNames).toContain('TestTokenInvalid');
+    expect(metricNames).not.toContain('TokenInvalid');
+    logSpy.mockRestore();
 
     expect(sendPush.mock.calls[0]?.[3]).toEqual({ isTest: true });
     const touchedSnapshot = [

@@ -219,7 +219,10 @@ export async function deliverChannelMessage(
       reason: result.reason,
       isTest,
     });
-    emitOutcomeMetric(METRIC_NAMESPACE, 'TokenInvalid', channel);
+    // A self-test goes to the APNs sandbox host, which rejects every production (TestFlight /
+    // App Store) token, so its rejections say nothing about the gateway configuration. It gets
+    // its own metric: TokenInvalid feeds the paging misconfiguration alarm.
+    emitOutcomeMetric(METRIC_NAMESPACE, isTest ? 'TestTokenInvalid' : 'TokenInvalid', channel);
     await recordClaimedFailure(
       ddb,
       tableName,
