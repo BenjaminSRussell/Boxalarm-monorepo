@@ -256,6 +256,14 @@ async function deliverImmediately(
     }
   }
   if (recipients.length === 0) {
+    // An out-of-service unit nobody is told about: infrastructure alarms on this metric and
+    // notifies the chief (notification/reminders.ts).
+    logError(
+      `${LOG_PREFIX}.no_recipients`,
+      new Error('no active APPARATUS or OFFICER holder'),
+      envelope.eventId,
+      { defectId: reminder.item.subjectId },
+    );
     emitOutcomeMetric(METRIC_NAMESPACE, 'ApparatusDefectImmediateNoRecipients');
   }
   if (failed > 0) {

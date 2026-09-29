@@ -491,19 +491,6 @@ export const notificationDigest = new NotificationDigest("notification-digest", 
   logGroup: notificationLogGroup,
 });
 
-// Apparatus test-due, apparatus defect, consumable reorder and PPE expiry reminders ->
-// the digest (and, for an out-of-service defect, the inbox and push at once).
-export const notificationReminders = new NotificationReminders("notification-reminders", {
-  env,
-  platformTableName: platformTable.tableName,
-  platformTableArn: platformTable.tableArn,
-  platformBusName: platformBus.busName,
-  platformBusArn: platformBus.busArn,
-  pushTopicArn: notificationDigest.pushTopic.arn,
-  sesFromAddress: notificationSesFromAddress,
-  logGroup: notificationLogGroup,
-});
-
 export const platformConfig = new PlatformConfig("platform-config", {
   env,
   platformTableName: platformTable.tableName,
@@ -523,6 +510,20 @@ export const auditRoute = new AuditRoute("audit-route", {
 });
 
 export const chiefNotificationTopic = new ChiefNotificationTopic("chief-notifications", { env });
+
+// Apparatus test-due, apparatus defect, consumable reorder and PPE expiry reminders ->
+// the digest (and, for an out-of-service defect, the inbox and push at once).
+export const notificationReminders = new NotificationReminders("notification-reminders", {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+  pushTopicArn: notificationDigest.pushTopic.arn,
+  sesFromAddress: notificationSesFromAddress,
+  chiefNotificationTopicArn: chiefNotificationTopic.topicArn,
+  logGroup: notificationLogGroup,
+});
 
 export const platformExport = new Export("platform-export", {
   env,

@@ -344,4 +344,32 @@ describe('digestJob across reminder categories', () => {
 
     expect(pushedTo(push)).toEqual(['ACTIVE-1:inventory-reorder', 'PROB-1:inventory-reorder']);
   });
+
+  it('logs and counts a routed role nobody active holds, once per role and category', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const roster = [{ memberId: 'QM-1', roles: ['ADMIN'], email: 'qm@example.com' }];
+    const { push } = await run(
+      [
+        roleRow('APPARATUS', 'inventory-reorder', item('GLOVES-L')),
+        roleRow('APPARATUS', 'inventory-reorder', item('GLOVES-M')),
+        roleRow('ADMIN', 'inventory-reorder', item('GLOVES-L')),
+      ],
+      {},
+      roster,
+    );
+
+    expect(pushedTo(push)).toEqual(['QM-1:inventory-reorder']);
+    const unheld = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('notification.digest.role_unheld'));
+    expect(unheld).toHaveLength(1);
+    expect(JSON.parse(unheld[0]!)).toMatchObject({
+      role: 'APPARATUS',
+      category: 'inventory-reorder',
+    });
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('DigestRoleUnheld'))).toBe(
+      true,
+    );
+  });
 });

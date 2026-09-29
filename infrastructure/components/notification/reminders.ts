@@ -18,8 +18,16 @@ export interface RemindersArgs {
   pushTopicArn: pulumi.Input<string>;
   /** Verified SES sender (digest.ts's); the defect consumer emails out-of-service units at once. */
   sesFromAddress: pulumi.Input<string>;
+  /**
+   * The chief's LOB notification topic (shared/chief-notifications.ts). An out-of-service
+   * unit with nobody to tell pages the chief through it — never the alerting page topic.
+   */
+  chiefNotificationTopicArn: pulumi.Input<string>;
   logGroup: ServiceLogGroup;
 }
+
+/** The metric namespace notification-service's consumers and digest emit into (EMF). */
+const NOTIFICATION_METRIC_NAMESPACE = "Boxalarm/NotificationDigest";
 
 interface GrantContext {
   tableArn: string;
@@ -68,6 +76,7 @@ const pendingWriteOnly = ({ tableArn }: GrantContext): IamPolicyStatement[] => [
 export class Reminders extends pulumi.ComponentResource {
   public readonly consumerLambdas: Record<string, ServiceLambda> = {};
   public readonly consumers: Record<string, QueueConsumer> = {};
+  public readonly outOfServiceUnheardAlarm: aws.cloudwatch.MetricAlarm;
 
   constructor(name: string, args: RemindersArgs, opts?: pulumi.ComponentResourceOptions) {
     requireEnv("Reminders", args.env);
@@ -197,6 +206,28 @@ export class Reminders extends pulumi.ComponentResource {
         { parent: this },
       );
     }
+
+    // apparatusDefectConsumer.ts emits ApparatusDefectImmediateNoRecipients when a unit is
+    // reported out of service and no active APPARATUS or OFFICER holder exists to tell. The
+    // handler succeeds, so neither the DLQ nor the Errors metric would ever show it.
+    this.outOfServiceUnheardAlarm = new aws.cloudwatch.MetricAlarm(
+      `${name}-oos-no-recipients-alarm`,
+      {
+        name: `boxalarm-${env}-notification-apparatus-oos-no-recipients`,
+        alarmDescription:
+          "An apparatus was reported out of service and no active APPARATUS or OFFICER member exists to notify.",
+        namespace: NOTIFICATION_METRIC_NAMESPACE,
+        metricName: "ApparatusDefectImmediateNoRecipients",
+        statistic: "Sum",
+        period: 300,
+        evaluationPeriods: 1,
+        threshold: 0,
+        comparisonOperator: "GreaterThanThreshold",
+        treatMissingData: "notBreaching",
+        alarmActions: [args.chiefNotificationTopicArn],
+      },
+      { parent: this },
+    );
 
     this.registerOutputs({ consumerLambdas: this.consumerLambdas });
   }

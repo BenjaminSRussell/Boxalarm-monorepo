@@ -28,6 +28,7 @@ const GSI3 = `${TABLE}/index/GSI3`;
 const BUS_ARN = `arn:aws:events:${REGION}:${ACCOUNT_ID}:event-bus/boxalarm-dev-platform-bus`;
 const PUSH_TOPIC = `arn:aws:sns:${REGION}:${ACCOUNT_ID}:boxalarm-dev-notification-push`;
 const FROM = "notifications@nichols.example";
+const CHIEF_TOPIC = `arn:aws:sns:${REGION}:${ACCOUNT_ID}:boxalarm-dev-chief-notifications`;
 const SES_IDENTITY = `arn:aws:ses:${REGION}:${ACCOUNT_ID}:identity`;
 
 const fn = (key: string) => `boxalarm-dev-notification-${key}-consumer`;
@@ -51,6 +52,7 @@ async function build() {
     platformBusArn: BUS_ARN,
     pushTopicArn: pulumi.output(PUSH_TOPIC),
     sesFromAddress: FROM,
+    chiefNotificationTopicArn: CHIEF_TOPIC,
     logGroup,
   });
   await settle();
@@ -161,5 +163,16 @@ describe("notification reminder consumers", { timeout: 30_000 }, () => {
       );
       expect(touchesAlerting, key).toBe(false);
     }
+  });
+
+  it("an out-of-service unit with nobody to tell alarms to the chief topic, never the alerting plane", async () => {
+    await build();
+    const alarm = alarmByName("boxalarm-dev-notification-apparatus-oos-no-recipients");
+    expect(alarm.inputs.namespace).toBe("Boxalarm/NotificationDigest");
+    expect(alarm.inputs.metricName).toBe("ApparatusDefectImmediateNoRecipients");
+    expect(alarm.inputs.threshold).toBe(0);
+    expect(alarm.inputs.comparisonOperator).toBe("GreaterThanThreshold");
+    expect(alarm.inputs.alarmActions).toEqual([CHIEF_TOPIC]);
+    expect((alarm.inputs.alarmActions as string[]).some((a) => a.includes("alerting"))).toBe(false);
   });
 });

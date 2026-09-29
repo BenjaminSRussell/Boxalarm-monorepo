@@ -141,6 +141,7 @@ async function planDeliveries(
 
   let roster: RosterMember[] | undefined;
   let rosterFailed = false;
+  const unheld = new Set<string>();
   for (const row of pending) {
     if (row.recipientType === 'MEMBER') {
       add(row.recipientId, deliveryCategory(row.category, 'MEMBER'), row.item);
@@ -169,7 +170,23 @@ async function planDeliveries(
       continue;
     }
     const category = deliveryCategory(row.category, 'ROLE');
-    for (const member of membersWithRoles(roster, [row.recipientId])) {
+    const holders = membersWithRoles(roster, [row.recipientId]);
+    // Nobody active holds the role: that copy reaches no one. Once per role and category.
+    const unheldKey = `${row.recipientId}#${row.category}`;
+    if (holders.length === 0 && !unheld.has(unheldKey)) {
+      unheld.add(unheldKey);
+      logError(
+        'notification.digest.role_unheld',
+        new Error('no active member holds the role'),
+        correlationId,
+        {
+          role: row.recipientId,
+          category: row.category,
+        },
+      );
+      emitOutcomeMetric(METRIC_NAMESPACE, 'DigestRoleUnheld');
+    }
+    for (const member of holders) {
       add(member.memberId, category, row.item, member.email);
     }
   }

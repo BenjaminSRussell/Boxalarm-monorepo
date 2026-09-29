@@ -445,6 +445,34 @@ describe('apparatusDefectConsumer — out-of-service email (review M1)', () => {
   });
 });
 
+describe('apparatusDefectConsumer — nobody to tell', () => {
+  it('logs and emits the no-recipient metric the chief alarm watches', async () => {
+    const table = fakeTable();
+    const inner = table.send.getMockImplementation() as (command: CommandLike) => Promise<unknown>;
+    table.send.mockImplementation((command: CommandLike) =>
+      command.constructor.name === 'QueryCommand'
+        ? Promise.resolve({ Items: [{ memberId: 'FF-1', roles: ['MEMBER'] }] })
+        : inner(command),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { handler } = await load(table.send, vi.fn());
+
+    await handler(sqsEvent(defect({ outOfService: true })));
+
+    expect(
+      errorSpy.mock.calls.some((call) =>
+        String(call[0]).includes('notification.apparatusDefect.no_recipients'),
+      ),
+    ).toBe(true);
+    expect(
+      logSpy.mock.calls.some((call) =>
+        String(call[0]).includes('ApparatusDefectImmediateNoRecipients'),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('apparatusDefectConsumer — malformed', () => {
   it('rejects a payload without outOfService-independent required fields', async () => {
     const send = vi.fn();
