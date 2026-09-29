@@ -161,3 +161,14 @@ test('an apparatus officer can mute each apparatus reminder under its own catego
 
   expect(saved).toEqual({ category: 'apparatus-defect', channels: { push: true, email: false } });
 });
+
+test('a training officer is told the department certification digest cannot be muted', async () => {
+  mockUseOptionalAuth.mockReturnValue({ ...mockAuthValue, roles: ['MEMBER', 'TRAINING'] });
+  mockApiRequest.mockImplementation(async () => ({ json: async () => ({ preferences: [] }) }));
+
+  const { findByText } = await render(<NotificationPreferencesScreen />);
+
+  expect(
+    await findByText(/department-wide certification-expiry digest; it cannot be muted/),
+  ).toBeTruthy();
+});

@@ -103,6 +103,19 @@ export function NotificationPreferencesScreen() {
           Muting push still delivers the reminder to your inbox. Dispatch alerts cannot be muted
           here.
         </Text>
+        {auth?.roles.includes('TRAINING') ? (
+          <Text
+            style={{
+              color: tokens.foreground,
+              opacity: 0.7,
+              fontSize: typography.size.sm,
+              marginBottom: spacing.md,
+            }}
+          >
+            As a training officer you also get the department-wide certification-expiry digest; it
+            cannot be muted. The switch below covers only your own certifications.
+          </Text>
+        ) : null}
         {preferencesFor(auth?.roles ?? []).map(({ category, label }) => (
           <View
             key={category}

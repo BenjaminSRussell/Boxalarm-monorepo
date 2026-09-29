@@ -254,6 +254,12 @@ function PreferencesSection() {
         Muting a channel stops that reminder&apos;s push or email; it still arrives in your inbox.
         Dispatch alerts are delivered separately and cannot be muted here.
       </p>
+      {auth.roles.includes('TRAINING') ? (
+        <p className={styles.prefHint}>
+          As a training officer you also get the department-wide certification-expiry digest; it
+          cannot be muted. The setting below covers only your own certifications.
+        </p>
+      ) : null}
       <div className={styles.prefList}>
         {preferencesFor(auth.roles).map((preference) => (
           <CategoryPreference

@@ -489,6 +489,29 @@ test('preferences: an apparatus officer can mute each apparatus reminder categor
   );
 });
 
+test('preferences: a training officer is told the department certification digest cannot be muted', async () => {
+  server.use(
+    http.get('/api/v1/notifications', () => HttpResponse.json({ items: [], nextCursor: null })),
+    NO_PREFS,
+  );
+  renderWithProviders(<NotificationsPage />, '/notifications', ['MEMBER', 'TRAINING']);
+
+  expect(
+    await screen.findByText(/department-wide certification-expiry digest; it cannot be muted/),
+  ).toBeTruthy();
+});
+
+test('preferences: a plain member is not shown the training-officer note', async () => {
+  server.use(
+    http.get('/api/v1/notifications', () => HttpResponse.json({ items: [], nextCursor: null })),
+    NO_PREFS,
+  );
+  renderWithProviders(<NotificationsPage />);
+
+  await certGroup();
+  expect(screen.queryByText(/department-wide certification-expiry digest/)).toBeNull();
+});
+
 function renderBell() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
