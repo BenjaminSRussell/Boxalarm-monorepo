@@ -7,7 +7,7 @@ import { verifiedPermissionsPolicyStatement } from "../authz/policy-store";
 import { auditMutationDenyStatement } from "../data/platform-table";
 import { lambdaCode, LAMBDA_HANDLER } from "../shared/lambda-code";
 import { requireEnv } from "../shared/env";
-import { dailyScanner } from "./daily-scanner";
+import { dailyScanner, PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION } from "./daily-scanner";
 
 export interface PpeArgs {
   env: string;
@@ -27,8 +27,8 @@ export interface PpeArgs {
  * (Cedar ViewPpeAssignments for every role, IssuePpeAssignment for chief/admin/officer)
  * and the daily NFPA service-life expiry scanner that publishes ppe.expiry.due.
  *
- * ppe.expiry.due has no EventBridge rule/consumer yet (notification-service is
- * undeployed), so the scanner's events reach the bus and go nowhere until it ships.
+ * ppe.expiry.due is consumed by notification-service (notification/reminders.ts), which
+ * turns it into a ppe-expiry digest reminder for the holder and the APPARATUS role.
  */
 export class Ppe extends pulumi.ComponentResource {
   public readonly getLambda: ServiceLambda;
@@ -162,6 +162,8 @@ export class Ppe extends pulumi.ComponentResource {
       env,
       "inventory-ppe-expiry-scanner",
       this.expiryScannerLambda,
+      // Its reminders feed the 12:00 UTC digest.
+      PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION,
     ).schedule;
 
     this.registerOutputs({

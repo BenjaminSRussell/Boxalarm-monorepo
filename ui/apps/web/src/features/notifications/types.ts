@@ -1,7 +1,22 @@
-/** One certification (or other due item) folded into a digest notification. */
+/** Where an item links: the apparatus detail (keyed by unitId) or list, a member, consumables. */
+export interface NotificationItemLink {
+  kind: 'apparatus' | 'member' | 'consumables';
+  id?: string;
+}
+
+/**
+ * One due thing folded into a notification (notification-service reminders/categories.ts
+ * ReminderItem). Items written before reminder categories existed carry only certId and
+ * expiryDate; cert-expiry items still carry both alongside the generic fields.
+ */
 export interface NotificationDigestItem {
-  certId: string;
-  expiryDate: string;
+  subjectId?: string;
+  title?: string;
+  detail?: string;
+  dueDate?: string;
+  link?: NotificationItemLink;
+  certId?: string;
+  expiryDate?: string;
 }
 
 /** GET /api/v1/notifications item — notification-service inbox/handler.ts toInboxEntry. */

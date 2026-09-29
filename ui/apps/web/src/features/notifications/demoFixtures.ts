@@ -5,6 +5,44 @@ const now = Date.parse('2026-09-26T12:00:00.000Z');
 
 let notifications: InboxNotification[] = [
   {
+    notificationId: 'notif-demo-4',
+    category: 'apparatus-defect',
+    summary: '1 defect reported',
+    items: [
+      {
+        subjectId: 'DEF-demo-1',
+        title: 'E1',
+        detail: 'reported out of service',
+        link: { kind: 'apparatus', id: 'E1' },
+      },
+    ],
+    createdAt: now - 2 * 60 * 60 * 1000,
+    readAt: null,
+  },
+  {
+    notificationId: 'notif-demo-5',
+    category: 'apparatus-test-due',
+    summary: '2 tests due',
+    items: [
+      {
+        subjectId: 'APP-E1:HOSE',
+        title: 'APP-E1',
+        detail: 'hose test due 2026-10-20',
+        dueDate: '2026-10-20',
+        link: { kind: 'apparatus' },
+      },
+      {
+        subjectId: 'SCBA-001:SCBA_FLOW',
+        title: 'APP-E2',
+        detail: 'SCBA SCBA-001 flow test due 2026-10-02',
+        dueDate: '2026-10-02',
+        link: { kind: 'apparatus' },
+      },
+    ],
+    createdAt: now - 3 * 60 * 60 * 1000,
+    readAt: null,
+  },
+  {
     notificationId: 'notif-demo-1',
     category: 'cert-expiry',
     summary: '2 items expiring',

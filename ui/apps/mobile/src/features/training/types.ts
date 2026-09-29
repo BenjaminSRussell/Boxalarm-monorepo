@@ -31,10 +31,25 @@ export interface Transcript {
   hoursByCategory: Readonly<Record<string, number>>;
 }
 
+/**
+ * One due thing folded into a notification (notification-service ReminderItem). Items from
+ * before reminder categories existed carry only certId and expiryDate.
+ */
+export interface NotificationDigestItem {
+  subjectId?: string;
+  title?: string;
+  detail?: string;
+  dueDate?: string;
+  link?: { kind: 'apparatus' | 'member' | 'consumables'; id?: string };
+  certId?: string;
+  expiryDate?: string;
+}
+
 export interface NotificationItem {
   notificationId: string;
   category: string;
   summary: string;
+  items?: NotificationDigestItem[];
   createdAt: number;
   readAt: number | null;
 }

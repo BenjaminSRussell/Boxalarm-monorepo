@@ -58,6 +58,7 @@ describe('publishDueEvent (AC2)', () => {
       memberId: 'MBR-0034',
       ppeItemId: 'TURNOUT-COAT',
       expiryDate: '2026-10-14',
+      deptId: 'NICHOLS',
     });
   });
 

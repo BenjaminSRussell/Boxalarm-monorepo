@@ -56,9 +56,12 @@ describe('ppe.expiry.due contract (architecture.md:1788)', () => {
       memberId: 'MBR-0034',
       ppeItemId: 'TURNOUT-COAT',
       expiryDate: '2026-10-14',
+      deptId: 'NICHOLS',
     });
+    // architecture.md:1791's {memberId, ppeItemId, expiryDate} plus deptId, which every
+    // department-scoped consumer (notification-service ppeExpiryConsumer.ts) needs.
     expect(Object.keys(detail.payload as Record<string, unknown>).sort()).toEqual(
-      ['expiryDate', 'memberId', 'ppeItemId'].sort(),
+      ['deptId', 'expiryDate', 'memberId', 'ppeItemId'].sort(),
     );
   });
 });

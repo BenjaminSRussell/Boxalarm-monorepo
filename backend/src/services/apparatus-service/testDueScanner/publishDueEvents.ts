@@ -135,6 +135,8 @@ export async function publishDueEvent(
                 apparatusId: params.apparatusId,
                 testType: params.testType,
                 dueDate: params.dueDate,
+                // notification-service keys every reminder row by department.
+                deptId: params.deptId,
               },
             }),
           },

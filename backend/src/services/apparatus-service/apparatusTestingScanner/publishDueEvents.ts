@@ -141,6 +141,8 @@ export async function publishScbaTestDueEvent(
                 dueDate: params.dueDate,
                 scbaUnitId: params.scbaUnitId,
                 cylinderId: params.cylinderId,
+                // notification-service keys every reminder row by department.
+                deptId: params.deptId,
               },
             }),
           },

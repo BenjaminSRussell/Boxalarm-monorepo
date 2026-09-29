@@ -117,9 +117,8 @@ export async function publishDueEvent(
     throw error;
   }
 
-  // TODO: E3-S3 — notification-service has no preference/delivery implementation yet;
-  // this publishes ppe.expiry.due to EventBridge only (producer side of AC2). Digest-batch
-  // delivery to member/officer is owned by E3-S3's notification-service pattern.
+  // notification-service's ppeExpiryConsumer.ts turns this into a ppe-expiry digest reminder
+  // for the holder and the APPARATUS role.
   let response;
   try {
     response = await eb.send(
@@ -140,6 +139,8 @@ export async function publishDueEvent(
                 memberId: params.memberId,
                 ppeItemId: params.ppeItemId,
                 expiryDate: params.expiryDate,
+                // notification-service keys every reminder row by department.
+                deptId: params.deptId,
               },
             }),
           },

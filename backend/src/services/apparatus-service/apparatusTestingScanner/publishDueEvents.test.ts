@@ -69,6 +69,7 @@ describe('publishScbaTestDueEvent', () => {
       dueDate: '2026-09-20',
       scbaUnitId: 'SCBA-001',
       cylinderId: 'CYL-0891',
+      deptId: 'NICHOLS',
     });
   });
 

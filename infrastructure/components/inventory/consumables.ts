@@ -7,7 +7,7 @@ import { verifiedPermissionsPolicyStatement } from "../authz/policy-store";
 import { auditMutationDenyStatement } from "../data/platform-table";
 import { lambdaCode, LAMBDA_HANDLER } from "../shared/lambda-code";
 import { requireEnv } from "../shared/env";
-import { dailyScanner } from "./daily-scanner";
+import { dailyScanner, PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION } from "./daily-scanner";
 
 export interface ConsumablesArgs {
   env: string;
@@ -27,9 +27,8 @@ export interface ConsumablesArgs {
  * every role) and the daily reorder scanner that publishes inventory.reorder.due.
  *
  * Not wired: PUT /api/v1/inventory/consumables/{itemId} (architecture §2, N-9) has no
- * handler in backend/, so there is nothing to deploy. inventory.reorder.due has no
- * EventBridge rule/consumer yet — notification-service's inventoryReorderDueConsumer is
- * undeployed — so events reach the bus and go nowhere until that service ships.
+ * handler in backend/, so there is nothing to deploy. inventory.reorder.due is consumed by
+ * notification-service (notification/reminders.ts) as an inventory-reorder digest reminder.
  */
 export class Consumables extends pulumi.ComponentResource {
   public readonly listLambda: ServiceLambda;
@@ -125,6 +124,8 @@ export class Consumables extends pulumi.ComponentResource {
       env,
       "inventory-consumable-reorder-scanner",
       this.reorderScannerLambda,
+      // Its reminders feed the 12:00 UTC digest.
+      PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION,
     ).schedule;
 
     this.registerOutputs({

@@ -38,6 +38,7 @@ import { Registry as ApparatusRegistry } from "./components/apparatus/registry";
 import { Checks as ApparatusChecks } from "./components/apparatus/checks";
 import { Records as ApparatusRecords } from "./components/apparatus/records";
 import { Inventory as ApparatusInventory } from "./components/apparatus/inventory";
+import { TestDueScanners as ApparatusTestDueScanners } from "./components/apparatus/test-due-scanners";
 import { Equipment as InventoryEquipment } from "./components/inventory/equipment";
 import { Consumables as InventoryConsumables } from "./components/inventory/consumables";
 import { Ppe as InventoryPpe } from "./components/inventory/ppe";
@@ -47,6 +48,7 @@ import { Records as InspectionRecords } from "./components/inspections/records";
 import { InspectionsMap } from "./components/inspections/map";
 import { Inbox as NotificationInbox } from "./components/notification/inbox";
 import { Digest as NotificationDigest } from "./components/notification/digest";
+import { Reminders as NotificationReminders } from "./components/notification/reminders";
 import { Config as PlatformConfig } from "./components/platform/config";
 import { AuditRoute } from "./components/platform/audit-route";
 import { Export } from "./components/platform/export";
@@ -388,6 +390,19 @@ export const apparatusRegistry = new ApparatusRegistry("apparatus-registry", app
 export const apparatusChecks = new ApparatusChecks("apparatus-checks", apparatusArgs);
 export const apparatusRecords = new ApparatusRecords("apparatus-records", apparatusArgs);
 export const apparatusInventory = new ApparatusInventory("apparatus-inventory", apparatusArgs);
+// Daily apparatus/SCBA test-due scanners -> apparatus.test.due on the platform bus.
+export const apparatusTestDueScanners = new ApparatusTestDueScanners(
+  "apparatus-test-due-scanners",
+  {
+    env,
+    deptId,
+    platformTableName: platformTable.tableName,
+    platformTableArn: platformTable.tableArn,
+    platformBusName: platformBus.busName,
+    platformBusArn: platformBus.busArn,
+    logGroup: apparatusLogGroup,
+  },
+);
 
 // api-gap P0-6: inventory-service — equipment registry, consumables and PPE, plus the
 // daily consumable-reorder and PPE-expiry scanners. All share the platform table.
@@ -495,6 +510,20 @@ export const auditRoute = new AuditRoute("audit-route", {
 });
 
 export const chiefNotificationTopic = new ChiefNotificationTopic("chief-notifications", { env });
+
+// Apparatus test-due, apparatus defect, consumable reorder and PPE expiry reminders ->
+// the digest (and, for an out-of-service defect, the inbox and push at once).
+export const notificationReminders = new NotificationReminders("notification-reminders", {
+  env,
+  platformTableName: platformTable.tableName,
+  platformTableArn: platformTable.tableArn,
+  platformBusName: platformBus.busName,
+  platformBusArn: platformBus.busArn,
+  pushTopicArn: notificationDigest.pushTopic.arn,
+  sesFromAddress: notificationSesFromAddress,
+  chiefNotificationTopicArn: chiefNotificationTopic.topicArn,
+  logGroup: notificationLogGroup,
+});
 
 export const platformExport = new Export("platform-export", {
   env,
