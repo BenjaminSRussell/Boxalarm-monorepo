@@ -29,6 +29,19 @@ All AWS infrastructure for **[Boxalarm](https://github.com/zdemanche/boxalarm-do
 
 Per-environment NERIS base URL, OAuth credentials, and a distinct `User-Agent`. Dev traffic must never reach the NERIS production host.
 
+## Push credentials (set out-of-band, per stack)
+
+Push goes to APNs and FCM directly — no push vendor. `ChannelWorkers` creates four empty secrets per stack; the push worker cannot page anyone until they hold values. Full JSON shapes are in the header of `components/alerting/channel-workers.ts`.
+
+| Secret | Value |
+|---|---|
+| `boxalarm-{env}-alerting-push-apns-credentials` | `{"teamId","keyId","privateKey"(.p8 PEM),"bundleId","environment"?:"production"\|"sandbox","interruptionLevel"?:"critical"\|"time-sensitive"}` |
+| `boxalarm-{env}-alerting-push-apns-sandbox-credentials` | Same shape; always sent to the APNs sandbox host (self-test/canary) |
+| `boxalarm-{env}-alerting-push-fcm-credentials` | Firebase service-account key JSON, as downloaded |
+| `boxalarm-{env}-alerting-push-fcm-sandbox-credentials` | Service-account JSON; sends are `validate_only` (self-test/canary) |
+
+Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4), and `environment` to `sandbox` on stacks whose app builds are development-signed. The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset.
+
 ## Deploying
 
 `lambdaCode()` (`components/shared/lambda-code.ts`) wires each Lambda to `../backend/dist/<service>/<function>/index.mjs`
