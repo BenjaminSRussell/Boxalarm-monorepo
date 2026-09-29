@@ -45,7 +45,7 @@ Push goes to APNs and FCM directly — no push vendor. `ChannelWorkers` creates 
 > Safety net: the push worker invalidates at most 3 distinct tokens per 5 minutes per department. Beyond that it leaves tokens valid and fails the page loudly instead (`…-push-mass-invalidation-blocked` pages, then the push DLQ). A burst of invalidations also pages (`…-push-token-invalid-rate`). Invalidated members get push back when they next open the app.
 > The app does not report its APNs environment at registration. That needs a small native module to read the provisioning profile's `aps-environment`, and it is not built.
 
-Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4). The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset.
+Set `interruptionLevel` to `time-sensitive` until Apple grants the Critical Alerts entitlement (#4). `critical` without that entitlement does not get critical treatment. `time-sensitive` needs the Time Sensitive Notifications capability, which is now in `ui/apps/mobile/ios/Boxalarm/Boxalarm.entitlements` and must also be enabled on the App ID in the developer portal. Neither level has been verified on a device in Sleep Focus yet. The worker only ever reads the sandbox secrets for `isTest` messages and fails closed if one is unset.
 
 ## Deploying
 

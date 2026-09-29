@@ -71,12 +71,15 @@ export function pushDataFields(notification: PushNotification): Record<string, s
 }
 
 /**
- * `critical` needs Apple's Critical Alerts entitlement (issue #4). Until it is granted, the
- * operator sets the APNs secret's `interruptionLevel` to `time-sensitive`: the alert still
- * breaks through Focus (Time Sensitive Notifications capability, self-serve), plays the
- * default sound, but does not override the ring/silent switch. An app without the
- * entitlement that is sent a critical payload gets it without the critical treatment, so
- * `critical` stays the default and the switch is a downgrade the operator chooses.
+ * `critical` needs Apple's Critical Alerts entitlement (issue #4) plus the member's permission.
+ * Without it iOS does not give the alert critical treatment. Until #4 is granted, set the APNs
+ * secret's `interruptionLevel` to `time-sensitive`. That level needs the Time Sensitive
+ * Notifications entitlement (`com.apple.developer.usernotifications.time-sensitive`), which is
+ * self-serve and is in ios/Boxalarm/Boxalarm.entitlements; the capability must also be enabled
+ * on the App ID. A time-sensitive alert breaks through Focus (unless the member turns that off
+ * for the app) and plays the default sound, but does not override the ring/silent switch.
+ * Neither level has been verified on a device yet; check both in Sleep Focus before relying on
+ * them.
  */
 export function buildApnsPayload(
   notification: PushNotification,

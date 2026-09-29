@@ -40,6 +40,8 @@ const PLACEHOLDER_ENDPOINT_URL: Record<VendorChannel, string> = {
  *     "environment": "production",        // optional; "sandbox" for dev-signed app builds
  *     "interruptionLevel": "critical"     // optional; "time-sensitive" until the Critical
  *   }                                     //   Alerts entitlement (#4) is granted
+ *   `time-sensitive` relies on the app's Time Sensitive Notifications capability
+ *   (ui/apps/mobile/ios/Boxalarm/Boxalarm.entitlements); `critical` on #4.
  *   The sandbox secret always targets api.sandbox.push.apple.com and is refused if it
  *   declares "production".
  *
