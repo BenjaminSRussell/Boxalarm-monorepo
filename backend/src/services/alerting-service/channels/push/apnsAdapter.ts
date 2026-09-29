@@ -56,9 +56,26 @@ function isUsable(session: ClientHttp2Session): boolean {
   return !session.closed && !session.destroyed;
 }
 
-function dropSession(origin: string, session: ClientHttp2Session): void {
+/**
+ * Longer than any one request's deadline, so every stream open on a retired session has
+ * settled (answered or timed out) before it is finally destroyed.
+ */
+const RETIRED_SESSION_GRACE_MS = 5_000;
+
+/**
+ * Stops handing out `session` and closes it gracefully: no new streams, but pages already
+ * accepted on it are allowed to finish. Destroying it here would end every in-flight sibling
+ * page with no response (review round 2, N1). A session that never drains is destroyed after
+ * the grace period, by which time each of its streams has hit its own deadline.
+ */
+function retireSession(origin: string, session: ClientHttp2Session): void {
   if (sessions.get(origin)?.session === session) sessions.delete(origin);
-  if (!session.destroyed) session.destroy();
+  if (session.destroyed) return;
+  if (!session.closed) session.close();
+  const timer = setTimeout(() => {
+    if (!session.destroyed) session.destroy();
+  }, RETIRED_SESSION_GRACE_MS);
+  timer.unref();
 }
 
 function sessionFor(origin: string): ClientHttp2Session {
@@ -68,7 +85,7 @@ function sessionFor(origin: string): ClientHttp2Session {
       existing.lastUsedAt = Date.now();
       return existing.session;
     }
-    dropSession(origin, existing.session);
+    retireSession(origin, existing.session);
   }
   const session = connect(origin);
   const forget = () => {
@@ -86,20 +103,21 @@ function sessionFor(origin: string): ClientHttp2Session {
 /**
  * After a stream times out, the connection itself may be dead (silently dropped) or merely
  * slow for that one stream. PING it: a live connection keeps serving sibling pages; one that
- * does not answer is torn down so the next page reconnects.
+ * does not answer is retired, so the next page reconnects while any sibling still on it keeps
+ * its own deadline.
  */
 function probeSession(origin: string, session: ClientHttp2Session): void {
   if (!isUsable(session)) return;
-  const timer = setTimeout(() => dropSession(origin, session), SESSION_PING_TIMEOUT_MS);
+  const timer = setTimeout(() => retireSession(origin, session), SESSION_PING_TIMEOUT_MS);
   timer.unref();
   try {
     session.ping((error) => {
       clearTimeout(timer);
-      if (error) dropSession(origin, session);
+      if (error) retireSession(origin, session);
     });
   } catch {
     clearTimeout(timer);
-    dropSession(origin, session);
+    retireSession(origin, session);
   }
 }
 
@@ -124,6 +142,17 @@ export function isConnectionLevelError(error: unknown): boolean {
 }
 
 class ApnsTimeoutError extends Error {}
+
+/**
+ * A stream that ended or closed without ever receiving response headers: the connection went
+ * away under it (destroyed, GOAWAY past its id, socket closed). Coded like node's own stream
+ * cancellation so isConnectionLevelError sends it down the in-process retry path.
+ */
+function streamEndedWithoutResponse(): Error {
+  return Object.assign(new Error('APNs stream ended without a response'), {
+    code: 'ERR_HTTP2_STREAM_CANCEL',
+  });
+}
 
 function requestOnce(
   origin: string,
@@ -156,20 +185,27 @@ function requestOnce(
       });
     }, timeoutMs);
     let status = 0;
+    let responded = false;
     let responseHeaders: Record<string, unknown> = {};
     const chunks: Buffer[] = [];
     request.on('response', (incoming) => {
+      responded = true;
       status = Number(incoming[':status']);
       responseHeaders = { ...incoming };
     });
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
-    request.on('end', () =>
+    const complete = () =>
       finish(() => {
+        if (!responded) {
+          reject(streamEndedWithoutResponse());
+          return;
+        }
         const cached = sessions.get(origin);
         if (cached?.session === session) cached.lastUsedAt = Date.now();
         resolve({ status, headers: responseHeaders, body: Buffer.concat(chunks).toString('utf8') });
-      }),
-    );
+      });
+    request.on('end', complete);
+    request.on('close', complete);
     request.on('error', (error: Error) => finish(() => reject(error)));
     request.end(body);
   });
@@ -188,7 +224,7 @@ export const http2Transport: Http2Transport = async (origin, headers, body, time
     return await requestOnce(origin, session, headers, body, timeoutMs);
   } catch (error) {
     if (error instanceof ApnsTimeoutError || !isConnectionLevelError(error)) throw error;
-    dropSession(origin, session);
+    retireSession(origin, session);
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw error;
     return requestOnce(origin, sessionFor(origin), headers, body, remaining);

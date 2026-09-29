@@ -401,6 +401,13 @@ describe('http2Transport connection handling (review M1)', () => {
         return;
       }
       const path = String(headers[':path']);
+      if (path.endsWith('/goaway-after-sibling') && serverSessions.length === 1) {
+        // APNs draining a connection: streams up to the sibling's are still served, this one
+        // (and anything after it) is refused.
+        stream.session?.goaway(constants.NGHTTP2_NO_ERROR, (stream.id ?? 3) - 2);
+        stream.close(constants.NGHTTP2_REFUSED_STREAM);
+        return;
+      }
       if (path.endsWith('/hang')) return;
       const respond = () => {
         stream.respond({ ':status': 200 });
@@ -443,6 +450,22 @@ describe('http2Transport connection handling (review M1)', () => {
     await post('warm');
     mode = 'goaway-next';
     await expect(post('after-goaway')).resolves.toMatchObject({ status: 200 });
+    expect(serverSessions).toHaveLength(2);
+  });
+
+  // Review round 2 N1: the page that got refused by a GOAWAY must not tear down the
+  // connection under a sibling page APNs already accepted on it.
+  it('a GOAWAY refusing one page leaves an accepted sibling on the same connection to complete', async () => {
+    await post('warm');
+    const sibling = post('slow');
+    // Let the sibling's stream reach the server before the refused one.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const refused = post('goaway-after-sibling');
+
+    const [siblingResult, refusedResult] = await Promise.all([sibling, refused]);
+
+    expect(siblingResult.status).toBe(200);
+    expect(refusedResult.status).toBe(200);
     expect(serverSessions).toHaveLength(2);
   });
 
