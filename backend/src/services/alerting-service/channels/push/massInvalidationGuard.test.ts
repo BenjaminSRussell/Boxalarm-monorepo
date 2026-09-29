@@ -5,6 +5,7 @@ import {
   admitTokenInvalidation,
   MASS_INVALIDATION_LATCH_SECONDS,
   MASS_INVALIDATION_MAX_TOKENS,
+  MASS_INVALIDATION_RECENT_TRIP_SECONDS,
   MASS_INVALIDATION_WINDOW_SECONDS,
   MassTokenInvalidationError,
 } from './massInvalidationGuard.js';
@@ -92,9 +93,20 @@ describe('admitTokenInvalidation (review M3, round 2 N4)', () => {
       false,
     );
 
-    // After the latch's TTL (DynamoDB TTL deletion lags; the guard checks expiry itself).
+    // Review round 3 R3-3: after the 1 h latch expires, the 24 h recent-trip record still admits
+    // zero, so an unfixed misconfiguration cannot strip 3 more members every hour.
     const afterLatch = windowStartMs + (MASS_INVALIDATION_LATCH_SECONDS + 1) * 1000;
-    await expect(admit(table, 'tok-after', afterLatch)).resolves.toBeUndefined();
+    await expect(admit(table, 'tok-after-latch', afterLatch)).rejects.toThrow(
+      'within the last 24 hours',
+    );
+    const recent = [...table.items.values()].find((item) => item.sk === 'RECENT_TRIP');
+    expect(recent?.ttl).toBe(windowStartMs / 1000 + MASS_INVALIDATION_RECENT_TRIP_SECONDS);
+
+    // Refusals never extend it: once 24 h have passed (DynamoDB TTL deletion lags; the guard
+    // checks expiry itself), invalidations are admitted again.
+    const afterRecentTrip = windowStartMs + (MASS_INVALIDATION_RECENT_TRIP_SECONDS + 1) * 1000;
+    await expect(admit(table, 'tok-next-day', afterRecentTrip)).resolves.toBeUndefined();
+    expect(recent?.ttl).toBe(windowStartMs / 1000 + MASS_INVALIDATION_RECENT_TRIP_SECONDS);
   });
 
   it('a window two windows back no longer counts', async () => {
@@ -124,5 +136,21 @@ describe('admitTokenInvalidation (review M3, round 2 N4)', () => {
     expect(hash).toMatch(/^[0-9a-f]{16}$/);
     expect(JSON.stringify(table.send.mock.calls)).not.toContain('raw-device-token');
     expect(values[':ttl']).toBeGreaterThan(windowStartMs / 1000);
+  });
+});
+
+describe('operator re-opening the guard (review round 3 R3-3)', () => {
+  it('deleting both trip items re-admits invalidations immediately', async () => {
+    const table = guardTable();
+    const t0 = 1_798_000_000_000;
+    for (let i = 0; i <= MASS_INVALIDATION_MAX_TOKENS; i += 1) {
+      await admit(table, `tok-${i}`, t0).catch(() => undefined);
+    }
+    for (const key of [...table.items.keys()]) {
+      if (key.endsWith('|TRIPPED') || key.endsWith('|RECENT_TRIP') || key.includes('WINDOW#')) {
+        table.items.delete(key);
+      }
+    }
+    await expect(admit(table, 'tok-fresh', t0 + 60_000)).resolves.toBeUndefined();
   });
 });

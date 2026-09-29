@@ -223,7 +223,7 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     // and for one sent to the wrong APNs environment, so a burst of invalidations usually means
     // the stack's APNs secret `environment` (or bundle id) does not match the installed app
     // builds, not that members' phones died. Past 3 distinct tokens in the current and previous
-    // 5-minute windows the worker trips a 1-hour latch: no further invalidations, and those
+    // 5-minute windows the worker trips a latch: no further invalidations for 24 hours, and those
     // pages throw instead (MassInvalidationBlocked). Both are paged.
     pageAlarm("push-token-invalid-rate-alarm", {
       name: `boxalarm-${env}-alerting-push-token-invalid-rate`,
@@ -242,7 +242,7 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     pageAlarm("push-mass-invalidation-blocked-alarm", {
       name: `boxalarm-${env}-alerting-push-mass-invalidation-blocked`,
       alarmDescription:
-        "The push worker tripped its mass-invalidation latch (more than 3 tokens rejected within ~10 minutes) and is failing those pages instead of disabling members' push. Usually a push gateway misconfiguration: fix it (APNs environment/bundleId, FCM project), then delete the DEPT#{deptId}#PUSH_TOKEN_INVALIDATION / TRIPPED item in the alerting table (it otherwise expires after 1 hour). It can also be benign - several members uninstalled at once, whose pages could never be delivered; then let the latch expire. Pages retry and dead-letter meanwhile. SMS still pages in parallel.",
+        "The push worker tripped its mass-invalidation latch (more than 3 tokens rejected within ~10 minutes) and is failing those pages instead of disabling members' push. Usually a push gateway misconfiguration: fix it (APNs environment/bundleId, FCM project), then delete the TRIPPED and RECENT_TRIP items under DEPT#{deptId}#PUSH_TOKEN_INVALIDATION in the alerting table. Otherwise no token is invalidated for 24 hours after the trip. It can also be benign - several members uninstalled at once, whose pages could never be delivered; then let it lapse. Pages retry and dead-letter meanwhile. SMS still pages in parallel.",
       namespace: "Boxalarm/AlertingChannel",
       metricName: "MassInvalidationBlocked",
       dimensions: { Reason: "push" },

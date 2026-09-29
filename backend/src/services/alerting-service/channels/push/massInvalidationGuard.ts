@@ -22,6 +22,12 @@ import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
  *   TTL, or until an operator deletes it). Tone 2/3 pages and SQS redeliveries that arrive
  *   later cannot strip more members. A refused invalidation throws, so the page redelivers,
  *   dead-letters and pages on-call.
+ * - When the latch expires, a RECENT_TRIP record written at the same moment (24 hours) keeps
+ *   admitting ZERO invalidations. Otherwise a misconfiguration nobody fixes overnight would
+ *   strip another MASS_INVALIDATION_MAX_TOKENS members every hour. The record is never
+ *   extended: refusals are not counted, so it cannot re-trip while it lives, and genuinely dead
+ *   tokens cannot keep the guard shut forever. An operator who has fixed the configuration
+ *   deletes both items to re-open it early.
  * - The first MASS_INVALIDATION_MAX_TOKENS tokens of a burst are invalidated before the trip.
  *   That is the price of letting real dead tokens (reinstalls, one or two at a time) clear
  *   without an operator.
@@ -31,8 +37,10 @@ import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
 export const MASS_INVALIDATION_WINDOW_SECONDS = 300;
 export const MASS_INVALIDATION_MAX_TOKENS = 3;
 export const MASS_INVALIDATION_LATCH_SECONDS = 60 * 60;
+export const MASS_INVALIDATION_RECENT_TRIP_SECONDS = 24 * 60 * 60;
 const WINDOW_RETENTION_SECONDS = 24 * 60 * 60;
 const LATCH_SK = 'TRIPPED';
+const RECENT_TRIP_SK = 'RECENT_TRIP';
 
 export class MassTokenInvalidationError extends Error {}
 
@@ -52,16 +60,29 @@ export async function admitTokenInvalidation(
   const pk = buildDeptScopedPk(deptId, 'PUSH_TOKEN_INVALIDATION');
 
   // TTL deletion lags by up to days, so expiry is checked here, not left to DynamoDB.
-  const latch = await ddb.send(
-    new GetCommand({ TableName: tableName, Key: { pk, sk: LATCH_SK }, ConsistentRead: true }),
+  const [latch, recentTrip] = await Promise.all(
+    [LATCH_SK, RECENT_TRIP_SK].map((sk) =>
+      ddb.send(new GetCommand({ TableName: tableName, Key: { pk, sk }, ConsistentRead: true })),
+    ),
   );
-  const latchTtl: unknown = latch.Item?.ttl;
-  if (latch.Item && (typeof latchTtl !== 'number' || latchTtl > nowSeconds)) {
+  const live = (item: Record<string, unknown> | undefined): boolean => {
+    const ttl: unknown = item?.ttl;
+    return item !== undefined && (typeof ttl !== 'number' || ttl > nowSeconds);
+  };
+  if (live(latch?.Item)) {
     throw new MassTokenInvalidationError(
       'push token invalidation refused: the mass-invalidation guard is tripped for this ' +
         'department (a burst of rejected tokens reads as a push gateway misconfiguration). ' +
-        `It clears ${MASS_INVALIDATION_LATCH_SECONDS / 60} minutes after tripping, or when an ` +
-        `operator deletes the ${LATCH_SK} item.`,
+        `No invalidations for ${MASS_INVALIDATION_RECENT_TRIP_SECONDS / 3600} hours after the ` +
+        `trip, or until an operator deletes the ${LATCH_SK} and ${RECENT_TRIP_SK} items.`,
+    );
+  }
+  if (live(recentTrip?.Item)) {
+    throw new MassTokenInvalidationError(
+      'push token invalidation refused: the mass-invalidation guard tripped for this ' +
+        `department within the last ${MASS_INVALIDATION_RECENT_TRIP_SECONDS / 3600} hours, so ` +
+        'no token is invalidated until that passes or an operator deletes the ' +
+        `${RECENT_TRIP_SK} item after fixing the push gateway configuration.`,
     );
   }
 
@@ -98,18 +119,25 @@ export async function admitTokenInvalidation(
     return;
   }
 
-  await ddb.send(
-    new PutCommand({
-      TableName: tableName,
-      Item: {
-        pk,
-        sk: LATCH_SK,
-        entityType: 'PUSH_TOKEN_INVALIDATION_TRIPPED',
-        trippedAt: nowSeconds,
-        distinctTokens: distinct,
-        ttl: nowSeconds + MASS_INVALIDATION_LATCH_SECONDS,
-      },
-    }),
+  await Promise.all(
+    [
+      { sk: LATCH_SK, seconds: MASS_INVALIDATION_LATCH_SECONDS },
+      { sk: RECENT_TRIP_SK, seconds: MASS_INVALIDATION_RECENT_TRIP_SECONDS },
+    ].map(({ sk, seconds }) =>
+      ddb.send(
+        new PutCommand({
+          TableName: tableName,
+          Item: {
+            pk,
+            sk,
+            entityType: 'PUSH_TOKEN_INVALIDATION_TRIPPED',
+            trippedAt: nowSeconds,
+            distinctTokens: distinct,
+            ttl: nowSeconds + seconds,
+          },
+        }),
+      ),
+    ),
   );
   throw new MassTokenInvalidationError(
     `push token invalidation refused and guard tripped: ${distinct} distinct tokens rejected ` +
