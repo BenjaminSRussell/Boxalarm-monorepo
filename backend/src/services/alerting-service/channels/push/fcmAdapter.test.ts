@@ -491,3 +491,41 @@ describe('buildFcmRequest apns block (review minor 4)', () => {
     ).rejects.toThrow('apnsInterruptionLevel must be');
   });
 });
+
+describe('sendViaFcm shares one deadline across the credential retry (review round 2 m1)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    resetPushCredentialCaches();
+  });
+
+  it('after a slow 401, the retry is not attempted once the 8s budget is spent (OAuth + send x2 cannot reach 16s)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url: string | URL | Request) => {
+        if ((url as string).endsWith('/token')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: 'a', expires_in: 3599 }), { status: 200 }),
+          );
+        }
+        vi.setSystemTime(Date.now() + 8_500);
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { status: 'UNAUTHENTICATED' } }), { status: 401 }),
+        );
+      });
+
+    await expect(
+      sendViaFcm(dispatch, {
+        secretId: 'fcm-budget',
+        isTest: false,
+        secretsClient: secretsClient(),
+        timeoutMs: 4_000,
+        fcmOrigin: 'https://fcm.test',
+        oauthTokenUrl: 'https://oauth.test/token',
+      }),
+    ).rejects.toThrow('push send budget exhausted');
+    // One OAuth call and one send: nothing after the budget ran out.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});

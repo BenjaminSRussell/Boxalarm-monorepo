@@ -551,3 +551,56 @@ describe('sendViaApns self-test configuration refusals (review M5)', () => {
     );
   });
 });
+
+describe('sendViaApns shares one deadline across the credential retry (review round 2 m1)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    resetPushCredentialCaches();
+  });
+
+  /** Refuses the credentials after `elapsedMs` of (fake) time, then accepts. */
+  function slowRefusalThenOk(elapsedMs: number): { transport: Http2Transport; timeouts: number[] } {
+    const timeouts: number[] = [];
+    const transport: Http2Transport = (_origin, _headers, _body, timeoutMs) => {
+      timeouts.push(timeoutMs);
+      if (timeouts.length === 1) {
+        vi.setSystemTime(Date.now() + elapsedMs);
+        return Promise.resolve({
+          status: 403,
+          headers: {},
+          body: '{"reason":"InvalidProviderToken"}',
+        });
+      }
+      return Promise.resolve({ status: 200, headers: {}, body: '' });
+    };
+    return { transport, timeouts };
+  }
+
+  const send = (transport: Http2Transport) =>
+    sendViaApns(dispatch, {
+      secretId: 'apns-prod',
+      isTest: false,
+      secretsClient: secretsClient(apnsSecret()).client,
+      timeoutMs: 4_000,
+      transport,
+    });
+
+  it('the retry gets only what is left of the 8s budget', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { transport, timeouts } = slowRefusalThenOk(5_000);
+
+    await expect(send(transport)).resolves.toMatchObject({ outcome: 'sent' });
+
+    expect(timeouts[0]).toBe(4_000);
+    expect(timeouts[1]).toBeLessThanOrEqual(3_000);
+    expect(timeouts[1]).toBeGreaterThan(2_900);
+  });
+
+  it('a retry with no budget left is not attempted; the page throws for SQS to redeliver', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { transport, timeouts } = slowRefusalThenOk(8_500);
+
+    await expect(send(transport)).rejects.toThrow('push send budget exhausted');
+    expect(timeouts).toHaveLength(1);
+  });
+});

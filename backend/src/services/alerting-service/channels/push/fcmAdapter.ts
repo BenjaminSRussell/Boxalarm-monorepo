@@ -14,7 +14,12 @@ import {
   pushDataFields,
   type PushNotification,
 } from './pushPayload.js';
-import { isNonRetryableRefusal, type PushSendResult } from './pushResult.js';
+import {
+  isNonRetryableRefusal,
+  nextRequestTimeout,
+  PUSH_SEND_BUDGET_REQUESTS,
+  type PushSendResult,
+} from './pushResult.js';
 
 export const FCM_ORIGIN = 'https://fcm.googleapis.com';
 
@@ -101,13 +106,14 @@ export async function sendViaFcm(
   notification: PushNotification,
   options: SendViaFcmOptions,
 ): Promise<PushSendResult> {
+  const deadlineMs = Date.now() + PUSH_SEND_BUDGET_REQUESTS * options.timeoutMs;
   try {
-    return await sendViaFcmOnce(notification, options);
+    return await sendViaFcmOnce(notification, options, deadlineMs);
   } catch (error) {
     if (!(error instanceof PushProviderAuthError)) throw error;
     evictPushCredentials(options.secretId);
     try {
-      return await sendViaFcmOnce(notification, options);
+      return await sendViaFcmOnce(notification, options, deadlineMs);
     } catch (retryError) {
       if (!(retryError instanceof PushProviderAuthError)) throw retryError;
       evictPushCredentials(options.secretId);
@@ -122,10 +128,11 @@ export async function sendViaFcm(
 async function sendViaFcmOnce(
   notification: PushNotification,
   options: SendViaFcmOptions,
+  deadlineMs: number,
 ): Promise<PushSendResult> {
   const credentials = await loadFcmCredentials(options.secretId, options.secretsClient);
   const accessToken = await fcmAccessToken(options.secretId, credentials, {
-    timeoutMs: options.timeoutMs,
+    timeoutMs: nextRequestTimeout(options.timeoutMs, deadlineMs),
     ...(options.oauthTokenUrl ? { tokenUrl: options.oauthTokenUrl } : {}),
   });
   const origin = options.fcmOrigin ?? FCM_ORIGIN;
@@ -145,7 +152,7 @@ async function sendViaFcmOnce(
           credentials.apnsInterruptionLevel,
         ),
       ),
-      signal: AbortSignal.timeout(options.timeoutMs),
+      signal: AbortSignal.timeout(nextRequestTimeout(options.timeoutMs, deadlineMs)),
     },
   );
   const text = await response.text();

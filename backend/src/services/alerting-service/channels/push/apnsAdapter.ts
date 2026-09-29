@@ -13,7 +13,12 @@ import {
   buildApnsPayload,
   type PushNotification,
 } from './pushPayload.js';
-import { isNonRetryableRefusal, type PushSendResult } from './pushResult.js';
+import {
+  isNonRetryableRefusal,
+  nextRequestTimeout,
+  PUSH_SEND_BUDGET_REQUESTS,
+  type PushSendResult,
+} from './pushResult.js';
 
 export const APNS_PRODUCTION_ORIGIN = 'https://api.push.apple.com';
 export const APNS_SANDBOX_ORIGIN = 'https://api.sandbox.push.apple.com';
@@ -276,13 +281,14 @@ export async function sendViaApns(
   notification: PushNotification,
   options: SendViaApnsOptions,
 ): Promise<PushSendResult> {
+  const deadlineMs = Date.now() + PUSH_SEND_BUDGET_REQUESTS * options.timeoutMs;
   try {
-    return await sendViaApnsOnce(notification, options);
+    return await sendViaApnsOnce(notification, options, deadlineMs);
   } catch (error) {
     if (!(error instanceof PushProviderAuthError)) throw error;
     evictPushCredentials(options.secretId);
     try {
-      return await sendViaApnsOnce(notification, options);
+      return await sendViaApnsOnce(notification, options, deadlineMs);
     } catch (retryError) {
       if (!(retryError instanceof PushProviderAuthError)) throw retryError;
       evictPushCredentials(options.secretId);
@@ -297,6 +303,7 @@ export async function sendViaApns(
 async function sendViaApnsOnce(
   notification: PushNotification,
   options: SendViaApnsOptions,
+  deadlineMs: number,
 ): Promise<PushSendResult> {
   const credentials = await loadApnsCredentials(options.secretId, options.secretsClient, {
     isTest: options.isTest,
@@ -318,7 +325,12 @@ async function sendViaApnsOnce(
   };
   const payload = JSON.stringify(buildApnsPayload(notification, credentials.interruptionLevel));
   const transport = options.transport ?? http2Transport;
-  const response = await transport(origin, headers, payload, options.timeoutMs);
+  const response = await transport(
+    origin,
+    headers,
+    payload,
+    nextRequestTimeout(options.timeoutMs, deadlineMs),
+  );
   if (response.status === 200) {
     const apnsId = response.headers['apns-id'];
     return {

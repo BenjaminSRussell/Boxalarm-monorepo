@@ -26,3 +26,21 @@ export type PushSendResult =
 export function isNonRetryableRefusal(status: number): boolean {
   return status >= 400 && status < 500 && status !== 429;
 }
+
+/**
+ * One push send, including its in-process credential retry, must finish well inside the
+ * worker's 15s Lambda timeout: a Lambda timeout fails the whole batch of up to 10 pages.
+ * Each request still gets at most the per-request timeout, but all of them share one deadline
+ * of this many per-request timeouts (2 x 4s = 8s), however the attempts split it.
+ */
+export const PUSH_SEND_BUDGET_REQUESTS = 2;
+
+/** The timeout for the next request: the per-request cap, or whatever is left of the deadline. */
+export function nextRequestTimeout(timeoutMs: number, deadlineMs: number): number {
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) {
+    // Retryable: thrown, so SQS redelivers with a fresh budget.
+    throw new Error('push send budget exhausted before the next request');
+  }
+  return Math.min(timeoutMs, remaining);
+}
