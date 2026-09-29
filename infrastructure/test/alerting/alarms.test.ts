@@ -194,6 +194,16 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
     ]) {
       expect(description).toContain(cause);
     }
+    // Review round 2 m6/m7: the benign causes are named too, so on-call does not "fix" a
+    // healthy secret for one member's stale token or a few uninstalls.
+    expect(description).toContain("ONE member");
+    expect(description).toContain("uninstalled");
+    for (const alarmName of [
+      "boxalarm-dev-alerting-push-token-invalid-rate",
+      "boxalarm-dev-alerting-push-mass-invalidation-blocked",
+    ]) {
+      expect(String(alarmByName(alarmName).inputs.alarmDescription)).toContain("uninstalled");
+    }
   });
 
   it("gives every alarm it owns a page action", async () => {

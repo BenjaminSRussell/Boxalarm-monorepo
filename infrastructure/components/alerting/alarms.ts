@@ -41,11 +41,15 @@ export const ALERTING_PAGE_EMAIL_CONFIG_KEY = "alertingPageEmail";
 const DLQ_ALARM_DESCRIPTION: Record<AlertingChannel, string> = {
   push:
     "A push page failed every attempt and was dead-lettered; the member got no push for that tone (SMS runs in parallel). " +
-    "Check the push worker logs (alerting.channel.send_failed) for the gateway reason. Configuration faults dead-letter on purpose: " +
-    "APNs DeviceTokenNotForTopic/BadTopic/TopicDisallowed (bundleId in the APNs secret does not match the app), " +
-    "FCM SENDER_ID_MISMATCH (service account from a different Firebase project than the app), credentials still refused after the in-process retry " +
-    "(rotated/revoked .p8 key or service account), a mass token invalidation being blocked (APNs secret environment does not match the app builds), " +
-    "or an unset push secret. Fix the secret, then redrive the DLQ.",
+    "Check the push worker logs (alerting.channel.send_failed) for the gateway reason and which members are affected. " +
+    "ONE member, every tone: usually a benign stale token - that member's registered token comes from another app bundle or Firebase project " +
+    "(e.g. an old or side-loaded build: APNs DeviceTokenNotForTopic, FCM SENDER_ID_MISMATCH). The secrets are fine; " +
+    "ask the member to reinstall/re-open the current app, then discard those DLQ messages. " +
+    "MANY members: a stack misconfiguration that dead-letters on purpose - bundleId in the APNs secret does not match the app, " +
+    "the FCM service account is from a different Firebase project, credentials still refused after the in-process retry " +
+    "(rotated/revoked .p8 key or service account), a blocked mass token invalidation (APNs secret environment does not match the app builds), " +
+    "or an unset push secret. Fix the secret, then redrive the DLQ. " +
+    "A blocked mass invalidation can also be benign: several members uninstalled at once (their pages could never be delivered).",
   sms: "An SMS page failed every attempt and was dead-lettered; the member got no SMS for that tone. Check the sms worker logs (alerting.channel.send_failed), fix the provider, then redrive the DLQ.",
   voice:
     "A voice escalation failed every attempt and was dead-lettered; the member got no call for that tone. Check the voice worker logs (alerting.channel.send_failed), fix the provider, then redrive the DLQ.",
@@ -224,7 +228,7 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     pageAlarm("push-token-invalid-rate-alarm", {
       name: `boxalarm-${env}-alerting-push-token-invalid-rate`,
       alarmDescription:
-        "More than 3 push tokens were rejected as invalid in 5 minutes. Usually a push gateway misconfiguration, not dead devices: check the APNs secret's environment (production for TestFlight/App Store builds, sandbox for Xcode-installed builds) and bundleId, and the FCM service account's project. Members whose token was invalidated get push again after re-opening the app.",
+        "More than 3 push tokens were rejected as invalid in 5 minutes. Usually a push gateway misconfiguration: check the APNs secret's environment (production for TestFlight/App Store builds, sandbox for Xcode-installed builds) and bundleId, and the FCM service account's project. It can also be benign - several members uninstalled or reset their phones at once; if the logs show only those members and the secrets are right, no action is needed. Members whose token was invalidated get push again after re-opening the app.",
       namespace: "Boxalarm/AlertingChannel",
       metricName: "TokenInvalid",
       // deliverChannelMessage emits emitOutcomeMetric(ns, "TokenInvalid", "push") → Reason=push.
@@ -238,7 +242,7 @@ export class AlertingAlarms extends pulumi.ComponentResource {
     pageAlarm("push-mass-invalidation-blocked-alarm", {
       name: `boxalarm-${env}-alerting-push-mass-invalidation-blocked`,
       alarmDescription:
-        "The push worker refused to invalidate more device tokens (too many rejected at once) and is failing those pages instead. Fix the push gateway configuration (APNs environment/bundleId, FCM project); pages will retry and dead-letter until then. SMS still pages in parallel.",
+        "The push worker tripped its mass-invalidation latch (more than 3 tokens rejected within ~10 minutes) and is failing those pages instead of disabling members' push. Usually a push gateway misconfiguration: fix it (APNs environment/bundleId, FCM project), then delete the DEPT#{deptId}#PUSH_TOKEN_INVALIDATION / TRIPPED item in the alerting table (it otherwise expires after 1 hour). It can also be benign - several members uninstalled at once, whose pages could never be delivered; then let the latch expire. Pages retry and dead-letter meanwhile. SMS still pages in parallel.",
       namespace: "Boxalarm/AlertingChannel",
       metricName: "MassInvalidationBlocked",
       dimensions: { Reason: "push" },
