@@ -223,6 +223,23 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
     await expect(send()).resolves.toEqual({ outcome: 'invalid_token', reason });
   });
 
+  it('maps INVALID_ARGUMENT naming the registration token only in its message (no field violation) to invalid-token', async () => {
+    sendReply = {
+      status: 400,
+      body: {
+        error: {
+          status: 'INVALID_ARGUMENT',
+          message: 'The registration token is not a valid FCM registration token',
+          details: [{ errorCode: 'INVALID_ARGUMENT' }],
+        },
+      },
+    };
+    await expect(send()).resolves.toEqual({
+      outcome: 'invalid_token',
+      reason: 'FCM_INVALID_ARGUMENT',
+    });
+  });
+
   it.each([
     [
       '429 QUOTA_EXCEEDED',
