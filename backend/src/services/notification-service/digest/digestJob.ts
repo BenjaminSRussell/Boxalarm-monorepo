@@ -32,6 +32,7 @@ import {
   TODAY_BUCKET,
   type PendingRecipientType,
 } from '../repository.js';
+import { logError } from '../log.js';
 
 const METRIC_NAMESPACE = 'Boxalarm/NotificationDigest';
 
@@ -70,24 +71,6 @@ function isDigestJobPayload(value: unknown): value is DigestJobPayload {
     typeof value === 'object' &&
     value !== null &&
     typeof (value as Record<string, unknown>).deptId === 'string'
-  );
-}
-
-function logError(
-  event: string,
-  error: unknown,
-  correlationId: string,
-  extra: Record<string, unknown> = {},
-): void {
-  console.error(
-    JSON.stringify({
-      event,
-      service: 'notification-service',
-      reason: error instanceof Error ? error.constructor.name : 'UnknownError',
-      message: error instanceof Error ? error.message : undefined,
-      correlationId,
-      ...extra,
-    }),
   );
 }
 

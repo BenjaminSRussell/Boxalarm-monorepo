@@ -11,6 +11,9 @@ import {
   DIGEST_BUCKET,
   isConditionalCheckFailed,
 } from '../repository.js';
+import { logError } from '../log.js';
+
+export { logError };
 
 export const METRIC_NAMESPACE = 'Boxalarm/NotificationDigest';
 
@@ -85,24 +88,6 @@ export function optionalString(
 ): string | undefined {
   const value = payload[field];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-export function logError(
-  event: string,
-  error: unknown,
-  correlationId: string,
-  extra: Record<string, unknown> = {},
-): void {
-  console.error(
-    JSON.stringify({
-      event,
-      service: 'notification-service',
-      reason: error instanceof Error ? error.constructor.name : 'UnknownError',
-      message: error instanceof Error ? error.message : undefined,
-      correlationId,
-      ...extra,
-    }),
-  );
 }
 
 /** What one event becomes: a reminder for its category's roles, and optionally a member. */
