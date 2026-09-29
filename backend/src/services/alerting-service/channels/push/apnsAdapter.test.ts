@@ -196,6 +196,23 @@ describe('sendViaApns over a local HTTP/2 server', () => {
     await expect(send()).resolves.toEqual({ outcome: 'invalid_token', reason });
   });
 
+  it('carries the 410 timestamp so a token re-registered after it is not invalidated', async () => {
+    reply = { status: 410, body: '{"reason":"Unregistered","timestamp":1798000000000}' };
+    await expect(send()).resolves.toEqual({
+      outcome: 'invalid_token',
+      reason: 'APNS_Unregistered',
+      invalidSinceMs: 1798000000000,
+    });
+  });
+
+  it('maps Unregistered with a status other than 410 to invalid-token (no timestamp)', async () => {
+    reply = { status: 400, body: '{"reason":"Unregistered"}' };
+    await expect(send()).resolves.toEqual({
+      outcome: 'invalid_token',
+      reason: 'APNS_Unregistered',
+    });
+  });
+
   it.each([
     [429, '{"reason":"TooManyRequests"}'],
     [500, '{"reason":"InternalServerError"}'],

@@ -204,12 +204,21 @@ export interface SendViaApnsOptions {
   readonly origin?: string;
 }
 
-function apnsReason(body: string): string | undefined {
+interface ApnsErrorBody {
+  readonly reason?: string;
+  /** 410 only: epoch ms at which APNs confirmed the token was no longer valid. */
+  readonly timestamp?: number;
+}
+
+function parseApnsError(body: string): ApnsErrorBody {
   try {
-    const parsed = JSON.parse(body) as { reason?: unknown };
-    return typeof parsed.reason === 'string' ? parsed.reason : undefined;
+    const parsed = JSON.parse(body) as { reason?: unknown; timestamp?: unknown };
+    return {
+      ...(typeof parsed.reason === 'string' ? { reason: parsed.reason } : {}),
+      ...(typeof parsed.timestamp === 'number' ? { timestamp: parsed.timestamp } : {}),
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -279,9 +288,16 @@ async function sendViaApnsOnce(
       ...(typeof apnsId === 'string' ? { providerMessageId: apnsId } : {}),
     };
   }
-  const reason = apnsReason(response.body) ?? 'Unknown';
+  const apnsError = parseApnsError(response.body);
+  const reason = apnsError.reason ?? 'Unknown';
   if (response.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
-    return { outcome: 'invalid_token', reason: `APNS_${reason}` };
+    return {
+      outcome: 'invalid_token',
+      reason: `APNS_${reason}`,
+      ...(response.status === 410 && apnsError.timestamp !== undefined
+        ? { invalidSinceMs: apnsError.timestamp }
+        : {}),
+    };
   }
   const message = `APNs responded ${response.status} ${reason}`;
   if (APNS_AUTH_FAILURES.has(reason)) {

@@ -230,7 +230,15 @@ export async function deliverChannelMessage(
     // A self-test goes to the APNs sandbox host, which rejects every production token: that
     // says nothing about the token's validity for a real page, so it must never disable one.
     if (!isTest) {
-      await invalidateDeadToken(ddb, tableName, deptId, memberId, resolved.target, correlationId);
+      await invalidateDeadToken(
+        ddb,
+        tableName,
+        deptId,
+        memberId,
+        resolved.target,
+        correlationId,
+        result.invalidSinceMs,
+      );
     }
     return;
   }
@@ -284,6 +292,7 @@ async function invalidateDeadToken(
   memberId: string,
   token: string,
   correlationId: string,
+  invalidSinceMs: number | undefined,
 ): Promise<void> {
   try {
     await admitTokenInvalidation(ddb, tableName, deptId, token);
@@ -300,7 +309,9 @@ async function invalidateDeadToken(
     return;
   }
   try {
-    const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token);
+    const outcome = await invalidatePushToken(ddb, tableName, deptId, memberId, token, {
+      ...(invalidSinceMs !== undefined ? { invalidSinceMs } : {}),
+    });
     logInfo('alerting.pushToken.invalidated_by_send', { correlationId, memberId, outcome });
   } catch (error) {
     // The page already failed terminally; a failed invalidation only means the next page

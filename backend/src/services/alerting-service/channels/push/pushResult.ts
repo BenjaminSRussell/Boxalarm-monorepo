@@ -6,7 +6,15 @@
  */
 export type PushSendResult =
   | { readonly outcome: 'sent'; readonly providerMessageId?: string }
-  | { readonly outcome: 'invalid_token'; readonly reason: string }
+  | {
+      readonly outcome: 'invalid_token';
+      readonly reason: string;
+      /**
+       * APNs 410 only: when (epoch ms) APNs last knew the token to be invalid. A device that
+       * re-registered the same token after this has a live token again.
+       */
+      readonly invalidSinceMs?: number;
+    }
   /**
    * Self-test/canary only: the gateway refused the message for a configuration reason (sender
    * or topic mismatch, credentials) rather than a dead token. Terminal and non-invalidating:

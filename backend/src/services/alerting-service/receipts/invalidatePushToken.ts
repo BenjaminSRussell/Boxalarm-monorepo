@@ -7,6 +7,7 @@ interface ContactChannelSnapshot {
   readonly platform?: string;
   readonly token?: string;
   readonly valid?: boolean;
+  readonly registeredAt?: number;
 }
 
 /**
@@ -21,14 +22,15 @@ export const PERMANENT_INVALID_TOKEN_CODES: ReadonlySet<string> = new Set([
   'INVALID_ARGUMENT',
 ]);
 
-export type InvalidatePushTokenResult = 'invalidated' | 'no_match';
+export type InvalidatePushTokenResult = 'invalidated' | 'no_match' | 'reregistered';
 
 const MAX_ATTEMPTS = 3;
 
 /**
  * Marks the member's PUSH contact entry `valid: false` in the alerting eligibility snapshot,
  * but only while that entry still carries `token` — a device that re-registered a fresh token
- * in the meantime must not be disabled by a rejection of its old one. Every other channel is
+ * in the meantime must not be disabled by a rejection of its old one, and neither must a device
+ * that re-registered the same token after APNs last saw it invalid (the 410 race). Every other channel is
  * preserved. Guarded on snapshotUpdatedAt so a concurrent snapshot write is never overwritten;
  * a lost race re-reads and retries.
  */
@@ -38,6 +40,13 @@ export async function invalidatePushToken(
   deptId: VerifiedDeptId,
   memberId: string,
   token: string,
+  options: {
+    /**
+     * When the gateway last knew the token to be invalid (APNs 410 `timestamp`). An entry
+     * registered at or after it was re-registered by a live device and is left alone.
+     */
+    readonly invalidSinceMs?: number;
+  } = {},
 ): Promise<InvalidatePushTokenResult> {
   assertNoDelimiter(memberId, 'memberId');
   const pk = buildDeptScopedPk(deptId, 'ELIGIBILITY');
@@ -50,6 +59,13 @@ export async function invalidatePushToken(
     const pushEntry = currentChannels.find((entry) => entry.channel === 'PUSH');
     if (!existing.Item || !pushEntry || pushEntry.token !== token) {
       return 'no_match';
+    }
+    if (
+      options.invalidSinceMs !== undefined &&
+      typeof pushEntry.registeredAt === 'number' &&
+      pushEntry.registeredAt >= options.invalidSinceMs
+    ) {
+      return 'reregistered';
     }
 
     const snapshotUpdatedAt = existing.Item.snapshotUpdatedAt as number | undefined;
