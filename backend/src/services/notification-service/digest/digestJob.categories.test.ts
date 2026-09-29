@@ -72,6 +72,7 @@ interface Harness {
 async function run(
   pending: Row[],
   mutes: Record<string, { push: boolean; email: boolean }> = {},
+  roster: Row[] = ROSTER,
 ): Promise<Harness & { processed: number }> {
   const puts: Row[] = [];
   const prefReads: string[] = [];
@@ -82,7 +83,7 @@ async function run(
       if (values[':gsi3pk'].includes('DIGEST_PENDING')) {
         return Promise.resolve({ Items: pending });
       }
-      return Promise.resolve({ Items: ROSTER });
+      return Promise.resolve({ Items: roster });
     }
     if (name === 'GetCommand') {
       const key = command.input.Key as { pk: string; sk: string };
@@ -326,5 +327,21 @@ describe('digestJob across reminder categories', () => {
     expect(
       logSpy.mock.calls.some((call) => String(call[0]).includes('DigestPendingRowMalformed')),
     ).toBe(true);
+  });
+
+  it('routes nothing to a role holder who is on leave or retired', async () => {
+    const roster = [
+      { memberId: 'ACTIVE-1', roles: ['APPARATUS'], status: 'ACTIVE', email: 'a@example.com' },
+      { memberId: 'PROB-1', roles: ['APPARATUS'], status: 'PROBATIONARY', email: 'p@example.com' },
+      { memberId: 'LOA-1', roles: ['APPARATUS'], status: 'LOA', email: 'l@example.com' },
+      { memberId: 'RET-1', roles: ['APPARATUS'], status: 'RETIRED', email: 'r@example.com' },
+    ];
+    const { push } = await run(
+      [roleRow('APPARATUS', 'inventory-reorder', item('GLOVES-L'))],
+      {},
+      roster,
+    );
+
+    expect(pushedTo(push)).toEqual(['ACTIVE-1:inventory-reorder', 'PROB-1:inventory-reorder']);
   });
 });

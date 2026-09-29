@@ -2,13 +2,20 @@ import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from '@aws-sdk/
 import { buildDeptScopedPk, type VerifiedDeptId } from '@boxalarm/dept-scope';
 import { parsePreferenceItem, type NotificationChannelMutes } from '../repository.js';
 
+/**
+ * personnel-service statuses (statusTransitions.ts) whose holders receive no role-routed
+ * reminder: a member on leave or retired keeps their roles on the record but is not the
+ * one who should act on a department's apparatus, supplies or certifications.
+ */
+const INACTIVE_STATUSES: ReadonlySet<string> = new Set(['LOA', 'RETIRED']);
+
 export interface RosterMember {
   readonly memberId: string;
   readonly email?: string | undefined;
   readonly roles: readonly string[];
 }
 
-/** The department roster (personnel-service member rows on GSI3), every page. */
+/** The department's active roster (personnel-service member rows on GSI3), every page. */
 export async function loadRoster(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -27,7 +34,7 @@ export async function loadRoster(
       }),
     );
     for (const item of result.Items ?? []) {
-      if (typeof item.memberId !== 'string') {
+      if (typeof item.memberId !== 'string' || INACTIVE_STATUSES.has(item.status as string)) {
         continue;
       }
       members.push({
