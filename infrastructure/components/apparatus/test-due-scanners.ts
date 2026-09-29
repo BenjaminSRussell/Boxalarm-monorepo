@@ -3,7 +3,7 @@ import * as aws from "@pulumi/aws";
 import { ServiceLambda } from "../observability/service-lambda";
 import { ServiceLogGroup } from "../observability/service-log-group";
 import { auditMutationDenyStatement } from "../data/platform-table";
-import { dailyScanner } from "../inventory/daily-scanner";
+import { dailyScanner, PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION } from "../inventory/daily-scanner";
 import { lambdaCode, LAMBDA_HANDLER } from "../shared/lambda-code";
 import { requireEnv } from "../shared/env";
 
@@ -22,7 +22,7 @@ export interface TestDueScannersArgs {
  * notification-service's 12:00 UTC digest, so a test that falls due today is in today's
  * digest rather than tomorrow's.
  */
-export const TEST_DUE_SCANNER_SCHEDULE_EXPRESSION = "cron(0 10 * * ? *)";
+export const TEST_DUE_SCANNER_SCHEDULE_EXPRESSION = PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION;
 
 /**
  * F4.6/F4.7: the two daily apparatus scanners that publish apparatus.test.due to

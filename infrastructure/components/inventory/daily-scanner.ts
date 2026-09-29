@@ -2,6 +2,13 @@ import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import { ServiceLambda } from "../observability/service-lambda";
 
+/**
+ * For a scanner whose events become notification-service digest reminders: 10:00 UTC, with
+ * training's cert-expiry scanner (certifications.ts) and two hours before the 12:00 UTC
+ * digest (notification/digest.ts), so what falls due today is in today's digest.
+ */
+export const PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION = "cron(0 10 * * ? *)";
+
 export interface DailyScannerResources {
   schedule: aws.scheduler.Schedule;
   dlq: aws.sqs.Queue;

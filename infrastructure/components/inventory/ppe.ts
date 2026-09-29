@@ -7,7 +7,7 @@ import { verifiedPermissionsPolicyStatement } from "../authz/policy-store";
 import { auditMutationDenyStatement } from "../data/platform-table";
 import { lambdaCode, LAMBDA_HANDLER } from "../shared/lambda-code";
 import { requireEnv } from "../shared/env";
-import { dailyScanner } from "./daily-scanner";
+import { dailyScanner, PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION } from "./daily-scanner";
 
 export interface PpeArgs {
   env: string;
@@ -162,6 +162,8 @@ export class Ppe extends pulumi.ComponentResource {
       env,
       "inventory-ppe-expiry-scanner",
       this.expiryScannerLambda,
+      // Its reminders feed the 12:00 UTC digest.
+      PRE_DIGEST_SCANNER_SCHEDULE_EXPRESSION,
     ).schedule;
 
     this.registerOutputs({

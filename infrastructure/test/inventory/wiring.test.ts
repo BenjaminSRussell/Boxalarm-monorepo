@@ -279,6 +279,9 @@ describe("inventory Lambdas: routes, env and IAM match their handlers", { timeou
       expect(target.arn).toBe(`arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${functionName}`);
       // The handler uses event.id as its correlationId; Scheduler fills it per run.
       expect(JSON.parse(target.input ?? "{}")).toEqual({ id: "<aws.scheduler.execution-id>" });
+      // Pinned before the 12:00 UTC digest its reminders feed (review minor 3), not rate(1 day).
+      expect(schedule?.inputs.scheduleExpression).toBe("cron(0 10 * * ? *)");
+      expect(schedule?.inputs.scheduleExpressionTimezone).toBe("UTC");
       expect(target.retryPolicy?.maximumRetryAttempts).toBe(3);
       const dlqArn = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:boxalarm-dev-${baseName}-dlq`;
       expect(target.deadLetterConfig?.arn).toBe(dlqArn);
