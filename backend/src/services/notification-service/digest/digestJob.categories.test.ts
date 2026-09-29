@@ -308,4 +308,23 @@ describe('digestJob across reminder categories', () => {
     expect(pushedTo(push)).toEqual(['TRN-1:cert-expiry-officer']);
     expect(prefReads).toEqual([]);
   });
+
+  it('logs and counts a malformed pending row instead of dropping it silently', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { push } = await run([
+      { recipientType: 'MEMBER', recipientId: 'FF-1', category: 'apparatus-test-due' },
+      memberRow('FF-1', 'ppe-expiry', item('FF-1:HELMET')),
+    ]);
+
+    expect(pushedTo(push)).toEqual(['FF-1:ppe-expiry']);
+    expect(
+      errorSpy.mock.calls.some((call) =>
+        String(call[0]).includes('notification.digest.malformed_pending_row'),
+      ),
+    ).toBe(true);
+    expect(
+      logSpy.mock.calls.some((call) => String(call[0]).includes('DigestPendingRowMalformed')),
+    ).toBe(true);
+  });
 });

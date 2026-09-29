@@ -373,9 +373,27 @@ export const handler = async (payload: unknown): Promise<{ processed: number }> 
     return { processed: 0 };
   }
 
-  const pending = pendingItems
-    .map(normalize)
-    .filter((row): row is PendingReminder => row !== undefined);
+  const pending: PendingReminder[] = [];
+  for (const row of pendingItems) {
+    const reminder = normalize(row);
+    if (reminder) {
+      pending.push(reminder);
+      continue;
+    }
+    // A row with neither an item nor the legacy cert fields cannot be rendered; say so
+    // rather than letting a reminder vanish.
+    logError(
+      'notification.digest.malformed_pending_row',
+      new Error('pending row has no item'),
+      correlationId,
+      {
+        recipientType: row.recipientType,
+        recipientId: row.recipientId,
+        category: row.category,
+      },
+    );
+    emitOutcomeMetric(METRIC_NAMESPACE, 'DigestPendingRowMalformed');
+  }
   const deliveries = await planDeliveries(ddb, tableName, deptId, pending, correlationId);
 
   let processed = 0;
