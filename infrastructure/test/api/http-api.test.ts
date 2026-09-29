@@ -201,6 +201,9 @@ describe("HttpApi", () => {
     expect(principal).toBe("apigateway.amazonaws.com");
     expect(action).toBe("lambda:InvokeFunction");
     expect(fnName).toBe("boxalarm-dev-platform-authorizer");
+    // The bundle's handler string: the backend authorizer when bundled, else the deny stub
+    // (served as index.js under the same handler) - never the old stub-only wiring.
+    expect(await resolve(api.authorizerLambda.function.handler)).toBe("index.handler");
     expect(envVars?.variables?.COGNITO_USER_POOL_ID).toBe("us-east-1_pool");
     expect(envVars?.variables?.COGNITO_ISSUER).toBe(
       "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",

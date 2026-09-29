@@ -1,5 +1,5 @@
-// Fail-closed placeholder until backend authorizer artifact is packaged.
-// Real handler: boxalarm-backend platform-service/authorizer
+// Fail-closed fallback, deployed ONLY when backend/dist has no platform-service/authorizer
+// bundle (lambdaCode warns). The real handler is backend platform-service/authorizer.
 exports.handler = async (event) => {
   console.log(
     JSON.stringify({

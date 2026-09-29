@@ -18,14 +18,23 @@ const BACKEND_DIST_ROOT = path.resolve(__dirname, "../../../backend/dist");
  * `pulumi preview`/`pulumi up` output) instead of failing quietly. Run
  * `cd backend && npm run bundle` before deploying — see infrastructure/README.md.
  */
-export function lambdaCode(service: string, functionName: string): pulumi.asset.Archive {
+export function lambdaCode(
+  service: string,
+  functionName: string,
+  /**
+   * Replaces the 501 placeholder for a function that isn't an HTTP route handler - e.g. the
+   * API authorizer, where a 501 body is not a valid authorizer response and API Gateway would
+   * answer 500 instead of a clean deny. Must still fail closed and use LAMBDA_HANDLER.
+   */
+  fallback?: () => pulumi.asset.Archive,
+): pulumi.asset.Archive {
   const dir = path.join(BACKEND_DIST_ROOT, service, functionName);
   if (fs.existsSync(path.join(dir, "index.mjs"))) {
     return new pulumi.asset.FileArchive(dir);
   }
   pulumi.log.warn(
     `lambdaCode: no bundle found for ${service}/${functionName} at ${dir} — ` +
-      `deploying the fail-closed 501 placeholder instead. Run "cd backend && npm run bundle" first.`,
+      `deploying the fail-closed ${fallback ? "fallback" : "501 placeholder"} instead. Run "cd backend && npm run bundle" first.`,
   );
-  return placeholderLambdaCode();
+  return fallback ? fallback() : placeholderLambdaCode();
 }

@@ -23,6 +23,28 @@ describe("lambdaCode (shared)", () => {
     expect(code).not.toBeInstanceOf(pulumi.asset.FileArchive);
   });
 
+  it("uses the caller's fallback instead of the 501 placeholder when given one (authorizer)", () => {
+    existsSync.mockReturnValue(false);
+    const warnSpy = vi.spyOn(pulumi.log, "warn").mockResolvedValue();
+    const fallback = new pulumi.asset.AssetArchive({});
+
+    const code = lambdaCode("platform-service", "authorizer", () => fallback);
+
+    expect(code).toBe(fallback);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("fail-closed fallback"));
+    warnSpy.mockRestore();
+  });
+
+  it("ignores the fallback when the bundle exists", () => {
+    existsSync.mockReturnValue(true);
+    const fallback = vi.fn();
+
+    const code = lambdaCode("platform-service", "authorizer", fallback);
+
+    expect(code).toBeInstanceOf(pulumi.asset.FileArchive);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
   it("logs a Pulumi warning when falling back to the placeholder, so a missing bundle is loud", async () => {
     existsSync.mockReturnValue(false);
     const warnSpy = vi.spyOn(pulumi.log, "warn").mockResolvedValue();

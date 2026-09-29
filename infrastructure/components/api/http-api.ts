@@ -4,6 +4,7 @@ import * as aws from "@pulumi/aws";
 import { ServiceLambda } from "../observability/service-lambda";
 import { ServiceLogGroup, RETENTION_DAYS_BY_ENV } from "../observability/service-log-group";
 import { requireEnv } from "../shared/env";
+import { LAMBDA_HANDLER, lambdaCode } from "../shared/lambda-code";
 
 export interface HttpApiArgs {
   env: string;
@@ -34,9 +35,20 @@ export interface HttpApiArgs {
 
 /**
  * Shared HTTP API + REQUEST Lambda authorizer (E8-S1-INFRA). Routes and
- * integrations are owned by later stories; this component owns the API shell,
- * default authorizer, and fail-closed stub until the backend artifact ships.
+ * integrations are owned by later stories; this component owns the API shell and
+ * the authorizer: the bundled backend platform-service/authorizer (Cognito
+ * access-token verification), or - only when no bundle exists - the deny-all stub.
  */
+
+/**
+ * The deny-all stub, served as index.js so it uses the same handler string as the bundle.
+ * Only ever deployed when backend/dist has no authorizer bundle (lambdaCode warns).
+ */
+function denyAllAuthorizerCode(): pulumi.asset.Archive {
+  return new pulumi.asset.AssetArchive({
+    "index.js": new pulumi.asset.FileAsset(path.join(__dirname, "authorizer-handler.js")),
+  });
+}
 export class HttpApi extends pulumi.ComponentResource {
   public readonly httpApi: aws.apigatewayv2.Api;
   public readonly authorizer: aws.apigatewayv2.Authorizer;
@@ -75,12 +87,10 @@ export class HttpApi extends pulumi.ComponentResource {
         env,
         serviceName: "platform-service",
         functionName: `boxalarm-${env}-platform-authorizer`,
-        handler: "authorizer-handler.handler",
-        code: new pulumi.asset.AssetArchive({
-          "authorizer-handler.js": new pulumi.asset.FileAsset(
-            path.join(__dirname, "authorizer-handler.js"),
-          ),
-        }),
+        handler: LAMBDA_HANDLER,
+        // Until this was wired, the stub denied 100% of requests: every authenticated route
+        // in the stack answered 403.
+        code: lambdaCode("platform-service", "authorizer", denyAllAuthorizerCode),
         logGroup: args.platformLogGroup,
         environment: {
           COGNITO_USER_POOL_ID: args.userPoolId,
@@ -105,7 +115,8 @@ export class HttpApi extends pulumi.ComponentResource {
         authorizerPayloadFormatVersion: "2.0",
         enableSimpleResponses: true,
         identitySources: ["$request.header.Authorization"],
-        // Fail-closed stub: never cache an allow decision (0 once real authorizer ships too).
+        // Never cache an allow decision: a revoked session (the only control that ends
+        // access - sessions never expire) must stop working on the next request.
         authorizerResultTtlInSeconds: 0,
       },
       { parent: this },
@@ -122,9 +133,8 @@ export class HttpApi extends pulumi.ComponentResource {
       { parent: this },
     );
 
-    // With a fail-closed authorizer denying 100% of requests today, operators would
-    // otherwise have zero record of caller activity — no 401 rate, nothing to
-    // correlate against the authorizer's own logs.
+    // Caller activity record - status, route and authorizer error - to correlate against
+    // the authorizer's own deny-reason metrics.
     this.accessLogGroup = new aws.cloudwatch.LogGroup(
       `${name}-access-logs`,
       {

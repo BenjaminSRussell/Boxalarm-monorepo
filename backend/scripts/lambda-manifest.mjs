@@ -3,6 +3,12 @@
 // infrastructure's lambdaCode() helper looks up that same key.
 export const LAMBDA_ENTRIES = [
   {
+    // The HTTP API's REQUEST authorizer (infrastructure/components/api/http-api.ts).
+    service: 'platform-service',
+    function: 'authorizer',
+    entry: 'src/services/platform-service/authorizer/handler.ts',
+  },
+  {
     service: 'platform-service',
     function: 'credential-recovery-monitor',
     entry: 'src/services/platform-service/credential-recovery-monitor/handler.ts',

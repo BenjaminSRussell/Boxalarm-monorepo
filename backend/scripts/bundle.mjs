@@ -18,6 +18,9 @@ await Promise.all(
       format: 'esm',
       sourcemap: true,
       minify: true,
+      // Handlers report error.constructor.name (e.g. the authorizer's deny reason separating a
+      // JWKS outage from token expiry); minification would mangle every class name.
+      keepNames: true,
       external: ['@aws-sdk/*'],
       banner: {
         js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
