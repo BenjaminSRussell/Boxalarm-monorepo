@@ -6,8 +6,8 @@ const originalEnv = { ...process.env };
 beforeEach(() => {
   vi.resetModules();
   process.env.ALERTING_TABLE_NAME = 'alerting-table';
-  process.env.PUSH_PROVIDER_ENDPOINT_URL = 'https://push.example';
-  process.env.PUSH_PROVIDER_SECRET_ID = 'push-secret';
+  process.env.APNS_SECRET_ID = 'apns-secret';
+  process.env.FCM_SECRET_ID = 'fcm-secret';
   process.env.SMS_PROVIDER_ENDPOINT_URL = 'https://sms.example';
   process.env.SMS_PROVIDER_SECRET_ID = 'sms-secret';
   process.env.VOICE_PROVIDER_ENDPOINT_URL = 'https://voice.example';
@@ -79,6 +79,26 @@ function mockDeps(sendFor: Record<string, () => Promise<void>>): {
   vi.doMock('../src/services/alerting-service/channels/httpProviderAdapter.js', () => ({
     sendViaHttpProvider: sendMock,
   }));
+  // Push goes to APNs/FCM directly; fault-inject it through the same per-channel switch.
+  vi.doMock(
+    '../src/services/alerting-service/channels/push/pushProviderAdapter.js',
+    async (importOriginal) => ({
+      ...(await importOriginal<
+        typeof import('../src/services/alerting-service/channels/push/pushProviderAdapter.js')
+      >()),
+      sendPush: async (
+        notification: { token: string; body: string },
+        _platform: string,
+        env: unknown,
+        options: { isTest?: boolean },
+      ) => {
+        await sendMock('push', notification.token, notification.body, env, {
+          isTest: options.isTest === true,
+        });
+        return { outcome: 'sent' as const };
+      },
+    }),
+  );
   return { sendMock, ddbSendMock };
 }
 

@@ -28,7 +28,7 @@ const prompt: PushNotification = {
 };
 
 describe('push payloads', () => {
-  // The architecture reserves the non-critical push channel for notification-service (LOB
+  // The architecture reserves the non-critical push channel for the LOB notification service (LOB
   // plane); nothing on the alerting plane — the mutual-aid prompt included — is non-critical.
   it.each([
     ['a dispatch page', dispatch],

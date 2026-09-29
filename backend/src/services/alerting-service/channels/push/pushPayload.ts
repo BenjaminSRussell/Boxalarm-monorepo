@@ -22,7 +22,7 @@ export interface PushNotification {
  * Every alerting-plane push is a dispatch-class alert. The mobile app routes anything but
  * `category: 'digest'` to its critical `dispatch-critical` channel (ui/apps/mobile
  * pushChannel.ts); the officer mutual-aid prompt is critical too — the architecture reserves
- * the non-critical channel for notification-service (LOB plane), never for this worker.
+ * the non-critical channel for the LOB-plane notification service, never for this worker.
  */
 export const PUSH_CATEGORY = 'dispatch';
 

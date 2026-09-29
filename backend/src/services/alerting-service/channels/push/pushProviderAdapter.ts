@@ -16,7 +16,7 @@ const APNS_DEVICE_TOKEN = /^[0-9a-f]{64}$/i;
 
 /**
  * Which gateway a registered token belongs to. The app registers `{ platform: 'APNS' }` with
- * the raw APNs device token on iOS and `{ platform: 'FCM' }` on Android (personnel-service
+ * the raw APNs device token on iOS and `{ platform: 'FCM' }` on Android (the personnel plane's
  * registerToken.ts). An entry with no platform falls back on the token's shape: a raw APNs
  * token is 64 hex characters, an FCM registration token never is.
  */
