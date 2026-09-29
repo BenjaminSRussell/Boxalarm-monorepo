@@ -21,6 +21,10 @@ export interface DailyScannerResources {
  * The scanners' handlers take a ScheduledEvent and use `event.id` as their correlationId.
  * A Scheduler Lambda target receives only `input`, so the execution id is passed as `id`
  * via Scheduler's context-attribute substitution rather than leaving it undefined.
+ *
+ * `scheduleExpression` defaults to rate(1 day), whose run time is whenever the schedule was
+ * created. A scanner whose events feed notification-service's 12:00 UTC digest passes a
+ * cron pinned before it (UTC), so the day's reminders make that day's digest.
  */
 export function dailyScanner(
   parent: pulumi.ComponentResource,
@@ -28,6 +32,7 @@ export function dailyScanner(
   env: string,
   baseName: string,
   lambda: ServiceLambda,
+  scheduleExpression = "rate(1 day)",
 ): DailyScannerResources {
   const opts = { parent };
 
@@ -110,7 +115,8 @@ export function dailyScanner(
     `${name}-schedule`,
     {
       name: `boxalarm-${env}-${baseName}-daily`,
-      scheduleExpression: "rate(1 day)",
+      scheduleExpression,
+      ...(scheduleExpression.startsWith("cron(") ? { scheduleExpressionTimezone: "UTC" } : {}),
       flexibleTimeWindow: { mode: "OFF" },
       target: {
         arn: lambda.function.arn,

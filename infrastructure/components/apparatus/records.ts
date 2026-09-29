@@ -9,8 +9,8 @@ import { ApparatusArgs, apparatusRoute } from "./apparatus-lambda";
  * apparatusId (the web MaintenanceTab passes unit.apparatusId, and getMaintenance.ts /
  * postMaintenance.ts key on it directly), so neither needs the GSI3 unitId lookup.
  *
- * NOT wired: the daily apparatusTestingScanner/testDueScanner Lambdas (no HTTP route; a
- * separate scheduled slice).
+ * The daily apparatusTestingScanner/testDueScanner Lambdas have no HTTP route; they are
+ * scheduled in test-due-scanners.ts.
  */
 export class Records extends pulumi.ComponentResource {
   public readonly maintenanceGetLambda: ServiceLambda;

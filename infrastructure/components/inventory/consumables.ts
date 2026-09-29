@@ -27,9 +27,8 @@ export interface ConsumablesArgs {
  * every role) and the daily reorder scanner that publishes inventory.reorder.due.
  *
  * Not wired: PUT /api/v1/inventory/consumables/{itemId} (architecture §2, N-9) has no
- * handler in backend/, so there is nothing to deploy. inventory.reorder.due has no
- * EventBridge rule/consumer yet — notification-service's inventoryReorderDueConsumer is
- * undeployed — so events reach the bus and go nowhere until that service ships.
+ * handler in backend/, so there is nothing to deploy. inventory.reorder.due is consumed by
+ * notification-service (notification/reminders.ts) as an inventory-reorder digest reminder.
  */
 export class Consumables extends pulumi.ComponentResource {
   public readonly listLambda: ServiceLambda;
