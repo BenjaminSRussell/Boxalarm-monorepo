@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { captureAWSv3Client } from 'aws-xray-sdk-core';
+import { ALERTING_SDK_CLIENT_CONFIG } from '../awsClientConfig.js';
 
 export interface AlertingConfig {
   readonly tableName: string;
@@ -22,6 +23,7 @@ export function createDynamoClient(
 ): DynamoDBDocumentClient {
   readAlertingConfig(env);
   cachedClient ??=
-    client ?? DynamoDBDocumentClient.from(captureAWSv3Client(new DynamoDBClient({})));
+    client ??
+    DynamoDBDocumentClient.from(captureAWSv3Client(new DynamoDBClient(ALERTING_SDK_CLIENT_CONFIG)));
   return cachedClient;
 }

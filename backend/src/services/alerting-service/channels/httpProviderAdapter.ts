@@ -1,11 +1,13 @@
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { captureAWSv3Client } from 'aws-xray-sdk-core';
+import { ALERTING_SDK_CLIENT_CONFIG } from '../awsClientConfig.js';
 import type { ChannelName } from './channelEnvelope.js';
 
 let cachedSecretsClient: SecretsManagerClient | undefined;
 
 export function createChannelSecretsClient(client?: SecretsManagerClient): SecretsManagerClient {
-  cachedSecretsClient ??= client ?? captureAWSv3Client(new SecretsManagerClient({}));
+  cachedSecretsClient ??=
+    client ?? captureAWSv3Client(new SecretsManagerClient(ALERTING_SDK_CLIENT_CONFIG));
   return cachedSecretsClient;
 }
 
