@@ -178,6 +178,24 @@ describe("AlertingAlarms — every alert-path failure mode pages", { timeout: 30
     }
   });
 
+  // Review minor 2: production gateway misconfigurations dead-letter on purpose; the page must
+  // say so, so on-call fixes the secret instead of chasing a vendor outage.
+  it("the push DLQ page names the configuration faults that dead-letter on purpose", async () => {
+    await build();
+    const description = String(
+      alarmByName("boxalarm-dev-alerting-push-dlq-not-empty").inputs.alarmDescription,
+    );
+    for (const cause of [
+      "DeviceTokenNotForTopic",
+      "SENDER_ID_MISMATCH",
+      "credentials",
+      "environment",
+      "redrive",
+    ]) {
+      expect(description).toContain(cause);
+    }
+  });
+
   it("gives every alarm it owns a page action", async () => {
     await build();
     const alarms = resourcesOfType("aws:cloudwatch/metricAlarm:MetricAlarm");

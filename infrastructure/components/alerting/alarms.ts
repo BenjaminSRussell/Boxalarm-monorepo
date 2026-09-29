@@ -33,6 +33,24 @@ export const ALERTING_PAGE_EMAIL_CONFIG_KEY = "alertingPageEmail";
  * REQUIRED in prod — a prod stack whose alerting alarms page nobody fails preview — and
  * warned about at preview/up time in every other stack.
  */
+/**
+ * What a message in each channel DLQ means. Every page in a DLQ failed all its attempts. The
+ * push text names the configuration faults that deliberately dead-letter instead of being
+ * swallowed (review minor 2): a misconfigured stack must page, not fail quietly.
+ */
+const DLQ_ALARM_DESCRIPTION: Record<AlertingChannel, string> = {
+  push:
+    "A push page failed every attempt and was dead-lettered; the member got no push for that tone (SMS runs in parallel). " +
+    "Check the push worker logs (alerting.channel.send_failed) for the gateway reason. Configuration faults dead-letter on purpose: " +
+    "APNs DeviceTokenNotForTopic/BadTopic/TopicDisallowed (bundleId in the APNs secret does not match the app), " +
+    "FCM SENDER_ID_MISMATCH (service account from a different Firebase project than the app), credentials still refused after the in-process retry " +
+    "(rotated/revoked .p8 key or service account), a mass token invalidation being blocked (APNs secret environment does not match the app builds), " +
+    "or an unset push secret. Fix the secret, then redrive the DLQ.",
+  sms: "An SMS page failed every attempt and was dead-lettered; the member got no SMS for that tone. Check the sms worker logs (alerting.channel.send_failed), fix the provider, then redrive the DLQ.",
+  voice:
+    "A voice escalation failed every attempt and was dead-lettered; the member got no call for that tone. Check the voice worker logs (alerting.channel.send_failed), fix the provider, then redrive the DLQ.",
+};
+
 export class AlertingAlarms extends pulumi.ComponentResource {
   public readonly pageTopic: aws.sns.Topic;
   public readonly pageSubscription?: aws.sns.TopicSubscription;
@@ -251,6 +269,7 @@ export class AlertingAlarms extends pulumi.ComponentResource {
         `${name}-${channel}-dlq-alarm`,
         {
           name: `boxalarm-${env}-alerting-${channel}-dlq-not-empty`,
+          alarmDescription: DLQ_ALARM_DESCRIPTION[channel],
           namespace: "AWS/SQS",
           metricName: "ApproximateNumberOfMessagesVisible",
           dimensions: { QueueName: dlq.name },
