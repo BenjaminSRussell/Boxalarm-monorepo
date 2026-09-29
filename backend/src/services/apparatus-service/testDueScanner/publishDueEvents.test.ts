@@ -69,6 +69,7 @@ describe('publishDueEvent', () => {
       apparatusId: 'APP-ENGINE-2',
       testType: 'HOSE',
       dueDate: '2027-05-01',
+      deptId: 'NICHOLS',
     });
     expect(ddbSend.mock.calls.some((c: unknown[]) => c[0] instanceof UpdateCommand)).toBe(true);
   });
