@@ -82,7 +82,35 @@ export async function sendPush(
  * unreadable, so FCM then falls back to its own secret's `apnsInterruptionLevel`, then
  * `critical`. The read is cached and coalesced like every other credential read.
  */
+/**
+ * How long the Android path trusts the APNs-level lookup, success or failure. On an
+ * Android-only stack, or while the APNs secret is unreadable or throttled, every Android page
+ * would otherwise make one more failing Secrets Manager call. That time falls outside the 8s
+ * send budget, and SDK retry backoff adds to it during throttling.
+ */
+export const APNS_LEVEL_LOOKUP_TTL_MS = 60_000;
+
+const apnsLevelLookups = new Map<
+  string,
+  { readonly level: Promise<ApnsInterruptionLevel | undefined>; readonly expiresAt: number }
+>();
+
 async function apnsInterruptionLevelFor(
+  env: NodeJS.ProcessEnv,
+  isTest: boolean,
+  secretsClient: SecretsManagerClient,
+): Promise<ApnsInterruptionLevel | undefined> {
+  const key = `${isTest ? 'sandbox' : 'prod'}#${env[isTest ? 'APNS_SANDBOX_SECRET_ID' : 'APNS_SECRET_ID'] ?? ''}`;
+  const cached = apnsLevelLookups.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.level;
+  }
+  const level = lookUpApnsInterruptionLevel(env, isTest, secretsClient);
+  apnsLevelLookups.set(key, { level, expiresAt: Date.now() + APNS_LEVEL_LOOKUP_TTL_MS });
+  return level;
+}
+
+async function lookUpApnsInterruptionLevel(
   env: NodeJS.ProcessEnv,
   isTest: boolean,
   secretsClient: SecretsManagerClient,

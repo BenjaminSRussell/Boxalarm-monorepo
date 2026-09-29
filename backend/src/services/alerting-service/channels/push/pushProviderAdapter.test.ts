@@ -329,3 +329,62 @@ describe('one interruption level for both gateways (review round 2 m9)', () => {
     ).resolves.toBe('critical');
   });
 });
+
+describe('the Android path caches the APNs-level lookup, failures included (review round 3 R3-1)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('an unreadable APNs secret is tried once per minute, not once per Android page', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { sendPush, APNS_LEVEL_LOOKUP_TTL_MS } = await import('./pushProviderAdapter.js');
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({
+      type: 'pkcs8',
+      format: 'pem',
+    });
+    const reads: string[] = [];
+    const client = {
+      send: vi.fn((command: { input: { SecretId: string } }) => {
+        reads.push(command.input.SecretId);
+        return command.input.SecretId === 'fcm-prod'
+          ? Promise.resolve({
+              SecretString: JSON.stringify({
+                project_id: 'p',
+                client_email: 'sa@p.iam.gserviceaccount.com',
+                private_key: rsa.toString(),
+              }),
+            })
+          : Promise.reject(new Error('AccessDeniedException'));
+      }),
+    } as unknown as SecretsManagerClient;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url: string | URL | Request) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            (url as string).endsWith('/token')
+              ? { access_token: 'a', expires_in: 3599 }
+              : { name: 'm' },
+          ),
+          { status: 200 },
+        ),
+      ),
+    );
+    const page = () =>
+      sendPush({ ...notification, token: 'fcm' }, 'FCM', env, {
+        secretsClient: client,
+        fcmOrigin: 'https://fcm.test',
+        oauthTokenUrl: 'https://oauth.test/token',
+      });
+    const apnsReads = () => reads.filter((id) => id === 'apns-prod').length;
+
+    await expect(page()).resolves.toMatchObject({ outcome: 'sent' });
+    await expect(page()).resolves.toMatchObject({ outcome: 'sent' });
+    await expect(page()).resolves.toMatchObject({ outcome: 'sent' });
+    expect(apnsReads()).toBe(1);
+
+    vi.setSystemTime(Date.now() + APNS_LEVEL_LOOKUP_TTL_MS + 1_000);
+    await expect(page()).resolves.toMatchObject({ outcome: 'sent' });
+    expect(apnsReads()).toBe(2);
+  });
+});
