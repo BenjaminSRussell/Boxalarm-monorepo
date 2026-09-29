@@ -79,6 +79,8 @@ describe('sendViaApns over a local HTTP/2 server', () => {
   let origin: string;
   const captured: Captured[] = [];
   let reply: { status: number; body?: string } = { status: 200 };
+  /** One-shot replies consumed before `reply`, for in-process retry sequences. */
+  const replyQueue: { status: number; body?: string }[] = [];
 
   beforeAll(async () => {
     server = createServer();
@@ -87,9 +89,10 @@ describe('sendViaApns over a local HTTP/2 server', () => {
       stream.on('data', (chunk: Buffer) => chunks.push(chunk));
       stream.on('end', () => {
         captured.push({ headers, body: Buffer.concat(chunks).toString('utf8') });
-        if (reply.status === 0) return; // never answer: exercise the timeout
-        stream.respond({ ':status': reply.status, 'apns-id': String(headers['apns-id']) });
-        stream.end(reply.body ?? '');
+        const next = replyQueue.shift() ?? reply;
+        if (next.status === 0) return; // never answer: exercise the timeout
+        stream.respond({ ':status': next.status, 'apns-id': String(headers['apns-id']) });
+        stream.end(next.body ?? '');
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -104,6 +107,7 @@ describe('sendViaApns over a local HTTP/2 server', () => {
   afterEach(() => {
     captured.length = 0;
     reply = { status: 200 };
+    replyQueue.length = 0;
     resetPushCredentialCaches();
   });
 
@@ -204,19 +208,65 @@ describe('sendViaApns over a local HTTP/2 server', () => {
     await expect(send()).rejects.toThrow(`APNs responded ${status}`);
   });
 
-  it('discards the cached provider token on ExpiredProviderToken so the redelivery signs a fresh one', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      await send();
-      reply = { status: 403, body: '{"reason":"ExpiredProviderToken"}' };
-      await expect(send()).rejects.toThrow('APNs responded 403 ExpiredProviderToken');
-      vi.setSystemTime(Date.now() + 2_000);
-      reply = { status: 200 };
-      await send();
-      expect(captured[2]?.headers.authorization).not.toBe(captured[0]?.headers.authorization);
-    } finally {
-      vi.useRealTimers();
-    }
+  it.each(['InvalidProviderToken', 'ExpiredProviderToken'])(
+    'on %s re-reads the secret (a rotated key) and retries once in-process with a token signed by the new key',
+    async (reason) => {
+      const rotated = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      const secretsSend = vi
+        .fn()
+        .mockResolvedValueOnce({ SecretString: apnsSecret() })
+        .mockResolvedValue({
+          SecretString: apnsSecret({
+            keyId: 'KEYROTATED',
+            privateKey: rotated.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+          }),
+        });
+      const client = { send: secretsSend } as unknown as SecretsManagerClient;
+      replyQueue.push({ status: 403, body: JSON.stringify({ reason }) });
+
+      await expect(
+        sendViaApns(dispatch, {
+          secretId: 'apns-prod',
+          isTest: false,
+          secretsClient: client,
+          timeoutMs: 4_000,
+          origin,
+        }),
+      ).resolves.toMatchObject({ outcome: 'sent' });
+
+      expect(captured).toHaveLength(2);
+      expect(secretsSend).toHaveBeenCalledTimes(2);
+      const retried = decodeJwt(
+        String(captured[1]?.headers.authorization).slice('bearer '.length),
+        rotated.publicKey,
+      );
+      expect(retried.valid).toBe(true);
+      expect(retried.header.kid).toBe('KEYROTATED');
+    },
+  );
+
+  it('throws after one in-process retry when the credentials are still refused, leaving nothing cached', async () => {
+    const secretsSend = vi.fn().mockResolvedValue({ SecretString: apnsSecret() });
+    const client = { send: secretsSend } as unknown as SecretsManagerClient;
+    reply = { status: 403, body: '{"reason":"InvalidProviderToken"}' };
+    const options = {
+      secretId: 'apns-prod',
+      isTest: false,
+      secretsClient: client,
+      timeoutMs: 4_000,
+      origin,
+    };
+
+    await expect(sendViaApns(dispatch, options)).rejects.toThrow(
+      'APNs responded 403 InvalidProviderToken',
+    );
+    expect(captured).toHaveLength(2);
+    expect(secretsSend).toHaveBeenCalledTimes(2);
+
+    // The redelivery reads the secret again rather than reusing the refused key.
+    reply = { status: 200 };
+    await sendViaApns(dispatch, options);
+    expect(secretsSend).toHaveBeenCalledTimes(3);
   });
 
   it('rejects within the timeout when APNs accepts the stream but never answers', async () => {

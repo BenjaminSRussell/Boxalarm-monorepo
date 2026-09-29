@@ -49,6 +49,8 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
   let origin: string;
   const captured: Captured[] = [];
   let sendReply: { status: number; body: unknown } = { status: 200, body: { name: 'msg/1' } };
+  const sendReplyQueue: { status: number; body: unknown }[] = [];
+  const tokenReplyQueue: { status: number; body: unknown }[] = [];
   let tokenCounter = 0;
 
   beforeAll(async () => {
@@ -60,12 +62,19 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
         captured.push({ url: req.url ?? '', headers: req.headers, body });
         res.setHeader('content-type', 'application/json');
         if (req.url === '/token') {
+          const queued = tokenReplyQueue.shift();
+          if (queued) {
+            res.statusCode = queued.status;
+            res.end(JSON.stringify(queued.body));
+            return;
+          }
           tokenCounter += 1;
           res.end(JSON.stringify({ access_token: `access-${tokenCounter}`, expires_in: 3599 }));
           return;
         }
-        res.statusCode = sendReply.status;
-        res.end(JSON.stringify(sendReply.body));
+        const next = sendReplyQueue.shift() ?? sendReply;
+        res.statusCode = next.status;
+        res.end(JSON.stringify(next.body));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -79,6 +88,8 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
   afterEach(() => {
     captured.length = 0;
     sendReply = { status: 200, body: { name: 'msg/1' } };
+    sendReplyQueue.length = 0;
+    tokenReplyQueue.length = 0;
     tokenCounter = 0;
     resetPushCredentialCaches();
   });
@@ -249,14 +260,59 @@ describe('sendViaFcm (FCM HTTP v1 against a local server)', () => {
     await expect(send()).rejects.toThrow(`FCM responded ${status}`);
   });
 
-  it('drops the cached access token on 401 so the redelivery fetches a fresh one', async () => {
-    await send();
+  it.each([
+    ['401 UNAUTHENTICATED', 401, { error: { status: 'UNAUTHENTICATED' } }],
+    ['403 PERMISSION_DENIED', 403, { error: { status: 'PERMISSION_DENIED' } }],
+  ])(
+    'on %s evicts the secret and access token and retries once in-process with fresh ones',
+    async (_label, status, body) => {
+      const secretsSend = vi.fn().mockResolvedValue({ SecretString: SERVICE_ACCOUNT });
+      const options = {
+        secretId: 'fcm-prod',
+        isTest: false,
+        secretsClient: { send: secretsSend } as unknown as SecretsManagerClient,
+        timeoutMs: 4_000,
+        fcmOrigin: origin,
+        oauthTokenUrl: `${origin}/token`,
+      };
+      await sendViaFcm(dispatch, options);
+      sendReplyQueue.push({ status, body });
+
+      await expect(sendViaFcm(dispatch, options)).resolves.toMatchObject({ outcome: 'sent' });
+
+      expect(secretsSend).toHaveBeenCalledTimes(2);
+      expect(tokenRequests()).toHaveLength(2);
+      expect(sends().map((s) => s.headers.authorization)).toEqual([
+        'Bearer access-1',
+        'Bearer access-1',
+        'Bearer access-2',
+      ]);
+    },
+  );
+
+  it('throws after one in-process retry when FCM keeps refusing the credentials', async () => {
     sendReply = { status: 401, body: { error: { status: 'UNAUTHENTICATED' } } };
     await expect(send()).rejects.toThrow('FCM responded 401');
-    sendReply = { status: 200, body: { name: 'msg/2' } };
-    await send();
+    expect(sends()).toHaveLength(2);
     expect(tokenRequests()).toHaveLength(2);
-    expect(sends().at(-1)?.headers.authorization).toBe('Bearer access-2');
+  });
+
+  it('a token endpoint refusing the service account (400 invalid_grant) re-reads the key and retries once', async () => {
+    tokenReplyQueue.push({ status: 400, body: { error: 'invalid_grant' } });
+    await expect(send()).resolves.toMatchObject({ outcome: 'sent' });
+    expect(tokenRequests()).toHaveLength(2);
+    expect(sends()).toHaveLength(1);
+  });
+
+  it('a SENDER_ID_MISMATCH is not a credential problem: no in-process credential retry', async () => {
+    sendReply = {
+      status: 403,
+      body: {
+        error: { status: 'PERMISSION_DENIED', details: [{ errorCode: 'SENDER_ID_MISMATCH' }] },
+      },
+    };
+    await expect(send()).rejects.toThrow('FCM responded 403 SENDER_ID_MISMATCH');
+    expect(sends()).toHaveLength(1);
   });
 
   it.each(['project_id', 'client_email', 'private_key'])(

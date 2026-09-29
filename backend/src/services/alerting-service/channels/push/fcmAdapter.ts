@@ -1,5 +1,10 @@
 import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { discardFcmAccessToken, fcmAccessToken, loadFcmCredentials } from './pushCredentials.js';
+import {
+  evictPushCredentials,
+  fcmAccessToken,
+  loadFcmCredentials,
+  PushProviderAuthError,
+} from './pushCredentials.js';
 import {
   apnsCollapseId,
   buildApnsPayload,
@@ -81,7 +86,30 @@ function isTokenArgumentError(error: FcmErrorBody['error']): boolean {
   return namesTokenField || /registration token/i.test(error?.message ?? '');
 }
 
+/**
+ * A credential refusal (FCM 401, a 403 that is not a sender mismatch, or the token endpoint
+ * refusing the service account) evicts the cached secret and access token and is retried once
+ * in-process with freshly read credentials; see sendViaApns.
+ */
 export async function sendViaFcm(
+  notification: PushNotification,
+  options: SendViaFcmOptions,
+): Promise<PushSendResult> {
+  try {
+    return await sendViaFcmOnce(notification, options);
+  } catch (error) {
+    if (!(error instanceof PushProviderAuthError)) throw error;
+    evictPushCredentials(options.secretId);
+    try {
+      return await sendViaFcmOnce(notification, options);
+    } catch (retryError) {
+      if (retryError instanceof PushProviderAuthError) evictPushCredentials(options.secretId);
+      throw retryError;
+    }
+  }
+}
+
+async function sendViaFcmOnce(
   notification: PushNotification,
   options: SendViaFcmOptions,
 ): Promise<PushSendResult> {
@@ -126,8 +154,9 @@ export async function sendViaFcm(
   if (errorCode === 'INVALID_ARGUMENT' && isTokenArgumentError(error)) {
     return { outcome: 'invalid_token', reason: 'FCM_INVALID_ARGUMENT' };
   }
-  if (response.status === 401) {
-    discardFcmAccessToken(options.secretId, credentials);
+  const message = `FCM responded ${response.status} ${errorCode}`;
+  if (response.status === 401 || (response.status === 403 && errorCode !== 'SENDER_ID_MISMATCH')) {
+    throw new PushProviderAuthError(message);
   }
-  throw new Error(`FCM responded ${response.status} ${errorCode}`);
+  throw new Error(message);
 }

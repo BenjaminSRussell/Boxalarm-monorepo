@@ -200,11 +200,6 @@ export function apnsProviderToken(
   return token;
 }
 
-/** APNs said the provider token is expired or invalid — mint a fresh one on the next send. */
-export function discardApnsProviderToken(secretId: string, credentials: ApnsCredentials): void {
-  apnsJwtCache.delete(`${secretId}#${credentials.keyId}`);
-}
-
 export const FCM_OAUTH_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
 export const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 /** Google access tokens live 60 minutes; never hold one past 55. */
@@ -259,7 +254,11 @@ export async function fcmAccessToken(
     signal: AbortSignal.timeout(options.timeoutMs),
   });
   if (!response.ok) {
-    throw new Error(`FCM OAuth token endpoint responded ${response.status}`);
+    const message = `FCM OAuth token endpoint responded ${response.status}`;
+    // 400 invalid_grant / 401 invalid_client: the service-account key itself was refused.
+    throw response.status === 400 || response.status === 401
+      ? new PushProviderAuthError(message)
+      : new Error(message);
   }
   const body = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
   if (typeof body.access_token !== 'string' || body.access_token.length === 0) {
@@ -273,10 +272,24 @@ export async function fcmAccessToken(
   return body.access_token;
 }
 
-/** FCM answered 401 — the cached access token is no good; fetch a fresh one next send. */
-export function discardFcmAccessToken(secretId: string, credentials: FcmCredentials): void {
-  fcmAccessTokenCache.delete(`${secretId}#${credentials.clientEmail}`);
+/**
+ * The gateway rejected our credentials (APNs InvalidProviderToken/ExpiredProviderToken, FCM
+ * 401/403, or the Google token endpoint refusing the service account). The usual cause is a
+ * rotated or revoked key, so dropping only the signed token is not enough: the cached secret
+ * still holds the old key and would sign another bad token for up to the secret TTL. Evict
+ * the secret and every token minted from it, so the next attempt reads the key afresh.
+ */
+export function evictPushCredentials(secretId: string): void {
+  secretCache.delete(secretId);
+  for (const cache of [apnsJwtCache, fcmAccessTokenCache]) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(`${secretId}#`)) cache.delete(key);
+    }
+  }
 }
+
+/** A credential refusal — see evictPushCredentials. Retried once in-process with fresh keys. */
+export class PushProviderAuthError extends Error {}
 
 export function resetPushCredentialCaches(): void {
   secretCache.clear();

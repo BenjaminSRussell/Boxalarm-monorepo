@@ -2,8 +2,9 @@ import { connect, constants, type ClientHttp2Session, type OutgoingHttpHeaders }
 import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import {
   apnsProviderToken,
-  discardApnsProviderToken,
+  evictPushCredentials,
   loadApnsCredentials,
+  PushProviderAuthError,
 } from './pushCredentials.js';
 import {
   apnsCollapseId,
@@ -212,13 +213,38 @@ function apnsReason(body: string): string | undefined {
   }
 }
 
+const APNS_AUTH_FAILURES = new Set([
+  'ExpiredProviderToken',
+  'InvalidProviderToken',
+  'MissingProviderToken',
+]);
+
 /**
  * Token-based (.p8) APNs send over HTTP/2. 200 → sent; 410 or BadDeviceToken → the token is
  * dead (invalid_token, not retried); anything else throws so SQS redelivers and the send
- * guard's FAILED re-claim path re-attempts. An expired/invalid provider token is discarded
- * first so the redelivery signs a fresh one.
+ * guard's FAILED re-claim path re-attempts. A provider-credential refusal evicts the cached
+ * secret and token and is retried once in-process with freshly read credentials, so a key
+ * rotation costs one extra round trip rather than a dead-lettered page.
  */
 export async function sendViaApns(
+  notification: PushNotification,
+  options: SendViaApnsOptions,
+): Promise<PushSendResult> {
+  try {
+    return await sendViaApnsOnce(notification, options);
+  } catch (error) {
+    if (!(error instanceof PushProviderAuthError)) throw error;
+    evictPushCredentials(options.secretId);
+    try {
+      return await sendViaApnsOnce(notification, options);
+    } catch (retryError) {
+      if (retryError instanceof PushProviderAuthError) evictPushCredentials(options.secretId);
+      throw retryError;
+    }
+  }
+}
+
+async function sendViaApnsOnce(
   notification: PushNotification,
   options: SendViaApnsOptions,
 ): Promise<PushSendResult> {
@@ -253,8 +279,9 @@ export async function sendViaApns(
   if (response.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
     return { outcome: 'invalid_token', reason: `APNS_${reason}` };
   }
-  if (reason === 'ExpiredProviderToken' || reason === 'InvalidProviderToken') {
-    discardApnsProviderToken(options.secretId, credentials);
+  const message = `APNs responded ${response.status} ${reason}`;
+  if (APNS_AUTH_FAILURES.has(reason)) {
+    throw new PushProviderAuthError(message);
   }
-  throw new Error(`APNs responded ${response.status} ${reason}`);
+  throw new Error(message);
 }
